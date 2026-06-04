@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu } = require('electron');
+const { app, BrowserWindow, Menu, shell } = require('electron');
 const path = require('path');
 
 // GitHub repo polled for the latest published release (update notifier).
@@ -71,6 +71,19 @@ function createWindow() {
       { role: 'windowMenu' },
     ])
   );
+
+  // Hardening (defense-in-depth around the Node-enabled renderer): the app is a
+  // single local page, so open external links in the OS browser rather than an
+  // in-app window, and block any navigation away from index.html. This caps the
+  // blast radius of any injected content — it can't load a remote page into a
+  // context that has Node access. (Full contextIsolation is tracked separately.)
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url !== win.webContents.getURL()) e.preventDefault();
+  });
 
   win.loadFile(path.join(__dirname, 'index.html'));
   // Check for a newer release once the page is live and its IPC listener is up.
