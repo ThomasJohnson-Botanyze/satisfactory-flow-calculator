@@ -39,5 +39,21 @@ check('item datalist populated from bundled data', D.querySelectorAll('#itemList
 check('save features degrade gracefully without window.api', !!D.getElementById('saveSelect'));
 check('no Node require leaked into the page global', typeof window.require === 'undefined');
 
+// Regression: the bundled LP solver must actually Solve. The Node CJS build of
+// javascript-lp-solver does `module.exports = solver`, but esbuild's browser
+// target picks the ESM build (`export { solver as default }`), so a bare
+// solver.Solve is undefined in the bundle — planner/optimizer/max throw
+// "Solve is not a function". This only reproduces in the bundle (jsdom requiring
+// renderer.js directly uses the CJS build), so it must be checked here.
+let solveError = null;
+try {
+  const ti = D.getElementById('targetItem'), tr = D.getElementById('targetRate');
+  ti.value = 'Iron Plate'; ti.dispatchEvent(new window.Event('input', { bubbles: true }));
+  tr.value = '20'; tr.dispatchEvent(new window.Event('input', { bubbles: true }));
+} catch (e) { solveError = e; }
+const planRows = D.querySelectorAll('#output table tbody tr').length;
+check('bundled LP solver produces a plan (planner solves)', !solveError && planRows > 0);
+if (solveError) console.error('   solve threw: ' + (solveError && solveError.message || solveError));
+
 console.log(`\n${fail === 0 ? '✅ BUNDLE OK' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

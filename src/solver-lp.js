@@ -3,7 +3,16 @@
 // Variables = machine counts m_i (>=0, at 100% clock) per recipe.
 // recipeCost scales every recipe's ingredient amounts (Recipe Parts Cost Multiplier).
 // powerMult scales every building's power draw (Power Consumption Multiplier).
-const solver = require('javascript-lp-solver');
+// javascript-lp-solver ships different export shapes per environment: the Node
+// CJS build does `module.exports = solver` (so require() gives the instance with
+// .Solve), but the browser ESM build does `export { solver as default }`. When
+// esbuild bundles the renderer with --platform=browser it picks the browser
+// build, and the interop hands back `{ default: solver }` — so a bare
+// `solver.Solve` is undefined in the packaged app (planner/optimizer/max all
+// silently throw "Solve is not a function"). Normalize to the instance that
+// actually carries .Solve, covering both shapes.
+const _lp = require('javascript-lp-solver');
+const solver = (_lp && typeof _lp.Solve === 'function') ? _lp : ((_lp && _lp.default) || _lp);
 const DATA = require('./data.json');
 
 const RECIPES = DATA.recipes;
