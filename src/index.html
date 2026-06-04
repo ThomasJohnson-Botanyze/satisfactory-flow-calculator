@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <title>Satisfactory Flow Calculator</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">⚙</span>
+        <div>
+          <h1>Satisfactory Flow Calculator</h1>
+          <p class="sub">Production planner · recipe optimizer · clean-ratio throughput</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button id="btnReset" class="btn ghost" title="Reset planner recipe choices to standard">Reset recipes</button>
+        <button id="btnClear" class="btn ghost" title="Clear saved plan">Clear plan</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-mode="planner">Planner</button>
+      <button class="tab" data-mode="optimize">Recipe Optimizer</button>
+      <button class="tab" data-mode="max">Max Throughput</button>
+    </nav>
+
+    <main class="layout">
+      <aside class="panel controls">
+        <!-- ============ PLANNER ============ -->
+        <div class="mode-panel" data-mode="planner">
+          <section class="ctl-group">
+            <h2>Target</h2>
+            <label class="fld">
+              <span>Item</span>
+              <input id="targetItem" list="itemList" placeholder="Type an item…" autocomplete="off" />
+            </label>
+            <label class="fld">
+              <span>Rate <small id="rateUnit">/ min</small></span>
+              <input id="targetRate" type="number" min="0" step="any" value="60" />
+            </label>
+          </section>
+
+          <section class="ctl-group">
+            <h2>Game-mode cost options</h2>
+            <div class="slider">
+              <div class="slider-head"><span>Overclock</span><output id="clockOut">100%</output></div>
+              <input id="clock" type="range" min="1" max="250" step="1" value="100" />
+              <small class="hint">Power per machine scales by clock^1.32</small>
+            </div>
+            <div class="slider">
+              <div class="slider-head"><span>Somersloop amplification</span><output id="sloopOut">1.0×</output></div>
+              <input id="sloop" type="range" min="100" max="400" step="50" value="100" />
+              <small class="hint">Output ×amp, power ×amp² (production amplification)</small>
+            </div>
+            <div class="slider">
+              <div class="slider-head"><span>Recipe input cost</span><output id="costOut">1.00×</output></div>
+              <input id="cost" type="range" min="25" max="400" step="5" value="100" />
+              <small class="hint">Scales every recipe's ingredient amounts (custom game mode)</small>
+            </div>
+          </section>
+        </div>
+
+        <!-- ============ OPTIMIZER ============ -->
+        <div class="mode-panel" data-mode="optimize" hidden>
+          <section class="ctl-group">
+            <h2>Desired outputs</h2>
+            <div id="optOutputs" class="rowlist"></div>
+            <button id="optAddOutput" class="btn mini ghost">+ add output</button>
+          </section>
+
+          <section class="ctl-group">
+            <h2>Allowed input resources</h2>
+            <p class="hint" style="margin-top:-6px">Tick what you can supply. Leave cap blank = unlimited.</p>
+            <div class="chip-toolbar">
+              <button id="optAllInputs" class="btn mini ghost">All</button>
+              <button id="optNoInputs" class="btn mini ghost">None</button>
+            </div>
+            <div id="optInputs" class="reslist"></div>
+          </section>
+
+          <section class="ctl-group">
+            <h2>Optimize for</h2>
+            <select id="optObjective" class="sel">
+              <option value="raw">Fewest raw resources</option>
+              <option value="power">Lowest power</option>
+              <option value="machines">Fewest machines</option>
+            </select>
+            <label class="check"><input type="checkbox" id="optAlts" checked /> Consider alternate recipes</label>
+          </section>
+        </div>
+
+        <!-- ============ MAX THROUGHPUT ============ -->
+        <div class="mode-panel" data-mode="max" hidden>
+          <section class="ctl-group">
+            <h2>Available inputs</h2>
+            <p class="hint" style="margin-top:-6px">Set how much of each resource you have (per&nbsp;min).</p>
+            <div id="maxSupply" class="rowlist"></div>
+            <button id="maxAddSupply" class="btn mini ghost">+ add input</button>
+          </section>
+
+          <section class="ctl-group">
+            <h2>Maximize output of</h2>
+            <label class="fld">
+              <input id="maxProduct" list="itemList" placeholder="Type an item…" autocomplete="off" />
+            </label>
+            <label class="check"><input type="checkbox" id="maxAlts" checked /> Consider alternate recipes</label>
+          </section>
+        </div>
+
+        <!-- ============ SHARED SUMMARY ============ -->
+        <section class="ctl-group summary">
+          <h2>Summary</h2>
+          <div id="maxBanner" class="banner" hidden></div>
+          <div class="stat"><span>Total power</span><b id="sumPower">—</b></div>
+          <div class="stat"><span>Production machines</span><b id="sumMachines">—</b></div>
+          <div class="stat"><span id="sumExtraLabel">Raw resource types</span><b id="sumRaw">—</b></div>
+          <div id="warnBox" class="warn" hidden></div>
+        </section>
+      </aside>
+
+      <section class="panel results">
+        <div id="empty" class="empty"><p id="emptyMsg">Pick a target item to build a production flow.</p></div>
+
+        <div id="output" hidden>
+          <div id="modeExtras"></div>
+
+          <h2 class="block-title">Production steps</h2>
+          <div class="table-wrap">
+            <table id="prodTable">
+              <thead>
+                <tr><th>Item</th><th>Recipe</th><th class="num">Rate</th><th class="num">Machines</th><th>Building</th><th class="num">Power</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="two-col">
+            <div>
+              <h2 class="block-title">Raw resources</h2>
+              <div class="table-wrap">
+                <table id="rawTable"><thead><tr><th>Resource</th><th class="num">Rate / min</th></tr></thead><tbody></tbody></table>
+              </div>
+            </div>
+            <div>
+              <h2 class="block-title">Buildings</h2>
+              <div class="table-wrap">
+                <table id="bldTable"><thead><tr><th>Building</th><th class="num">Count</th><th class="num">Power</th></tr></thead><tbody></tbody></table>
+              </div>
+            </div>
+          </div>
+
+          <div id="byprodWrap" hidden>
+            <h2 class="block-title" id="byprodTitle">By-products / surplus</h2>
+            <div class="table-wrap">
+              <table id="byprodTable"><thead><tr><th>Item</th><th class="num">Rate / min</th></tr></thead><tbody></tbody></table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <datalist id="itemList"></datalist>
+    <script src="renderer.js"></script>
+  </body>
+</html>

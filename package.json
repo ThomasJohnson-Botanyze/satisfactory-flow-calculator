@@ -1,0 +1,49 @@
+{
+  "name": "satisfactory-flow-calculator",
+  "version": "1.0.0",
+  "description": "Desktop production-flow planner for Satisfactory with alternate recipes and game-mode cost sliders",
+  "main": "src/main.js",
+  "author": "tjjr",
+  "license": "MIT",
+  "scripts": {
+    "data": "node scripts/transform.js",
+    "start": "electron .",
+    "test:ui": "node scripts/ui-test.js",
+    "package": "electron-packager . SatisfactoryFlowCalculator --platform=win32 --arch=x64 --out \"C:/Users/tjjrj/build-out\" --overwrite --app-version=1.0.0 --prune=true",
+    "dist": "electron-builder --win",
+    "dist:portable": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.tjjr.satisfactoryflow",
+    "productName": "Satisfactory Flow Calculator",
+    "directories": {
+      "output": "C:/Users/tjjrj/build-out/satisfactory-flow"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "artifactName": "SatisfactoryFlowCalculator-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.0.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "jsdom": "^29.1.1"
+  },
+  "dependencies": {
+    "javascript-lp-solver": "^1.0.3"
+  }
+}
