@@ -205,7 +205,86 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-.layout { height: calc(100% - 64px - 43px); }
+.layout { height: calc(100% - 64px - 43px - 45px); }
+
+/* factory plan bar */
+.plan-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: #14161b;
+  border-bottom: 1px solid var(--line);
+  min-height: 45px;
+  overflow-x: auto;
+}
+.plan-bar-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  flex: none;
+}
+.plan-tabs { display: flex; gap: 4px; flex: 1; min-width: 0; overflow-x: auto; }
+.plan-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px 7px 0 0;
+  padding: 5px 6px 5px 11px;
+  cursor: pointer;
+  flex: none;
+  max-width: 200px;
+}
+.plan-tab:hover { border-color: #4a5161; }
+.plan-tab.active { background: var(--accent); border-color: var(--accent); }
+.plan-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.plan-tab.active .plan-name { color: #1a1300; }
+.plan-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 3px;
+  border-radius: 4px;
+}
+.plan-close:hover { color: var(--warn); background: rgba(0, 0, 0, 0.15); }
+.plan-tab.active .plan-close { color: #5a4a14; }
+.plan-tab.active .plan-close:hover { color: #7a1a14; }
+.plan-rename {
+  width: 120px;
+  background: #11141a;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 3px 6px;
+}
+.plan-rename:focus { outline: none; }
+.plan-add {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex: none;
+}
+.plan-add:hover { color: var(--accent); border-color: var(--accent); }
+.plan-add.ghost-add { color: var(--muted); }
 
 /* small buttons / selects / checks */
 .btn.mini { padding: 5px 10px; font-size: 12px; }

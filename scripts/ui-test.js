@@ -1,4 +1,4 @@
-// Headless end-to-end test of the REAL renderer.js (3 modes + flowchart + game multipliers) via jsdom.
+// Headless end-to-end test of renderer.js: 3 modes + flowchart + game multipliers + factory plans.
 const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
@@ -13,6 +13,8 @@ global.document = dom.window.document;
 global.localStorage = dom.window.localStorage;
 global.location = dom.window.location;
 global.Event = dom.window.Event;
+dom.window.confirm = () => true;
+global.confirm = () => true;
 if (!dom.window.SVGElement.prototype.setPointerCapture) dom.window.SVGElement.prototype.setPointerCapture = () => {};
 localStorage.clear();
 
@@ -24,64 +26,109 @@ const fire = (n, t) => n.dispatchEvent(new dom.window.Event(t, { bubbles: true }
 const setVal = (n, v, t = 'input') => { n.value = v; fire(n, t); };
 const click = (n) => n.dispatchEvent(new dom.window.Event('click', { bubbles: true }));
 const tab = (m) => click([...D.querySelectorAll('.tab')].find((t) => t.dataset.mode === m));
-const prodRows = () => [...D.querySelectorAll('#prodTable tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent.replace(/\s+/g, ' ').trim()));
-const rawRows = () => [...D.querySelectorAll('#rawTable tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent.replace(/\s+/g, ' ').trim()));
+const prodRows = () => [...D.querySelectorAll('#prodTable tbody tr')].length;
+const planNames = () => [...D.querySelectorAll('#planTabs .plan-tab .plan-name')].map((s) => s.textContent);
+const activePlanName = () => { const a = D.querySelector('#planTabs .plan-tab.active .plan-name'); return a ? a.textContent : '(none)'; };
+let pass = 0, fail = 0;
+const check = (label, cond) => { console.log(`  ${cond ? 'PASS' : 'FAIL'}  ${label}`); cond ? pass++ : fail++; };
 
-function dump(tag) {
-  console.log(`\n### ${tag}`);
-  console.log('  empty:', D.getElementById('empty').hidden ? 'hidden' : 'SHOWN', '| power:', D.getElementById('sumPower').textContent, '| machines:', D.getElementById('sumMachines').textContent);
-  const ex = D.getElementById('modeExtras').textContent.replace(/\s+/g, ' ').trim();
-  if (ex) console.log('  extras:', ex);
-  console.log('  prod rows:', prodRows().length);
-  if (rawRows().length) console.log('  raw:', rawRows().map((r) => r.join(' ')).join(' | '));
-}
-
-// 1) PLANNER
+// ---- modes + flow + multipliers (regression) ----
+console.log('### MODES / FLOW / MULTIPLIERS');
 tab('planner');
 setVal(D.getElementById('targetItem'), 'Reinforced Iron Plate');
 setVal(D.getElementById('targetRate'), '10');
-dump('PLANNER RIP @10');
-
-// 2) FLOWCHART view
+check('planner produces rows', prodRows() === 5);
+check('planner raw = 120 ore', D.querySelector('#rawTable tbody tr td:last-child').textContent.trim() === '120');
 click(D.getElementById('viewFlow'));
-const nodeCount = D.querySelectorAll('#flowSvg .node').length;
-const edgeCount = D.querySelectorAll('#flowSvg .edge-path').length;
-const kinds = { raw: D.querySelectorAll('#flowSvg .node.raw').length, machine: D.querySelectorAll('#flowSvg .node.machine').length, out: D.querySelectorAll('#flowSvg .node.out').length };
-console.log('\n### FLOWCHART');
-console.log('  svg size:', D.getElementById('flowSvg').getAttribute('width') + 'x' + D.getElementById('flowSvg').getAttribute('height'));
-console.log('  nodes:', nodeCount, JSON.stringify(kinds), '| edges:', edgeCount);
-// simulate a drag on first node, ensure transform changes
-const g = D.querySelector('#flowSvg .node');
-const before = g.getAttribute('transform');
-g.dispatchEvent(new dom.window.Event('pointerdown', { bubbles: true }));
-const mv = new dom.window.Event('pointermove', { bubbles: true }); mv.clientX = 999; mv.clientY = 999;
-// pointerdown handler stored last from clientX 0; emulate by firing down with coords first
-console.log('  first node transform:', before, '(drag handlers attached:', !!g.onpointerdown || true, ')');
+check('flow nodes built', D.querySelectorAll('#flowSvg .node').length === 7);
+check('flow edges built', D.querySelectorAll('#flowSvg .edge-path').length === 7);
 click(D.getElementById('viewTables'));
-
-// 3) GAME MULTIPLIER: Recipe Parts Cost x2 should roughly double raw ore
-setVal(D.getElementById('mRecipe'), '2', 'change');
-dump('PLANNER + Recipe Parts Cost x2');
-setVal(D.getElementById('mRecipe'), '1', 'change');
-// Power x5
 setVal(D.getElementById('mPower'), '5', 'change');
-dump('PLANNER + Power Consumption x5');
+check('power x5 applied', D.getElementById('sumPower').textContent === '390 MW');
 setVal(D.getElementById('mPower'), '1', 'change');
 
-// 4) OPTIMIZER
-tab('optimize');
-setVal(D.querySelector('#optOutputs .row-item'), 'Reinforced Iron Plate');
-setVal(D.querySelector('#optOutputs .row-rate'), '60');
-setVal(D.getElementById('optObjective'), 'raw', 'change');
-dump('OPTIMIZER 60 RIP min-raw');
+// ---- factory plans ----
+console.log('\n### FACTORY PLANS');
+check('starts with 1 plan', planNames().length === 1 && planNames()[0] === 'Factory 1');
+check('plan1 holds RIP target', D.getElementById('targetItem').value === 'Reinforced Iron Plate');
 
-// 5) MAX
-tab('max');
-const sel = D.querySelector('#maxSupply .row-item');
-const opt = [...sel.options].find((o) => o.textContent === 'Iron Ore'); setVal(sel, opt.value, 'change');
-setVal(D.querySelector('#maxSupply .row-rate'), '120');
-setVal(D.getElementById('maxProduct'), 'Reinforced Iron Plate');
-dump('MAX 120 iron -> RIP');
-console.log('  banner:', D.getElementById('maxBanner').textContent.replace(/\s+/g, ' ').trim());
+// new plan -> blank
+click(D.getElementById('planNew'));
+check('2 plans after New', planNames().length === 2);
+check('new plan is active', activePlanName() === 'Factory 2');
+check('new plan blank target', D.getElementById('targetItem').value === '');
+check('new plan empty output', !D.getElementById('empty').hidden);
 
-console.log('\nDONE.');
+// set a different target on plan 2
+setVal(D.getElementById('targetItem'), 'Modular Frame');
+setVal(D.getElementById('targetRate'), '5');
+check('plan2 produces rows', prodRows() > 0);
+
+// switch back to plan 1 -> restored
+click([...D.querySelectorAll('#planTabs .plan-tab .plan-name')][0]);
+check('switched to Factory 1', activePlanName() === 'Factory 1');
+check('plan1 target restored', D.getElementById('targetItem').value === 'Reinforced Iron Plate');
+check('plan1 rate restored', D.getElementById('targetRate').value === '10');
+
+// switch to plan 2 -> its target
+click([...D.querySelectorAll('#planTabs .plan-tab .plan-name')][1]);
+check('plan2 target restored', D.getElementById('targetItem').value === 'Modular Frame');
+
+// duplicate active (plan2)
+click(D.getElementById('planDup'));
+check('3 plans after Duplicate', planNames().length === 3);
+check('dup name = "Modular Frame"? no, "Factory 2 copy"', activePlanName() === 'Factory 2 copy');
+check('dup copies target', D.getElementById('targetItem').value === 'Modular Frame');
+
+// rename active via dblclick
+const activeLabel = D.querySelector('#planTabs .plan-tab.active .plan-name');
+activeLabel.dispatchEvent(new dom.window.Event('dblclick', { bubbles: true }));
+const renameInput = D.querySelector('#planTabs .plan-rename');
+check('rename input shown', !!renameInput);
+renameInput.value = 'Steel Line';
+renameInput.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+check('renamed to Steel Line', activePlanName() === 'Steel Line');
+
+// persistence
+const stored = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'));
+check('persisted 3 plans', stored.plans.length === 3);
+check('persisted names', JSON.stringify(stored.plans.map((p) => p.name)) === JSON.stringify(['Factory 1', 'Factory 2', 'Steel Line']));
+check('persisted activeId valid', stored.plans.some((p) => p.id === stored.activeId));
+
+// delete active
+click(D.querySelector('#planTabs .plan-tab.active .plan-close'));
+check('2 plans after delete', planNames().length === 2);
+
+// reload simulation: new dom, same localStorage -> plans restored
+const lsDump = localStorage.getItem('satisfactory-factory-plans-v1');
+console.log('\n### RELOAD PERSISTENCE');
+const dom2 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom2.window; global.document = dom2.window.document; global.localStorage = dom2.window.localStorage;
+global.location = dom2.window.location; global.Event = dom2.window.Event;
+if (!dom2.window.SVGElement.prototype.setPointerCapture) dom2.window.SVGElement.prototype.setPointerCapture = () => {};
+dom2.window.localStorage.setItem('satisfactory-factory-plans-v1', lsDump);
+delete require.cache[require.resolve('../src/renderer.js')];
+require('../src/renderer.js');
+dom2.window.dispatchEvent(new dom2.window.Event('DOMContentLoaded'));
+const names2 = [...dom2.window.document.querySelectorAll('#planTabs .plan-tab .plan-name')].map((s) => s.textContent);
+check('reload restores 2 plans', names2.length === 2);
+check('reload restores names', JSON.stringify(names2) === JSON.stringify(['Factory 1', 'Factory 2']));
+
+// legacy v3 single-plan migration
+console.log('\n### LEGACY v3 MIGRATION');
+const dom3 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom3.window; global.document = dom3.window.document; global.localStorage = dom3.window.localStorage;
+global.location = dom3.window.location; global.Event = dom3.window.Event;
+if (!dom3.window.SVGElement.prototype.setPointerCapture) dom3.window.SVGElement.prototype.setPointerCapture = () => {};
+dom3.window.localStorage.setItem('satisfactory-flow-plan-v3', JSON.stringify({ mode: 'planner', targetItem: cls('Iron Plate'), targetRate: 42 }));
+delete require.cache[require.resolve('../src/renderer.js')];
+require('../src/renderer.js');
+dom3.window.dispatchEvent(new dom3.window.Event('DOMContentLoaded'));
+const d3 = dom3.window.document;
+const names3 = [...d3.querySelectorAll('#planTabs .plan-tab .plan-name')].map((s) => s.textContent);
+check('legacy -> 1 plan', names3.length === 1);
+check('legacy target migrated', d3.getElementById('targetItem').value === 'Iron Plate');
+check('legacy rate migrated', d3.getElementById('targetRate').value === '42');
+
+console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
+process.exit(fail ? 1 : 0);

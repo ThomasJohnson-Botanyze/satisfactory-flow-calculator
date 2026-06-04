@@ -39,11 +39,18 @@ async function main() {
     function setv(n,v,t){n.value=v;n.dispatchEvent(new Event(t||'input',{bubbles:true}));}
   `;
 
-  console.log('PLANNER');
+  console.log('SETUP PLANS');
   await evalJs(`${helpers}
     tab('planner');
+    setv(document.getElementById('targetItem'),'Reinforced Iron Plate','input');
+    setv(document.getElementById('targetRate'),'15','input');
+    document.getElementById('planNew').click();
     setv(document.getElementById('targetItem'),'Modular Frame','input');
     setv(document.getElementById('targetRate'),'10','input');
+    document.getElementById('planNew').click();
+    setv(document.getElementById('targetItem'),'Rotor','input');
+    setv(document.getElementById('targetRate'),'20','input');
+    document.querySelectorAll('#planTabs .plan-name')[1].click();
     document.getElementById('viewTables').click();
     return 'ok';`);
   await sleep(400); await shot('m-planner');

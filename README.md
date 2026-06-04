@@ -5,6 +5,17 @@ sliders for new game-mode recipe-cost options. Built with Electron, ships as a W
 
 ![panel](src/index.html)
 
+## Factory plans (multiple calculators)
+
+A **plan bar** above the mode tabs holds any number of independent factory plans — each its own
+calculator + flowchart with its own mode, target/inputs, recipe picks, multipliers, and view. Like the
+online tool's tabs.
+
+- **＋ New** — start a blank plan. **⧉ Duplicate** — clone the active plan.
+- Click a tab to switch; **double-click** the name to rename; **×** deletes (with confirm).
+- Everything auto-saves to local storage and is restored on relaunch. Existing single-plan setups
+  migrate automatically into "Factory 1".
+
 ## Three modes (tabs)
 
 ### Views (all modes)

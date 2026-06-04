@@ -78,17 +78,71 @@ const defaultState = () => ({
 });
 let state = defaultState();
 
-const LS_KEY = 'satisfactory-flow-plan-v3';
-const save = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {} };
+// ---------- factory plans (multiple saved calculators) ----------
+let plans = [];
+let activeId = null;
+const newId = () => 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const activePlan = () => plans.find((p) => p.id === activeId);
+
+const LS_KEY = 'satisfactory-flow-plan-v3'; // legacy single-plan store (migration source)
+const PLANS_KEY = 'satisfactory-factory-plans-v1'; // multi-plan store
+
+function mergeState(s) {
+  const m = Object.assign(defaultState(), s || {});
+  m.opt = Object.assign(defaultState().opt, (s && s.opt) || {});
+  m.max = Object.assign(defaultState().max, (s && s.max) || {});
+  return m;
+}
+const save = () => {
+  try {
+    localStorage.setItem(PLANS_KEY, JSON.stringify({ plans: plans.map((p) => ({ id: p.id, name: p.name, state: p.state })), activeId }));
+  } catch (e) {}
+};
 function load() {
   try {
-    const s = JSON.parse(localStorage.getItem(LS_KEY));
-    if (s && typeof s === 'object') {
-      state = Object.assign(defaultState(), s);
-      state.opt = Object.assign(defaultState().opt, s.opt || {});
-      state.max = Object.assign(defaultState().max, s.max || {});
+    const raw = JSON.parse(localStorage.getItem(PLANS_KEY));
+    if (raw && Array.isArray(raw.plans) && raw.plans.length) {
+      plans = raw.plans.map((p) => ({ id: p.id || newId(), name: p.name || 'Factory', state: mergeState(p.state) }));
+      activeId = plans.some((p) => p.id === raw.activeId) ? raw.activeId : plans[0].id;
+      state = activePlan().state;
+      return;
     }
   } catch (e) {}
+  // migrate legacy single plan, else start with one blank plan
+  let legacy = null;
+  try { const s = JSON.parse(localStorage.getItem(LS_KEY)); if (s && typeof s === 'object') legacy = mergeState(s); } catch (e) {}
+  plans = [{ id: newId(), name: 'Factory 1', state: legacy || defaultState() }];
+  activeId = plans[0].id;
+  state = plans[0].state;
+}
+
+function newPlan(name) {
+  const p = { id: newId(), name: name || `Factory ${plans.length + 1}`, state: defaultState() };
+  plans.push(p);
+  switchPlan(p.id);
+}
+function duplicatePlan(id) {
+  const src = plans.find((p) => p.id === id) || activePlan();
+  const p = { id: newId(), name: src.name + ' copy', state: mergeState(JSON.parse(JSON.stringify(src.state))) };
+  plans.push(p);
+  switchPlan(p.id);
+}
+function deletePlan(id) {
+  const idx = plans.findIndex((p) => p.id === id);
+  if (idx < 0) return;
+  if (plans.length > 1 && typeof confirm === 'function' && !confirm(`Delete plan "${plans[idx].name}"?`)) return;
+  plans.splice(idx, 1);
+  if (!plans.length) plans.push({ id: newId(), name: 'Factory 1', state: defaultState() });
+  if (id === activeId) activeId = plans[Math.max(0, idx - 1)].id;
+  switchPlan(activeId);
+}
+function renamePlan(id, name) { const p = plans.find((x) => x.id === id); if (p && name) { p.name = name; save(); renderPlanBar(); } }
+function switchPlan(id) {
+  activeId = id;
+  state = activePlan().state;
+  save();
+  renderPlanBar();
+  applyStateToControls();
 }
 
 // ---------- planner solver ----------
@@ -659,24 +713,51 @@ function setMode(mode) {
   solveAndRender();
 }
 
+// ---------- plan bar ----------
+function renderPlanBar() {
+  const box = $('planTabs');
+  if (!box) return;
+  box.innerHTML = '';
+  plans.forEach((p) => {
+    const tab = el('div', 'plan-tab' + (p.id === activeId ? ' active' : ''));
+    const lab = el('span', 'plan-name', p.name);
+    lab.title = 'Click to open · double-click to rename';
+    lab.addEventListener('click', () => { if (p.id !== activeId) switchPlan(p.id); });
+    lab.addEventListener('dblclick', () => startRename(tab, lab, p));
+    tab.appendChild(lab);
+    const x = el('button', 'plan-close', '×');
+    x.title = 'Delete this plan';
+    x.addEventListener('click', (e) => { e.stopPropagation(); deletePlan(p.id); });
+    tab.appendChild(x);
+    box.appendChild(tab);
+  });
+}
+function startRename(tab, lab, p) {
+  const inp = el('input', 'plan-rename');
+  inp.value = p.name;
+  tab.replaceChild(inp, lab);
+  inp.focus(); inp.select();
+  let done = false;
+  const commit = () => { if (done) return; done = true; renamePlan(p.id, inp.value.trim() || p.name); };
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); else if (e.key === 'Escape') { done = true; renderPlanBar(); } });
+  inp.addEventListener('blur', commit);
+}
+
 // ---------- wiring ----------
 function syncSliderLabels() {
   $('clockOut').textContent = Math.round(state.clock * 100) + '%';
   $('sloopOut').textContent = fmt(state.sloop, 1) + '×';
 }
-function init() {
-  load();
-  buildItemList();
+// Push the active plan's state into every control, then render.
+function applyStateToControls() {
   buildOptOutputs();
   buildOptInputs();
   buildMaxSupply();
   buildGameSelect('mRecipe', GAME.recipe, state.recipeCost);
   buildGameSelect('mPower', GAME.power, state.powerMult);
   buildGameSelect('mSpace', GAME.space, state.spaceMult);
-  buildSaveList();
   renderSaveStatus();
-
-  if (state.targetItem) $('targetItem').value = itemName(state.targetItem);
+  $('targetItem').value = state.targetItem ? itemName(state.targetItem) : '';
   $('targetRate').value = state.targetRate;
   $('clock').value = Math.round(state.clock * 100);
   $('sloop').value = Math.round(state.sloop * 100);
@@ -686,6 +767,12 @@ function init() {
   $('optAlts').checked = state.opt.alts;
   $('maxProduct').value = state.max.product ? itemName(state.max.product) : '';
   $('maxAlts').checked = state.max.alts;
+  setMode(state.mode);
+}
+function init() {
+  load();
+  buildItemList();
+  buildSaveList();
 
   document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setMode(t.dataset.mode)));
   $('viewTables').addEventListener('click', () => { state.view = 'tables'; save(); applyView(); });
@@ -718,9 +805,12 @@ function init() {
   $('maxProduct').addEventListener('input', (e) => { if (nameToClass(e.target.value)) onProduct(e.target.value); });
   $('maxAlts').addEventListener('change', (e) => { state.max.alts = e.target.checked; save(); solveAndRender(); });
 
+  $('planNew').addEventListener('click', () => newPlan());
+  $('planDup').addEventListener('click', () => duplicatePlan(activeId));
   $('btnReset').addEventListener('click', () => { state.picks = {}; save(); solveAndRender(); });
-  $('btnClear').addEventListener('click', () => { localStorage.removeItem(LS_KEY); location.reload(); });
+  $('btnClear').addEventListener('click', () => { const p = activePlan(); p.state = defaultState(); state = p.state; save(); applyStateToControls(); });
 
-  setMode(state.mode);
+  renderPlanBar();
+  applyStateToControls();
 }
 window.addEventListener('DOMContentLoaded', init);
