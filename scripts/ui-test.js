@@ -163,5 +163,34 @@ check('legacy -> 1 plan', names3.length === 1);
 check('legacy target migrated', d3.getElementById('targetItem').value === 'Iron Plate');
 check('legacy rate migrated', d3.getElementById('targetRate').value === '42');
 
+// global settings (game-save unlocks + cost multipliers) carry across plans
+console.log('\n### GLOBAL SETTINGS CARRY-OVER');
+const dom4 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom4.window; global.document = dom4.window.document; global.localStorage = dom4.window.localStorage;
+global.location = dom4.window.location; global.Event = dom4.window.Event;
+if (!dom4.window.SVGElement.prototype.setPointerCapture) dom4.window.SVGElement.prototype.setPointerCapture = () => {};
+dom4.window.localStorage.clear();
+delete require.cache[require.resolve('../src/renderer.js')];
+require('../src/renderer.js');
+dom4.window.dispatchEvent(new dom4.window.Event('DOMContentLoaded'));
+const d4 = dom4.window.document;
+const fire4 = (n, t) => n.dispatchEvent(new dom4.window.Event(t, { bubbles: true }));
+const setVal4 = (n, v, t = 'input') => { n.value = v; fire4(n, t); };
+const click4 = (n) => n.dispatchEvent(new dom4.window.Event('click', { bubbles: true }));
+// Factory 1: choose non-default cost multipliers
+setVal4(d4.getElementById('mRecipe'), '2', 'change');
+setVal4(d4.getElementById('mPower'), '5', 'change');
+// New plan should inherit them
+click4(d4.getElementById('planNew'));
+check('new plan inherits recipe-cost multiplier', d4.getElementById('mRecipe').value === '2');
+check('new plan inherits power multiplier', d4.getElementById('mPower').value === '5');
+// Change on plan 2, switch back to plan 1 → shared value followed
+setVal4(d4.getElementById('mPower'), '2', 'change');
+click4([...d4.querySelectorAll('#planTabs .plan-tab .plan-name')][0]);
+check('cost-multiplier change shared back to plan 1', d4.getElementById('mPower').value === '2');
+const g4 = JSON.parse(dom4.window.localStorage.getItem('satisfactory-factory-plans-v1')).globals;
+check('globals snapshot persisted', !!g4 && g4.powerMult === 2 && g4.recipeCost === 2);
+check('globals include save-unlock keys', !!g4 && 'unlockedAlts' in g4 && 'saveName' in g4);
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

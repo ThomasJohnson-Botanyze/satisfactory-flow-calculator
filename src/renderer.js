@@ -118,6 +118,16 @@ const activePlan = () => plans.find((p) => p.id === activeId);
 const LS_KEY = 'satisfactory-flow-plan-v3'; // legacy single-plan store (migration source)
 const PLANS_KEY = 'satisfactory-factory-plans-v1'; // multi-plan store
 
+// Settings that belong to the whole game/world rather than one factory — they
+// carry over across every plan: the game-save unlocked alternates and the three
+// cost multipliers. (disabledAlts stays per-plan: a manual veto for that factory.)
+const GLOBAL_KEYS = ['recipeCost', 'powerMult', 'spaceMult', 'unlockedAlts', 'saveName'];
+const cloneVal = (v) => (Array.isArray(v) ? v.slice() : v);
+const pickGlobals = (s) => { const g = {}; for (const k of GLOBAL_KEYS) g[k] = cloneVal(s[k]); return g; };
+const applyGlobals = (s, g) => { for (const k of GLOBAL_KEYS) if (k in g) s[k] = cloneVal(g[k]); };
+// Mirror the active plan's global settings into every plan; returns the snapshot.
+const syncGlobals = () => { const g = pickGlobals(state); for (const p of plans) applyGlobals(p.state, g); return g; };
+
 function mergeState(s) {
   const m = Object.assign(defaultState(), s || {});
   m.opt = Object.assign(defaultState().opt, (s && s.opt) || {});
@@ -126,7 +136,8 @@ function mergeState(s) {
 }
 const save = () => {
   try {
-    localStorage.setItem(PLANS_KEY, JSON.stringify({ plans: plans.map((p) => ({ id: p.id, name: p.name, state: p.state })), activeId }));
+    const globals = syncGlobals(); // keep world-level settings identical across plans
+    localStorage.setItem(PLANS_KEY, JSON.stringify({ plans: plans.map((p) => ({ id: p.id, name: p.name, state: p.state })), activeId, globals }));
   } catch (e) {}
 };
 function load() {
@@ -136,6 +147,10 @@ function load() {
       plans = raw.plans.map((p) => ({ id: p.id || newId(), name: p.name || 'Factory', state: mergeState(p.state) }));
       activeId = plans.some((p) => p.id === raw.activeId) ? raw.activeId : plans[0].id;
       state = activePlan().state;
+      // Shared settings carry across plans: use the saved snapshot, else adopt the
+      // active plan's values (first run after upgrade) and propagate to the rest.
+      if (raw.globals) for (const p of plans) applyGlobals(p.state, raw.globals);
+      else syncGlobals();
       return;
     }
   } catch (e) {}
@@ -149,6 +164,7 @@ function load() {
 
 function newPlan(name) {
   const p = { id: newId(), name: name || `Factory ${plans.length + 1}`, state: defaultState() };
+  applyGlobals(p.state, pickGlobals(state)); // inherit shared game-save + cost settings
   plans.push(p);
   switchPlan(p.id);
 }
@@ -961,7 +977,7 @@ function init() {
   $('planNew').addEventListener('click', () => newPlan());
   $('planDup').addEventListener('click', () => duplicatePlan(activeId));
   $('btnReset').addEventListener('click', () => { state.picks = {}; state.nodeClock = {}; save(); solveAndRender(); });
-  $('btnClear').addEventListener('click', () => { const p = activePlan(); p.state = defaultState(); state = p.state; save(); applyStateToControls(); });
+  $('btnClear').addEventListener('click', () => { const p = activePlan(); const g = pickGlobals(p.state); p.state = defaultState(); applyGlobals(p.state, g); state = p.state; save(); applyStateToControls(); });
 
   // support modal
   const supportModal = $('supportModal');
