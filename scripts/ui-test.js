@@ -42,6 +42,21 @@ check('planner raw = 120 ore', D.querySelector('#rawTable tbody tr td:last-child
 click(D.getElementById('viewFlow'));
 check('flow nodes built', D.querySelectorAll('#flowSvg .node').length === 7);
 check('flow edges built', D.querySelectorAll('#flowSvg .edge-path').length === 7);
+
+// drag persistence + reset
+const node0 = D.querySelector('#flowSvg .node');
+const md = (t, x, y) => node0.dispatchEvent(new dom.window.MouseEvent(t, { clientX: x, clientY: y, bubbles: true }));
+md('pointerdown', 0, 0); md('pointermove', 120, 60); md('pointerup', 120, 60);
+const draggedTransform = node0.getAttribute('transform');
+const persisted = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'));
+const ap = persisted.plans.find((p) => p.id === persisted.activeId);
+check('drag persisted a node position', !!ap.state.flowPos && Object.keys(ap.state.flowPos).length > 0);
+click(D.getElementById('viewTables')); click(D.getElementById('viewFlow'));
+check('position restored after re-render', D.querySelector('#flowSvg .node').getAttribute('transform') === draggedTransform);
+click(D.getElementById('flowReset'));
+const after = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'));
+const ap2 = after.plans.find((p) => p.id === after.activeId);
+check('reset layout clears positions', !ap2.state.flowPos || Object.keys(ap2.state.flowPos).length === 0);
 click(D.getElementById('viewTables'));
 setVal(D.getElementById('mPower'), '5', 'change');
 check('power x5 applied', D.getElementById('sumPower').textContent === '390 MW');

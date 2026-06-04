@@ -78,6 +78,7 @@ const defaultState = () => ({
   powerMult: 1,
   spaceMult: 1,
   picks: {},
+  flowPos: {}, // saved flowchart node positions for this plan (nodeId -> {x,y})
   // null = no save loaded → every alternate available (original behavior).
   // [] = a save was read but no alternates unlocked. [...classNames] = restrict to these.
   unlockedAlts: null,
@@ -338,7 +339,8 @@ function buildFlow(res, targets) {
     if (!byId[id]) { const n = { id, kind, title, sub, ins: [], outs: [] }; nodes.push(n); byId[id] = n; }
     return byId[id];
   };
-  res.recipes.forEach((s, i) => { s._nid = 'mac' + i; addNode(s._nid, 'machine', itemName(s.item), `${fmt(Math.ceil(s.machines - 1e-9), 0)}× ${s.buildingName}`); });
+  // stable id keyed by recipe class so saved drag positions survive re-solves
+  res.recipes.forEach((s, i) => { s._nid = 'mac|' + (s.rc || i); addNode(s._nid, 'machine', itemName(s.item), `${fmt(Math.ceil(s.machines - 1e-9), 0)}× ${s.buildingName}`); });
   res.raw.forEach((r) => addNode('raw|' + r.item, 'raw', itemName(r.item), fmt(r.rate) + '/min'));
   const producers = {};
   res.recipes.forEach((s) => { (producers[s.item] = producers[s.item] || []).push(s); });
@@ -389,15 +391,22 @@ function layoutFlow(flow) {
   nodes.forEach((n) => { if (col[n.id] == null) col[n.id] = 0; });
   const cols = {};
   nodes.forEach((n) => (cols[col[n.id]] = cols[col[n.id]] || []).push(n));
-  const COLW = 215, ROWH = 72, NW = 150, NH = 48, PADX = 24, PADY = 24;
-  let maxRows = 0, maxCol = 0;
+  // Wider columns so the per-minute edge labels fit between nodes; taller rows reduce label overlap.
+  const COLW = 300, ROWH = 96, NW = 168, NH = 52, PADX = 28, PADY = 28;
+  const saved = state.flowPos || {};
   Object.keys(cols).map(Number).sort((a, b) => a - b).forEach((c) => {
-    cols[c].forEach((n, i) => { n.x = PADX + c * COLW; n.y = PADY + i * ROWH; n.w = NW; n.h = NH; });
-    maxRows = Math.max(maxRows, cols[c].length);
-    maxCol = Math.max(maxCol, c);
+    cols[c].forEach((n, i) => {
+      n.w = NW; n.h = NH;
+      const sp = saved[n.id];
+      if (sp && isFinite(sp.x) && isFinite(sp.y)) { n.x = sp.x; n.y = sp.y; }
+      else { n.x = PADX + c * COLW; n.y = PADY + i * ROWH; }
+    });
   });
-  flow.width = PADX * 2 + maxCol * COLW + NW;
-  flow.height = PADY * 2 + Math.max(1, maxRows) * ROWH;
+  // size canvas to actual node extents (covers nodes dragged outside the grid)
+  let mx = 0, my = 0;
+  nodes.forEach((n) => { mx = Math.max(mx, n.x + n.w); my = Math.max(my, n.y + n.h); });
+  flow.width = mx + PADX;
+  flow.height = my + PADY;
   return flow;
 }
 
@@ -443,7 +452,7 @@ function drawFlow(flow) {
     g.appendChild(rect);
     const t1 = document.createElementNS(SVGNS, 'text');
     t1.setAttribute('class', 'n-title'); t1.setAttribute('x', 10); t1.setAttribute('y', 19);
-    t1.textContent = n.title.length > 22 ? n.title.slice(0, 21) + '…' : n.title;
+    t1.textContent = n.title.length > 25 ? n.title.slice(0, 24) + '…' : n.title;
     g.appendChild(t1);
     const t2 = document.createElementNS(SVGNS, 'text');
     t2.setAttribute('class', 'n-sub'); t2.setAttribute('x', 10); t2.setAttribute('y', 35);
@@ -470,7 +479,11 @@ function attachDrag(g, node, flow) {
       e._label.setAttribute('x', p.lx); e._label.setAttribute('y', p.ly);
     });
   });
-  const end = (ev) => { last = null; g.classList.remove('dragging'); try { g.releasePointerCapture(ev.pointerId); } catch (e) {} };
+  const end = (ev) => {
+    if (last) { state.flowPos = state.flowPos || {}; state.flowPos[node.id] = { x: node.x, y: node.y }; save(); }
+    last = null; g.classList.remove('dragging');
+    try { g.releasePointerCapture(ev.pointerId); } catch (e) {}
+  };
   g.addEventListener('pointerup', end);
   g.addEventListener('pointercancel', end);
 }
@@ -830,6 +843,7 @@ function init() {
   document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setMode(t.dataset.mode)));
   $('viewTables').addEventListener('click', () => { state.view = 'tables'; save(); applyView(); });
   $('viewFlow').addEventListener('click', () => { state.view = 'flow'; save(); applyView(); });
+  $('flowReset').addEventListener('click', () => { state.flowPos = {}; save(); renderFlowView(); });
 
   const onTarget = (v) => { const c = nameToClass(v); state.targetItem = c; $('rateUnit').textContent = c && isFluid(c) ? 'm³ / min' : '/ min'; save(); solveAndRender(); };
   $('targetItem').addEventListener('change', (e) => onTarget(e.target.value));

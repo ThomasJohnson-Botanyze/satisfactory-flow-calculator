@@ -178,7 +178,10 @@
           <div id="modeExtras"></div>
 
           <div id="flowView" hidden>
-            <p class="hint flow-hint">Drag nodes to rearrange. Gray = raw · orange = machine · green = output.</p>
+            <div class="flow-head">
+              <span class="hint flow-hint">Drag nodes to rearrange — positions are saved per plan. Gray = raw · orange = machine · green = output.</span>
+              <button id="flowReset" class="btn mini ghost" title="Restore the automatic layout">Reset layout</button>
+            </div>
             <div class="flow-scroll"><svg id="flowSvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
           </div>
 

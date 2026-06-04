@@ -55,8 +55,18 @@ async function main() {
     return 'ok';`);
   await sleep(400); await shot('m-planner');
 
-  console.log('FLOWCHART');
-  await evalJs(`document.getElementById('viewFlow').click(); return 'ok';`);
+  console.log('FLOWCHART (optimizer motors)');
+  await evalJs(`${helpers}
+    tab('optimize');
+    var add=document.getElementById('optAddOutput'); add.click(); add.click();
+    var items=document.querySelectorAll('#optOutputs .row-item');
+    var rates=document.querySelectorAll('#optOutputs .row-rate');
+    setv(items[0],'Motor'); setv(rates[0],'30');
+    setv(items[1],'Stator'); setv(rates[1],'30');
+    setv(items[2],'Rotor'); setv(rates[2],'30');
+    setv(document.getElementById('optObjective'),'machines','change');
+    document.getElementById('viewFlow').click();
+    return 'ok';`);
   await sleep(500); await shot('m-flow');
   await evalJs(`document.getElementById('viewTables').click(); return 'ok';`);
 

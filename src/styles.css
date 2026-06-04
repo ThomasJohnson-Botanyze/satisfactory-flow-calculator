@@ -414,7 +414,8 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .vt.active { background: var(--accent); color: #1a1300; border-color: var(--accent); }
 
 /* flowchart */
-.flow-hint { margin: 0 0 8px; }
+.flow-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.flow-hint { margin: 0; }
 .flow-scroll {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -433,7 +434,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .node .n-title { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
 .edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }
-.edge-label { fill: #9aa3b2; font-size: 9px; paint-order: stroke; stroke: #11141a; stroke-width: 3px; }
+.edge-label { fill: #c2cad8; font-size: 11px; paint-order: stroke; stroke: #11141a; stroke-width: 4px; }
 
 /* alternate recipes: save status + manual enable/disable list */
 #saveStatus { margin-top: 8px; }

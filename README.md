@@ -21,7 +21,9 @@ online tool's tabs.
 ### Views (all modes)
 - **Tables** — production steps, raw resources, building totals, by-products.
 - **Flowchart** — node-graph like satisfactory-tools: gray raw → orange machine → green output, edges
-  labeled with item + rate, layered left→right. **Drag nodes** to rearrange.
+  labeled with item + rate, layered left→right with wide spacing so the per-minute labels stay readable.
+  **Drag nodes** to rearrange — positions are **saved per plan** (keyed by recipe, survive re-solve and
+  relaunch). **Reset layout** restores the automatic placement.
 
 ### 1. Planner
 - Pick a target item + output rate; expands the full recipe tree, aggregates shared intermediates,
