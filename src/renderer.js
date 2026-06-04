@@ -827,17 +827,52 @@ function visibleImgRect(cw, ch, mar) {
     y0: (0 - mapV.oy) / s - mar, y1: (ch - mapV.oy) / s + mar,
   };
 }
+// Draw one footprint (rotated rect) + an optional overclock/somersloop ring.
+function drawFootprint(ctx, b, s, minHalf) {
+  const ix = worldToImgX(b.x), iy = worldToImgY(b.y);
+  const hw = Math.max(minHalf, (b._w * IMG_PX_PER_CM * (b.sx || 1)) / 2);
+  const hd = Math.max(minHalf, (b._d * IMG_PX_PER_CM * (b.sy || 1)) / 2);
+  ctx.save();
+  ctx.translate(ix, iy);
+  if (b.yaw) ctx.rotate(b.yaw);
+  ctx.fillStyle = buildingColor(b);
+  ctx.fillRect(-hw, -hd, 2 * hw, 2 * hd);
+  ctx.lineWidth = 0.7 / s; ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.strokeRect(-hw, -hd, 2 * hw, 2 * hd);
+  ctx.restore();
+  if (mapMarkClock && (Math.abs((b.overclock || 1) - 1) > 1e-3 || (b.boost || 0) > 0)) {
+    ctx.beginPath();
+    ctx.arc(ix, iy, Math.max(hw, hd) + 2.2 / s, 0, Math.PI * 2);
+    ctx.lineWidth = 1.4 / s;
+    ctx.strokeStyle = (b.boost || 0) > 0 ? 'rgba(236,99,60,0.95)' : 'rgba(255,255,255,0.9)';
+    ctx.stroke();
+  }
+}
 // Draw the factory-buildings overlay in IMAGE space (ctx already carries the map
 // transform). Vector every frame, viewport-culled, with screen-constant stroke
-// widths and a minimum footprint size so the layer reads at any zoom.
+// widths and a minimum footprint size so the layer reads at any zoom. Layered
+// bottom->top: foundations (floors) -> belts/pipes/wires -> machines, so a
+// machine always draws on top of the floor it sits on.
 function drawBuildings(ctx, s, cw, ch) {
   if (!mapBuildShow || !mapBuildings.length) return;
   const vr = visibleImgRect(cw, ch, 200 / s);
+  const inView = (b) => {
+    const ix = worldToImgX(b.x), iy = worldToImgY(b.y);
+    return ix >= vr.x0 && ix <= vr.x1 && iy >= vr.y0 && iy <= vr.y1;
+  };
+  const minHalf = (MACHINE_MIN_PX / 2) / s;
   ctx.save();
   ctx.globalAlpha = mapBuildOpacity;
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
 
-  // Pass 1: paths (belts / pipes / wires), under the machines.
+  // Pass 0: foundations / floors — first, so everything else sits on top.
+  for (const b of mapBuildings) {
+    if (b.kind !== 'machine' || b._cat !== 'foundation') continue;
+    if (!catVisible(b._cat) || !inView(b)) continue;
+    drawFootprint(ctx, b, s, minHalf);
+  }
+
+  // Pass 1: paths (belts / pipes / wires) — over the floors, under the machines.
   for (const b of mapBuildings) {
     if (b.kind === 'machine' || !b.path) continue;
     if (!catVisible(b._cat)) continue;
@@ -853,30 +888,11 @@ function drawBuildings(ctx, s, cw, ch) {
     ctx.stroke();
   }
 
-  // Pass 2: machine footprints (rotated rectangles) on top.
-  const minHalf = (MACHINE_MIN_PX / 2) / s;
+  // Pass 2: machines (everything except foundations) — on top.
   for (const b of mapBuildings) {
-    if (b.kind !== 'machine') continue;
-    if (!catVisible(b._cat)) continue;
-    const ix = worldToImgX(b.x), iy = worldToImgY(b.y);
-    if (ix < vr.x0 || ix > vr.x1 || iy < vr.y0 || iy > vr.y1) continue;
-    const hw = Math.max(minHalf, (b._w * IMG_PX_PER_CM * (b.sx || 1)) / 2);
-    const hd = Math.max(minHalf, (b._d * IMG_PX_PER_CM * (b.sy || 1)) / 2);
-    ctx.save();
-    ctx.translate(ix, iy);
-    if (b.yaw) ctx.rotate(b.yaw);
-    ctx.fillStyle = buildingColor(b);
-    ctx.fillRect(-hw, -hd, 2 * hw, 2 * hd);
-    ctx.lineWidth = 0.7 / s; ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-    ctx.strokeRect(-hw, -hd, 2 * hw, 2 * hd);
-    ctx.restore();
-    if (mapMarkClock && (Math.abs((b.overclock || 1) - 1) > 1e-3 || (b.boost || 0) > 0)) {
-      ctx.beginPath();
-      ctx.arc(ix, iy, Math.max(hw, hd) + 2.2 / s, 0, Math.PI * 2);
-      ctx.lineWidth = 1.4 / s;
-      ctx.strokeStyle = (b.boost || 0) > 0 ? 'rgba(236,99,60,0.95)' : 'rgba(255,255,255,0.9)';
-      ctx.stroke();
-    }
+    if (b.kind !== 'machine' || b._cat === 'foundation') continue;
+    if (!catVisible(b._cat) || !inView(b)) continue;
+    drawFootprint(ctx, b, s, minHalf);
   }
   ctx.restore();
 }

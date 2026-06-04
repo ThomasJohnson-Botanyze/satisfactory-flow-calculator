@@ -140,6 +140,54 @@ function extractBuildings(save) {
       out.push(rec);
     }
   }
+  extractLightweight(save, out);
+  return out;
+}
+
+// Lightweight (instanced) buildables. Modern saves do NOT store foundations,
+// walls, ramps, beams, pillars, etc. as individual level-object actors — they are
+// packed into the FGLightweightBuildableSubsystem to save space (a base can have
+// tens of thousands). Without this pass the overlay shows machines but no floors.
+// Shape: subsystem.specialProperties.buildables[] = one bucket per class
+// { typeReference:{pathName}, instances:[{transform, usedSwatchSlot, ...}] }.
+const LIGHTWEIGHT_TYPE = '/Script/FactoryGame.FGLightweightBuildableSubsystem';
+function extractLightweight(save, out) {
+  const levels = (save && save.levels) || {};
+  for (const lvlName in levels) {
+    const objs = (levels[lvlName] && levels[lvlName].objects) || [];
+    for (let oi = 0; oi < objs.length; oi++) {
+      const o = objs[oi];
+      if (!o || o.typePath !== LIGHTWEIGHT_TYPE) continue;
+      const buckets = o.specialProperties && o.specialProperties.buildables;
+      if (!Array.isArray(buckets)) continue;
+      for (let bi = 0; bi < buckets.length; bi++) {
+        const bucket = buckets[bi];
+        const className = classFromTypePath(bucket && bucket.typeReference && bucket.typeReference.pathName);
+        if (!className) continue;
+        const insts = (bucket && bucket.instances) || [];
+        for (let k = 0; k < insts.length; k++) {
+          const it = insts[k];
+          const tr = it && it.transform && it.transform.translation;
+          if (!tr) continue;
+          const scale = (it.transform && it.transform.scale3d) || { x: 1, y: 1, z: 1 };
+          // Lightweight buildables are structural — always drawn as a footprint
+          // (no splines/wires), so kind is 'machine' regardless of name.
+          out.push({
+            className,
+            kind: 'machine',
+            x: tr.x, y: tr.y, z: tr.z,
+            yaw: quatToYaw(it.transform && it.transform.rotation),
+            sx: scale.x != null ? scale.x : 1,
+            sy: scale.y != null ? scale.y : 1,
+            overclock: 1.0,
+            boost: 0,
+            swatch: classFromTypePath(it.usedSwatchSlot && it.usedSwatchSlot.pathName),
+            lightweight: true,
+          });
+        }
+      }
+    }
+  }
   return out;
 }
 
@@ -170,6 +218,7 @@ function summarize(buildings) {
 
 module.exports = {
   extractBuildings,
+  extractLightweight,
   summarize,
   quatToYaw,
   localToWorld,
