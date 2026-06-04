@@ -156,6 +156,21 @@
           </section>
 
           <section class="ctl-group">
+            <h2>Collectables</h2>
+            <p class="hint" style="margin-top:-6px">Uncollected pickups still in the save — collected ones are gone. Counts update when you load.</p>
+            <div class="chip-toolbar">
+              <button id="mapAllColl" class="btn mini ghost">All</button>
+              <button id="mapNoColl" class="btn mini ghost">None</button>
+            </div>
+            <label class="check"><input type="checkbox" data-coll="slugBlue" checked /> <span class="map-swatch" style="background:#3fa9ff"></span> Power slug — blue <span class="coll-count" data-coll-cnt="slugBlue"></span></label>
+            <label class="check"><input type="checkbox" data-coll="slugYellow" checked /> <span class="map-swatch" style="background:#ffd23f"></span> Power slug — yellow <span class="coll-count" data-coll-cnt="slugYellow"></span></label>
+            <label class="check"><input type="checkbox" data-coll="slugPurple" checked /> <span class="map-swatch" style="background:#c060f0"></span> Power slug — purple <span class="coll-count" data-coll-cnt="slugPurple"></span></label>
+            <label class="check"><input type="checkbox" data-coll="somersloop" checked /> <span class="map-swatch" style="background:#ff9a3c"></span> Somersloops <span class="coll-count" data-coll-cnt="somersloop"></span></label>
+            <label class="check"><input type="checkbox" data-coll="mercerSphere" checked /> <span class="map-swatch" style="background:#36c9b0"></span> Mercer spheres <span class="coll-count" data-coll-cnt="mercerSphere"></span></label>
+            <label class="check"><input type="checkbox" data-coll="crashSite" checked /> <span class="map-swatch" style="background:#ff6b5c"></span> Crash sites (hard drives) <span class="coll-count" data-coll-cnt="crashSite"></span></label>
+          </section>
+
+          <section class="ctl-group">
             <h2>Factory buildings</h2>
             <p class="hint" style="margin-top:-6px">Overlays your built factory — machines as footprints, belts/pipes/power lines as routes.</p>
             <label class="check"><input type="checkbox" id="mapBuildShow" checked /> Show buildings overlay</label>

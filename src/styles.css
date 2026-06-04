@@ -654,6 +654,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .map-tip-co { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .map-res-row { gap: 6px; }
 .map-swatch { width: 11px; height: 11px; border-radius: 3px; border: 1px solid rgba(0, 0, 0, 0.5); display: inline-block; flex: 0 0 auto; }
+.coll-count { margin-left: auto; color: var(--muted); font-size: 11px; flex: 0 0 auto; }
 .map-range { width: 100%; accent-color: var(--accent); cursor: pointer; }
 .map-legend { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .map-legend-row { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--muted); }

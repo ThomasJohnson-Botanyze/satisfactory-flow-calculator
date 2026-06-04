@@ -202,6 +202,48 @@ function swatchOf(props) {
   return classFromTypePath(sw);
 }
 
+// ---------- collectables (for the map view) ----------
+// World pickups the game persists as individual actors. When the player collects
+// a slug / Somersloop / Mercer Sphere the actor is DELETED from the save, so any
+// that remain are by definition uncollected (same model as resource nodes).
+// Crash-site drop pods are the exception: a looted pod stays in the save flagged
+// mHasBeenOpened=true, so we skip those to keep the layer "uncollected only".
+const COLLECTABLE_KIND = {
+  BP_Crystal_C: 'slugBlue',       // blue power slug
+  BP_Crystal_mk2_C: 'slugYellow', // yellow power slug
+  BP_Crystal_mk3_C: 'slugPurple', // purple power slug
+  BP_WAT1_C: 'somersloop',
+  BP_WAT2_C: 'mercerSphere',
+  BP_DropPod_C: 'crashSite',      // hard-drive crash site (drop pod)
+};
+function extractCollectables(save) {
+  const levels = (save && save.levels) || {};
+  const out = [];
+  for (const lvlName in levels) {
+    const objs = (levels[lvlName] && levels[lvlName].objects) || [];
+    for (let i = 0; i < objs.length; i++) {
+      const o = objs[i];
+      if (!o || typeof o.typePath !== 'string') continue;
+      const kind = COLLECTABLE_KIND[classFromTypePath(o.typePath)];
+      if (!kind) continue;
+      const tr = o.transform && o.transform.translation;
+      if (!tr) continue;
+      if (kind === 'crashSite') {
+        const op = o.properties && o.properties.mHasBeenOpened;
+        if (op && op.value === true) continue; // already looted -> not "uncollected"
+      }
+      out.push({ kind, x: tr.x, y: tr.y, z: tr.z });
+    }
+  }
+  return out;
+}
+// Counts for a list of collectable records: { kind: n, ... }.
+function summarizeCollectables(list) {
+  const counts = {};
+  for (const c of list || []) counts[c.kind] = (counts[c.kind] || 0) + 1;
+  return counts;
+}
+
 // Counts for a list of building records: { total, byKind:{...}, byClass:{...} }.
 function summarize(buildings) {
   const byKind = { machine: 0, belt: 0, pipe: 0, wire: 0 };
@@ -219,6 +261,8 @@ function summarize(buildings) {
 module.exports = {
   extractBuildings,
   extractLightweight,
+  extractCollectables,
+  summarizeCollectables,
   summarize,
   quatToYaw,
   localToWorld,

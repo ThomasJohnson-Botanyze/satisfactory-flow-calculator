@@ -812,6 +812,20 @@ const KIND_COLOR = { geyser: '#efe9ff', frackingCore: '#a98bd0', frackingSatelli
 const KIND_LABEL = { node: 'Resource node', geyser: 'Geyser', frackingCore: 'Resource well', frackingSatellite: 'Well satellite', deposit: 'Small deposit' };
 const PURITY_R = { Pure: 6, Normal: 4.6, Impure: 3.4 };
 
+// ---------- collectables overlay (uncollected pickups from the save) ----------
+const COLL_COLOR = {
+  slugBlue: '#3fa9ff', slugYellow: '#ffd23f', slugPurple: '#c060f0',
+  somersloop: '#ff9a3c', mercerSphere: '#36c9b0', crashSite: '#ff6b5c',
+};
+const COLL_LABEL = {
+  slugBlue: 'Power slug (blue)', slugYellow: 'Power slug (yellow)', slugPurple: 'Power slug (purple)',
+  somersloop: 'Somersloop', mercerSphere: 'Mercer sphere', crashSite: 'Crash site (hard drive)',
+};
+const COLL_KINDS = ['slugBlue', 'slugYellow', 'slugPurple', 'somersloop', 'mercerSphere', 'crashSite'];
+let mapCollectables = [];          // uncollected collectables from the loaded save
+let mapCollOn = { slugBlue: true, slugYellow: true, slugPurple: true, somersloop: true, mercerSphere: true, crashSite: true };
+function collVisible(c) { return !!mapCollOn[c.kind]; }
+
 let mapImg = null, mapImgReady = false;
 let mapNodes = [];                 // resource nodes from the loaded save
 let mapResOn = null;               // Set of enabled resourceClass keys ('__unknown' bucket allowed)
@@ -956,6 +970,38 @@ function drawMarker(ctx, n, ix, iy, s) {
   ctx.lineWidth = 1.3 / s; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.stroke();
   if (n.purity === 'Pure') { ctx.beginPath(); ctx.arc(ix, iy, r + 2.4 / s, 0, Math.PI * 2); ctx.lineWidth = 1.3 / s; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke(); }
 }
+// Collectable markers, drawn at a constant screen size (like resource nodes) with
+// a distinct shape per group so they read apart from ore dots: slugs = 4-point
+// sparkle (tier colour), Somersloop = ringed dot, Mercer sphere = pipped dot,
+// crash site = triangle.
+function drawCollectable(ctx, c, ix, iy, s) {
+  const col = COLL_COLOR[c.kind] || '#fff';
+  ctx.lineWidth = 1.2 / s;
+  ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillStyle = col;
+  if (c.kind === 'crashSite') {
+    const r = 5.2 / s;
+    ctx.beginPath();
+    ctx.moveTo(ix, iy - r); ctx.lineTo(ix + r * 0.92, iy + r * 0.72); ctx.lineTo(ix - r * 0.92, iy + r * 0.72); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+  } else if (c.kind === 'somersloop') {
+    const r = 4.4 / s;
+    ctx.beginPath(); ctx.arc(ix, iy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(ix, iy, r * 0.42, 0, Math.PI * 2); ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill();
+  } else if (c.kind === 'mercerSphere') {
+    const r = 4.2 / s;
+    ctx.beginPath(); ctx.arc(ix, iy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(ix, iy, r * 0.32, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+  } else {
+    // power slugs — 4-point sparkle
+    const r = 4.6 / s, ir = r * 0.4;
+    ctx.beginPath();
+    ctx.moveTo(ix, iy - r); ctx.lineTo(ix + ir, iy - ir); ctx.lineTo(ix + r, iy); ctx.lineTo(ix + ir, iy + ir);
+    ctx.lineTo(ix, iy + r); ctx.lineTo(ix - ir, iy + ir); ctx.lineTo(ix - r, iy); ctx.lineTo(ix - ir, iy - ir);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+  }
+}
 // Visible image-space rect (with margin) for viewport culling. screen = img*s + o.
 function visibleImgRect(cw, ch, mar) {
   const s = mapV.s;
@@ -1047,15 +1093,23 @@ function drawMap() {
     if (!nodeVisible(n)) continue;
     drawMarker(ctx, n, worldToImgX(n.x), worldToImgY(n.y), s);
   }
+  for (const c of mapCollectables) {
+    if (!collVisible(c)) continue;
+    drawCollectable(ctx, c, worldToImgX(c.x), worldToImgY(c.y), s);
+  }
   updateMapCount();
 }
 function updateMapCount() {
   const c = $('mapCount'); if (!c) return;
-  if (!mapNodes.length && !mapBuildings.length) { c.textContent = 'No save loaded.'; return; }
+  if (!mapNodes.length && !mapBuildings.length && !mapCollectables.length) { c.textContent = 'No save loaded.'; return; }
   const parts = [];
   if (mapNodes.length) {
     const vis = mapNodes.reduce((a, n) => a + (nodeVisible(n) ? 1 : 0), 0);
     parts.push(`${vis} / ${mapNodes.length} nodes`);
+  }
+  if (mapCollectables.length) {
+    const vis = mapCollectables.reduce((a, c) => a + (collVisible(c) ? 1 : 0), 0);
+    parts.push(`${vis} / ${mapCollectables.length} collectables`);
   }
   if (mapBuildings.length) {
     const vis = mapBuildShow ? mapBuildings.reduce((a, b) => a + (catVisible(b._cat) ? 1 : 0), 0) : 0;
@@ -1097,6 +1151,20 @@ function setAllMapRes(on) {
   const box = $('mapResFilter'); if (!box) return;
   mapResOn = new Set();
   box.querySelectorAll('input[type=checkbox]').forEach((cb) => { cb.checked = on; if (on) mapResOn.add(cb.dataset.res); });
+  scheduleMapDraw();
+}
+
+// Collectables overlay: fixed kinds with static checkboxes (data-coll). Counts
+// are filled from the loaded save; All/None flip every kind at once.
+function updateCollectableCounts(counts) {
+  counts = counts || {};
+  document.querySelectorAll('[data-coll-cnt]').forEach((span) => {
+    span.textContent = '(' + (counts[span.dataset.collCnt] || 0) + ')';
+  });
+}
+function setAllColl(on) {
+  COLL_KINDS.forEach((k) => { mapCollOn[k] = on; });
+  document.querySelectorAll('input[data-coll]').forEach((cb) => { cb.checked = on; });
   scheduleMapDraw();
 }
 
@@ -1152,10 +1220,13 @@ function loadMapFromSave() {
     if (!res.ok) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); return; }
     mapNodes = res.nodes; mapResOn = null;
     mapBuildings = annotateBuildings(res.buildings || []); mapCatOn = null;
+    mapCollectables = res.collectables || [];
     buildMapResFilter(); buildPurityLegend(); buildBuildingCatFilter();
+    updateCollectableCounts(res.collectableCounts);
     const nc = res.nodeCounts || {};
     const bt = (res.buildingCounts && res.buildingCounts.total) || 0;
-    st.textContent = `${res.saveName}: ${nc.node || 0} nodes · ${nc.geyser || 0} geysers · ${nc.frackingCore || 0} wells · ${bt} buildings`;
+    const ct = mapCollectables.length;
+    st.textContent = `${res.saveName}: ${nc.node || 0} nodes · ${nc.geyser || 0} geysers · ${nc.frackingCore || 0} wells · ${bt} buildings · ${ct} collectables`;
     $('mapEmpty').hidden = true;
     ensureMapImg(); fitMapView(); drawMap();
   }, 20);
@@ -1168,6 +1239,10 @@ function mapTipHtml(n) {
   if (n.purity) sub.push(n.purity);
   const co = `X ${Math.round(n.x / 100)} · Y ${Math.round(n.y / 100)}`;
   return `<b>${esc(title)}</b>` + (sub.length ? `<br><span class="map-tip-sub">${esc(sub.join(' · '))}</span>` : '') + `<br><span class="map-tip-co">${esc(co)}</span>`;
+}
+function collectableTipHtml(c) {
+  const co = `X ${Math.round(c.x / 100)} · Y ${Math.round(c.y / 100)}`;
+  return `<b>${esc(COLL_LABEL[c.kind] || 'Collectable')}</b><br><span class="map-tip-sub">Uncollected</span><br><span class="map-tip-co">${esc(co)}</span>`;
 }
 // Nearest machine whose footprint is under the cursor (screen-space). Paths
 // (belts/pipes/wires) aren't hit-tested — only the machines carry useful detail.
@@ -1204,9 +1279,16 @@ function mapHover(e) {
     const d = (px - sx) * (px - sx) + (py - sy) * (py - sy);
     if (d < bestD) { bestD = d; best = n; }
   }
-  // Resource nodes win ties (they're the smaller, more precise target); fall back
-  // to a machine footprint under the cursor when no node is close.
-  let html = best ? mapTipHtml(best) : null;
+  let bestC = null, bestCD = 11 * 11;
+  for (const c of mapCollectables) {
+    if (!collVisible(c)) continue;
+    const px = worldToImgX(c.x) * mapV.s + mapV.ox, py = worldToImgY(c.y) * mapV.s + mapV.oy;
+    const d = (px - sx) * (px - sx) + (py - sy) * (py - sy);
+    if (d < bestCD) { bestCD = d; bestC = c; }
+  }
+  // Closest marker wins (node vs collectable); fall back to a machine footprint
+  // under the cursor when neither marker is near.
+  let html = (bestC && (!best || bestCD < bestD)) ? collectableTipHtml(bestC) : (best ? mapTipHtml(best) : null);
   if (!html && mapBuildShow && mapBuildings.length) {
     const mb = pickMachineAt(sx, sy);
     if (mb) html = buildingTipHtml(mb);
@@ -1248,8 +1330,9 @@ function wireMap() {
 function renderMap() {
   ensureMapImg();
   if (!$('mapWrap')) return;
-  $('mapEmpty').hidden = mapNodes.length > 0;
-  if (mapNodes.length && !mapV.ready) fitMapView();
+  const any = mapNodes.length || mapCollectables.length || mapBuildings.length;
+  $('mapEmpty').hidden = any > 0;
+  if (any && !mapV.ready) fitMapView();
   drawMap();
 }
 
@@ -1811,6 +1894,11 @@ function init() {
   $('mapMarkClock').addEventListener('change', (e) => { mapMarkClock = e.target.checked; scheduleMapDraw(); });
   $('mapAllCat').addEventListener('click', () => setAllMapCat(true));
   $('mapNoCat').addEventListener('click', () => setAllMapCat(false));
+  $('mapAllColl').addEventListener('click', () => setAllColl(true));
+  $('mapNoColl').addEventListener('click', () => setAllColl(false));
+  document.querySelectorAll('input[data-coll]').forEach((cb) => {
+    cb.addEventListener('change', () => { mapCollOn[cb.dataset.coll] = cb.checked; scheduleMapDraw(); });
+  });
 
   $('optAddOutput').addEventListener('click', () => { state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); });
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });

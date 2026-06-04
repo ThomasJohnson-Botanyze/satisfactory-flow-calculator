@@ -22,7 +22,7 @@ let ITEMS = null;
 try { const D = require('./data.json'); RECIPES = D.recipes; ITEMS = D.items; } catch (e) { RECIPES = null; ITEMS = null; }
 
 // Pure, dependency-free building extraction (operates on a parsed save).
-const { extractBuildings, summarize } = require('./factory-extract');
+const { extractBuildings, summarize, extractCollectables, summarizeCollectables } = require('./factory-extract');
 
 function defaultSaveRoot() {
   const localAppData =
@@ -238,9 +238,11 @@ function readBuildings(savFile) {
   return { ok: true, saveName: p.saveName, buildings, counts: summarize(buildings) };
 }
 
-// Read a save ONCE and return everything the map view needs — resource nodes and
-// placed buildings — so a single parse feeds both overlays.
-// { ok, saveName, nodes, nodeCounts, buildings, buildingCounts, error }
+// Read a save ONCE and return everything the map view needs — resource nodes,
+// placed buildings, and uncollected collectables — so a single parse feeds every
+// overlay.
+// { ok, saveName, nodes, nodeCounts, buildings, buildingCounts,
+//   collectables:[{kind,x,y,z}], collectableCounts:{kind:n}, error }
 function readMap(savFile) {
   const p = parseSaveFile(savFile);
   if (!p.ok) return { ok: false, error: p.error };
@@ -248,6 +250,7 @@ function readMap(savFile) {
   const nodeCounts = {};
   for (const n of nodes) nodeCounts[n.kind] = (nodeCounts[n.kind] || 0) + 1;
   const buildings = extractBuildings(p.save);
+  const collectables = extractCollectables(p.save);
   return {
     ok: true,
     saveName: p.saveName,
@@ -255,6 +258,8 @@ function readMap(savFile) {
     nodeCounts,
     buildings,
     buildingCounts: summarize(buildings),
+    collectables,
+    collectableCounts: summarizeCollectables(collectables),
   };
 }
 
@@ -268,6 +273,7 @@ module.exports = {
   extractResourceNodes,
   readResourceNodes,
   extractBuildings,
+  extractCollectables,
   readBuildings,
   readMap,
 };
