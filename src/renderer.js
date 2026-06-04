@@ -70,8 +70,19 @@ for (const rc in RECIPES) {
   });
 }
 function defaultRecipeClass(item) {
-  const cands = recipesByPrimary[item] || [];
-  return cands.filter((rc) => !RECIPES[rc].alternate)[0] || null;
+  // Prefer a standard recipe whose PRIMARY product is this item.
+  const std = (recipesByPrimary[item] || []).filter((rc) => !RECIPES[rc].alternate)[0];
+  if (std) return std;
+  // No standard primary recipe: the item is only ever a by-product (e.g. Dissolved
+  // Silica) or only made by an alternate (Compacted Coal, Polymer Resin). Fall back
+  // to any recipe that produces it so the planner BUILDS it instead of listing it as
+  // an unobtainable raw input. Prefer a standard recipe; otherwise an alternate that
+  // is currently usable (unlocked by the save AND not manually vetoed) — never
+  // auto-select a locked alternate. If none is usable, leave it as raw (null).
+  const producers = recipesByProduct[item] || [];
+  const stdAny = producers.filter((rc) => !RECIPES[rc].alternate)[0];
+  if (stdAny) return stdAny;
+  return producers.filter((rc) => altEnabled(rc))[0] || null;
 }
 // Is recipe rc usable given the unlocked-from-save filter? Standard recipes are
 // always available; alternates only when no save is loaded (state.unlockedAlts
@@ -322,6 +333,11 @@ function fmt(n, d = 2) {
 const fmtPower = (mw) => (mw >= 1000 ? fmt(mw / 1000, 2) + ' GW' : fmt(mw, 1) + ' MW');
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+// HTML-escape any string interpolated into innerHTML. Tooltips include strings
+// derived from a loaded .sav (building class names, paint slots, purity) — without
+// escaping, a crafted save could inject markup, which with Node integration on is
+// an RCE vector. All dynamic values in *innerHTML go through this.
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // ---------- table rendering ----------
 function recipeOptionLabel(rc) {
@@ -964,8 +980,15 @@ function buildMapResFilter() {
   const counts = new Map();
   for (const n of mapNodes) { if (n.kind !== 'node' && n.kind !== 'deposit') continue; const k = n.resourceClass || '__unknown'; counts.set(k, (counts.get(k) || 0) + 1); }
   if (!counts.size) { box.appendChild(el('small', 'hint', 'No mineable nodes in this save.')); return; }
-  // Default: every known resource on, the unknown/vanilla bucket off (it is mostly noise).
-  if (!mapResOn) mapResOn = new Set([...counts.keys()].filter((k) => k !== '__unknown'));
+  // Default: every known resource on. The unknown/vanilla bucket is off when there
+  // ARE known (randomizer-overridden) resources — it's mostly noise then. But on a
+  // vanilla save every node is unknown (the game doesn't store static node types),
+  // so if unknown is the only bucket, default it ON or the map would show nothing.
+  if (!mapResOn) {
+    const allKeys = [...counts.keys()];
+    const onlyUnknown = allKeys.length === 1 && allKeys[0] === '__unknown';
+    mapResOn = new Set(onlyUnknown ? allKeys : allKeys.filter((k) => k !== '__unknown'));
+  }
   const keys = [...counts.keys()].sort((a, b) => {
     const an = a === '__unknown' ? '￿' : itemName(a), bn = b === '__unknown' ? '￿' : itemName(b);
     return an.localeCompare(bn);
@@ -1053,7 +1076,7 @@ function mapTipHtml(n) {
   if (n.kind !== 'node' && KIND_LABEL[n.kind]) sub.push(KIND_LABEL[n.kind]);
   if (n.purity) sub.push(n.purity);
   const co = `X ${Math.round(n.x / 100)} · Y ${Math.round(n.y / 100)}`;
-  return `<b>${title}</b>` + (sub.length ? `<br><span class="map-tip-sub">${sub.join(' · ')}</span>` : '') + `<br><span class="map-tip-co">${co}</span>`;
+  return `<b>${esc(title)}</b>` + (sub.length ? `<br><span class="map-tip-sub">${esc(sub.join(' · '))}</span>` : '') + `<br><span class="map-tip-co">${esc(co)}</span>`;
 }
 // Nearest machine whose footprint is under the cursor (screen-space). Paths
 // (belts/pipes/wires) aren't hit-tested — only the machines carry useful detail.
@@ -1077,7 +1100,7 @@ function buildingTipHtml(b) {
   const slot = b.swatch && b.swatch.match(/Slot(\d+)/);
   if (slot) sub.push('Paint ' + slot[1]); else if (b.swatch) sub.push('Painted');
   const co = `X ${Math.round(b.x / 100)} · Y ${Math.round(b.y / 100)}`;
-  return `<b>${buildingDisplayName(b.className)}</b><br><span class="map-tip-sub">${sub.join(' · ')}</span><br><span class="map-tip-co">${co}</span>`;
+  return `<b>${esc(buildingDisplayName(b.className))}</b><br><span class="map-tip-sub">${esc(sub.join(' · '))}</span><br><span class="map-tip-co">${esc(co)}</span>`;
 }
 function mapHover(e) {
   const cv = $('mapCanvas'), tip = $('mapTip'); if (!cv || !tip) return;
@@ -1142,9 +1165,8 @@ function renderMap() {
 // ---------- mode dispatch ----------
 function present(res, targets) {
   lastResult = res; lastTargets = targets;
-  showOutput();
+  showOutput(); // -> applyView(), which renders the flowchart when that view is active
   renderTables(res);
-  if (state.view === 'flow') renderFlowView();
 }
 function solveAndRender() {
   $('modeExtras').innerHTML = '';
