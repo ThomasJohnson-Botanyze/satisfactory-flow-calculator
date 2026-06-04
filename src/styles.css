@@ -303,3 +303,55 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 }
 .banner-num { font-size: 24px; font-weight: 800; color: var(--accent); }
 .banner-unit { color: var(--text); font-size: 13px; }
+
+/* game-settings badge + selects */
+.badge {
+  font-size: 9px;
+  text-transform: none;
+  letter-spacing: 0;
+  background: rgba(249, 168, 37, 0.15);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.game-sel { margin-bottom: 0; }
+
+/* view toggle */
+.view-toggle { display: flex; gap: 4px; margin-bottom: 14px; }
+.vt {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  padding: 7px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.vt:hover { color: var(--text); }
+.vt.active { background: var(--accent); color: #1a1300; border-color: var(--accent); }
+
+/* flowchart */
+.flow-hint { margin: 0 0 8px; }
+.flow-scroll {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #11141a;
+  overflow: auto;
+  height: calc(100% - 96px);
+  min-height: 440px;
+}
+#flowSvg { display: block; }
+.node { cursor: grab; }
+.node.dragging { cursor: grabbing; }
+.node rect { stroke-width: 1.5; }
+.node.raw rect { fill: #2b313c; stroke: #5b6675; }
+.node.machine rect { fill: #3a2a12; stroke: var(--accent); }
+.node.out rect { fill: #15361f; stroke: var(--good); }
+.node .n-title { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
+.node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
+.edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }
+.edge-label { fill: #9aa3b2; font-size: 9px; paint-order: stroke; stroke: #11141a; stroke-width: 3px; }

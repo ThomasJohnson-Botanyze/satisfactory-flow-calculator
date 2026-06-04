@@ -44,7 +44,7 @@
           </section>
 
           <section class="ctl-group">
-            <h2>Game-mode cost options</h2>
+            <h2>Machine tuning</h2>
             <div class="slider">
               <div class="slider-head"><span>Overclock</span><output id="clockOut">100%</output></div>
               <input id="clock" type="range" min="1" max="250" step="1" value="100" />
@@ -54,11 +54,6 @@
               <div class="slider-head"><span>Somersloop amplification</span><output id="sloopOut">1.0×</output></div>
               <input id="sloop" type="range" min="100" max="400" step="50" value="100" />
               <small class="hint">Output ×amp, power ×amp² (production amplification)</small>
-            </div>
-            <div class="slider">
-              <div class="slider-head"><span>Recipe input cost</span><output id="costOut">1.00×</output></div>
-              <input id="cost" type="range" min="25" max="400" step="5" value="100" />
-              <small class="hint">Scales every recipe's ingredient amounts (custom game mode)</small>
             </div>
           </section>
         </div>
@@ -110,6 +105,24 @@
           </section>
         </div>
 
+        <!-- ============ SHARED: COST MULTIPLIER (game settings) ============ -->
+        <section class="ctl-group">
+          <h2>Cost Multiplier <small class="badge">Advanced Game Settings</small></h2>
+          <label class="fld">
+            <span>Recipe Parts Cost Multiplier</span>
+            <select id="mRecipe" class="sel game-sel"></select>
+          </label>
+          <label class="fld">
+            <span>Power Consumption Multiplier</span>
+            <select id="mPower" class="sel game-sel"></select>
+          </label>
+          <label class="fld">
+            <span>Space Elevator Deliverable Cost Multiplier</span>
+            <select id="mSpace" class="sel game-sel"></select>
+            <small class="hint">Only scales space-elevator part targets (Smart Plating, etc.).</small>
+          </label>
+        </section>
+
         <!-- ============ SHARED SUMMARY ============ -->
         <section class="ctl-group summary">
           <h2>Summary</h2>
@@ -125,8 +138,19 @@
         <div id="empty" class="empty"><p id="emptyMsg">Pick a target item to build a production flow.</p></div>
 
         <div id="output" hidden>
+          <div class="view-toggle">
+            <button id="viewTables" class="vt active">▦ Tables</button>
+            <button id="viewFlow" class="vt">⤳ Flowchart</button>
+          </div>
+
           <div id="modeExtras"></div>
 
+          <div id="flowView" hidden>
+            <p class="hint flow-hint">Drag nodes to rearrange. Gray = raw · orange = machine · green = output.</p>
+            <div class="flow-scroll"><svg id="flowSvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+          </div>
+
+          <div id="tableView">
           <h2 class="block-title">Production steps</h2>
           <div class="table-wrap">
             <table id="prodTable">
@@ -158,6 +182,7 @@
               <table id="byprodTable"><thead><tr><th>Item</th><th class="num">Rate / min</th></tr></thead><tbody></tbody></table>
             </div>
           </div>
+          </div><!-- /tableView -->
         </div>
       </section>
     </main>

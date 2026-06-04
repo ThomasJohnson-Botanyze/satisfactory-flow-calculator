@@ -42,10 +42,16 @@ async function main() {
   console.log('PLANNER');
   await evalJs(`${helpers}
     tab('planner');
-    setv(document.getElementById('targetItem'),'Reinforced Iron Plate','input');
-    setv(document.getElementById('targetRate'),'30','input');
+    setv(document.getElementById('targetItem'),'Modular Frame','input');
+    setv(document.getElementById('targetRate'),'10','input');
+    document.getElementById('viewTables').click();
     return 'ok';`);
   await sleep(400); await shot('m-planner');
+
+  console.log('FLOWCHART');
+  await evalJs(`document.getElementById('viewFlow').click(); return 'ok';`);
+  await sleep(500); await shot('m-flow');
+  await evalJs(`document.getElementById('viewTables').click(); return 'ok';`);
 
   console.log('OPTIMIZER');
   await evalJs(`${helpers}

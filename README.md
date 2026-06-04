@@ -7,17 +7,29 @@ sliders for new game-mode recipe-cost options. Built with Electron, ships as a W
 
 ## Three modes (tabs)
 
+### Views (all modes)
+- **Tables** — production steps, raw resources, building totals, by-products.
+- **Flowchart** — node-graph like satisfactory-tools: gray raw → orange machine → green output, edges
+  labeled with item + rate, layered left→right. **Drag nodes** to rearrange.
+
 ### 1. Planner
 - Pick a target item + output rate; expands the full recipe tree, aggregates shared intermediates,
   reports machine counts, raw-resource demand, building totals, and power.
 - **Alternate recipe selection** — every produced item has a dropdown of all recipes that make it
   (standard + ★ alternates). Switch any node; re-solves instantly. **⛏ Raw input** treats an item as
   imported and stops expanding it.
-- **Game-mode cost sliders:**
-  - **Overclock** (1–250 %) — fewer machines, power scales by `clock^1.32` per machine (in-game curve).
-  - **Somersloop amplification** (1.0×–4.0×) — production amplification: output ×amp, power ×amp².
-  - **Recipe input cost** (0.25×–4.0×) — scales every recipe's ingredient amounts (custom game-mode
-    resource-cost knob). Compounds up the tree like the real setting.
+
+### Cost Multiplier — exact Advanced Game Settings *(applies to all modes)*
+Dropdowns matching the in-game **Advanced Game Settings → Cost Multiplier** values exactly:
+- **Recipe Parts Cost Multiplier** — `0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2`. Scales every recipe's
+  ingredient amounts; compounds up the chain (the game's "exceedingly high values" warning).
+- **Power Consumption Multiplier** — `0.25, 0.5, 0.75, 1, 2, 5`. Scales all building power.
+- **Space Elevator Deliverable Cost Multiplier** — `0.25, 0.5, 0.75, 1, 2, 5, 10, 25, 50, 100`. Scales
+  the target rate only for space-elevator parts (Smart Plating, Versatile Framework, … Nuclear Pasta).
+
+### Machine tuning (Planner)
+- **Overclock** (1–250 %) — fewer machines, power scales by `clock^1.32` per machine (in-game curve).
+- **Somersloop amplification** (1.0×–4.0×) — production amplification: output ×amp, power ×amp².
 
 ### 2. Recipe Optimizer  *(auto-pick best alternates)*
 - Give it **desired outputs** (item + rate) and **allowed input resources** (tick which raws you can
