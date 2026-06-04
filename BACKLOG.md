@@ -19,25 +19,30 @@ and an acceptance check. Built to be worked one-at-a-time in an improvement loop
 Done (13): S1, B1, B2, B3, B4, B5, P1, U1, U5, U6, U7, T1, T2.
 
 ## Status — improvement loop, round 2 (branch `claude/backlog-round-2`)
-Done (5): U2, U3, U4, U8, U9. S2 partially done. `npm test` green (42 unit + 52 UI).
+Done (6): U2, U3, U4, U8, U9, **S2 (full + partial)**. `npm test` green
+(42 unit + 52 UI + 6 bundle-smoke = 100 checks).
 - **U2** save pickers synced.
 - **U3** selected save remembered (`saveFile` global) + map auto-loads on first open.
 - **U4** intermediates allowed as Optimizer/Max inputs (new `inputList` + `opt.extraInputs`).
 - **U8** edge labels staggered along their bezier to reduce overlap.
 - **U9** export production tables (CSV), flowchart (PNG), map (PNG); CSP relaxed to
   `img-src 'self' data: blob:` for SVG→PNG.
-- **S2 (partial)** navigation hardened in `main.js` (deny in-app windows, route
-  external links to the OS browser, block navigation away from index.html).
+- **S2** Electron fully hardened:
+  - `main.js`: navigation lockdown (deny in-app windows, external links → OS browser,
+    block navigation away from index.html) **and** `contextIsolation:true`,
+    `nodeIntegration:false`, `sandbox:false`, `preload.js`.
+  - `preload.js`: contextBridge exposes only a 3-method read-only save API +
+    https-only `openExternal` on `window.api`.
+  - renderer drops its `require('./save-reader')`/`require('electron')` (guarded
+    `window.api` shim); its pure deps are esbuild-bundled into `renderer.bundle.js`
+    (gitignored artifact, built on prestart/prepackage) so the page needs no `require`.
+  - `scripts/bundle-smoke.js` boots the bundle in jsdom's page context to prove no
+    require leak; wired into `npm test`.
+  - **Verified headless** (tests + bundle smoke + syntax). **Needs one manual
+    `npm start`** to confirm the live contextBridge wiring (save load + support link) —
+    that path can't be exercised without launching Electron.
 
-Still open (2):
-- **S2 (full)** contextIsolation:true / nodeIntegration:false 🟠 — needs a renderer
-  bundling step (esbuild) so the renderer's `require()`s of data/solver/building-meta
-  resolve without Node, plus a `preload.js` exposing save-reader/shell via
-  contextBridge. Deliberately NOT landed unverified: it's a high-blast-radius main-
-  process change (the v1.2.0 incident was exactly an unverified packaging/load break)
-  and can't be GUI-smoke-tested in a headless env. Land it with a manual `npm start`
-  pass. The tooltip escaping (S1) + navigation lockdown (S2 partial) already cap the
-  practical risk.
+Still open (1):
 - **P2** Debounce LP 🟡 — deliberately not done (proportionality): the only blocker is
   the synchronous UI test (asserts DOM right after each `input`), and reworking that
   230-line harness to async-flush isn't justified by an imperceptible perf gain on
@@ -47,7 +52,7 @@ Still open (2):
 1. [S1] XSS→RCE via untrusted save strings in tooltips 🔴 — ✅ DONE
 2. [B1] Vanilla save nodes hidden by default 🔴 — ✅ DONE
 3. [T1] No unit tests for solver / save-reader / extractors 🟠 — ✅ DONE
-4. [S2] Electron hardening (contextIsolation/nodeIntegration) 🟠 — ⏸ deferred
+4. [S2] Electron hardening (contextIsolation/nodeIntegration) 🟠 — ✅ DONE (round 2; needs one `npm start` smoke)
 5. [B3] Byproduct-only items treated as raw in Planner 🟠 — ✅ DONE
 6. [B2] Double flowchart render per solve 🟡 — ✅ DONE
 7. Everything else below 🟡 — B4/B5/P1/U1/U5/U6/U7 done; P2/U2/U3/U4/U8/U9 open
