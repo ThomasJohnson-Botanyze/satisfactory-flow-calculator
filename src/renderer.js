@@ -165,6 +165,9 @@ const defaultState = () => ({
   // [] = a save was read but no alternates unlocked. [...classNames] = restrict to these.
   unlockedAlts: null,
   saveName: '',
+  // Last selected .sav path — shared by the alternates picker and the map picker,
+  // and remembered across sessions so neither has to be re-chosen (world-level).
+  saveFile: '',
   // Alternate recipe classNames the user has manually excluded from this plan's
   // calculations (independent of unlock status — vetoes even unlocked/optimal ones).
   disabledAlts: [],
@@ -190,7 +193,7 @@ const PLANS_KEY = 'satisfactory-factory-plans-v1'; // multi-plan store
 // Settings that belong to the whole game/world rather than one factory — they
 // carry over across every plan: the game-save unlocked alternates and the three
 // cost multipliers. (disabledAlts stays per-plan: a manual veto for that factory.)
-const GLOBAL_KEYS = ['recipeCost', 'powerMult', 'spaceMult', 'unlockedAlts', 'saveName'];
+const GLOBAL_KEYS = ['recipeCost', 'powerMult', 'spaceMult', 'unlockedAlts', 'saveName', 'saveFile'];
 const cloneVal = (v) => (Array.isArray(v) ? v.slice() : v);
 const pickGlobals = (s) => { const g = {}; for (const k of GLOBAL_KEYS) g[k] = cloneVal(s[k]); return g; };
 const applyGlobals = (s, g) => { for (const k of GLOBAL_KEYS) if (k in g) s[k] = cloneVal(g[k]); };
@@ -1103,6 +1106,7 @@ function loadMapFromSave() {
   if (!sel || !sel.value) { if (st) st.textContent = 'No save selected.'; return; }
   st.classList.remove('warn-text'); st.textContent = 'Parsing save…';
   const file = sel.value;
+  state.saveFile = file; save(); // remember across sessions
   // Defer so "Parsing…" paints before the synchronous parse blocks the thread.
   setTimeout(() => {
     let res;
@@ -1412,6 +1416,22 @@ function buildSaveList() {
   try { info = SAVE.listSaves(); } catch (e) { info = { exists: false, saves: [] }; }
   fillSaveSelect($('saveSelect'), info);
   fillSaveSelect($('mapSaveSelect'), info);
+  applySaveSelection(); // restore the remembered save in both pickers
+}
+// The alternates picker and the map picker point at the same save. Keep them in
+// sync and remember the choice (a world-level setting, like the unlocks it yields).
+function applySaveSelection() {
+  const f = state.saveFile || '';
+  if (!f) return;
+  for (const id of ['saveSelect', 'mapSaveSelect']) {
+    const sel = $(id);
+    if (sel && [...sel.options].some((o) => o.value === f)) sel.value = f;
+  }
+}
+function selectSaveFile(file) {
+  state.saveFile = file || '';
+  applySaveSelection();
+  save();
 }
 let altSearch = '';
 // Alternates the user can manage: the unlocked set when a save is loaded, else all.
@@ -1476,6 +1496,7 @@ function loadFromSelectedSave() {
   st.classList.remove('warn-text');
   st.textContent = 'Parsing save…';
   const file = sel.value;
+  state.saveFile = file; save(); // remember across sessions
   // Defer so "Parsing…" paints before the synchronous parse blocks the thread.
   setTimeout(() => {
     let res;
@@ -1520,8 +1541,13 @@ function setMode(mode) {
     : 'Untick a recipe to stop the optimizer using it — even if unlocked or optimal.';
   $('mapView').hidden = !isMap;
   save();
-  if (isMap) { $('empty').hidden = true; $('output').hidden = true; renderMap(); }
-  else solveAndRender();
+  if (isMap) {
+    $('empty').hidden = true; $('output').hidden = true;
+    // Auto-load the remembered save the first time the map is opened in a session,
+    // so reopening the app restores the last map without a manual "Load map" click.
+    if (state.saveFile && !mapNodes.length && !mapBuildings.length) loadMapFromSave();
+    else renderMap();
+  } else solveAndRender();
 }
 
 // ---------- plan bar ----------
@@ -1630,6 +1656,9 @@ function init() {
   $('saveLoad').addEventListener('click', loadFromSelectedSave);
   $('saveRefresh').addEventListener('click', buildSaveList);
   $('saveClear').addEventListener('click', clearUnlockedFilter);
+  // Picking a save in either dropdown updates the other + is remembered.
+  $('saveSelect').addEventListener('change', (e) => selectSaveFile(e.target.value));
+  $('mapSaveSelect').addEventListener('change', (e) => selectSaveFile(e.target.value));
   $('altSearch').addEventListener('input', (e) => { altSearch = e.target.value; renderSaveStatus(); });
   $('altAllOn').addEventListener('click', () => setAllAlts(true));
   $('altAllOff').addEventListener('click', () => setAllAlts(false));
