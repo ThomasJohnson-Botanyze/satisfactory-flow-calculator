@@ -64,8 +64,8 @@
             </div>
             <div class="slider">
               <div class="slider-head"><span>Somersloop amplification</span><output id="sloopOut">1.0×</output></div>
-              <input id="sloop" type="range" min="100" max="400" step="50" value="100" />
-              <small class="hint">Output ×amp, power ×amp² (production amplification)</small>
+              <input id="sloop" type="range" min="100" max="200" step="50" value="100" />
+              <small class="hint">Output ×amp, power ×amp² · in-game max is 2× (all slots filled)</small>
             </div>
           </section>
         </div>
@@ -128,7 +128,7 @@
             </label>
             <div class="chip-toolbar">
               <button id="mapLoad" class="btn mini" title="Read resource nodes and buildings from the selected save">Load map</button>
-              <button id="mapRefresh" class="btn mini ghost" title="Rescan the save folder">↻</button>
+              <button id="mapRefresh" class="btn mini ghost" aria-label="Rescan the save folder" title="Rescan the save folder">↻</button>
             </div>
             <small id="mapStatus" class="hint">Pick your save and Load to plot resource nodes.</small>
           </section>
@@ -185,7 +185,7 @@
           </label>
           <div class="chip-toolbar">
             <button id="saveLoad" class="btn mini" title="Read unlocked alternate recipes from the selected save">Load unlocked</button>
-            <button id="saveRefresh" class="btn mini ghost" title="Rescan the save folder">↻</button>
+            <button id="saveRefresh" class="btn mini ghost" aria-label="Rescan the save folder" title="Rescan the save folder">↻</button>
             <button id="saveClear" class="btn mini ghost" title="Forget the loaded save — treat all alternates as unlocked">Clear</button>
           </div>
           <small id="saveStatus" class="hint"></small>
@@ -226,7 +226,6 @@
           <div class="stat"><span>Total power</span><b id="sumPower">—</b></div>
           <div class="stat"><span>Production machines</span><b id="sumMachines">—</b></div>
           <div class="stat"><span id="sumExtraLabel">Raw resource types</span><b id="sumRaw">—</b></div>
-          <div id="warnBox" class="warn" hidden></div>
         </section>
       </aside>
 
@@ -245,9 +244,9 @@
             <div class="flow-head">
               <span class="hint flow-hint">Drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output.</span>
               <div class="flow-tools">
-                <button id="flowZoomOut" class="btn mini ghost" title="Zoom out">−</button>
+                <button id="flowZoomOut" class="btn mini ghost" aria-label="Zoom out" title="Zoom out">−</button>
                 <span id="flowZoomPct" class="flow-zoom-pct">100%</span>
-                <button id="flowZoomIn" class="btn mini ghost" title="Zoom in">+</button>
+                <button id="flowZoomIn" class="btn mini ghost" aria-label="Zoom in" title="Zoom in">+</button>
                 <button id="flowFit" class="btn mini ghost" title="Fit the whole factory in view">Fit</button>
                 <button id="flowReset" class="btn mini ghost" title="Restore the automatic layout">Reset layout</button>
               </div>
@@ -307,7 +306,7 @@
     <!-- ============ SUPPORT MODAL ============ -->
     <div id="supportModal" class="modal-backdrop" hidden>
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="supportTitle">
-        <button id="supportClose" class="modal-x" title="Close">✕</button>
+        <button id="supportClose" class="modal-x" aria-label="Close" title="Close">✕</button>
         <h2 id="supportTitle">Support the Calculator</h2>
         <p class="modal-lead">One person builds this — free to use, and updated for new Satisfactory versions before anyone else. If it saved you planning time, chip in. It keeps the updates coming.</p>
         <div class="support-cards">

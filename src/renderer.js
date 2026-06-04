@@ -1171,7 +1171,6 @@ function present(res, targets) {
 function solveAndRender() {
   $('modeExtras').innerHTML = '';
   $('maxBanner').hidden = true;
-  $('warnBox').hidden = true;
   if (state.mode === 'planner') return renderPlanner();
   if (state.mode === 'optimize') return renderOptimize();
   if (state.mode === 'max') return renderMax();
@@ -1285,7 +1284,7 @@ function buildPlannerExtra() {
     const row = el('div', 'row');
     const name = el('input', 'row-item'); name.setAttribute('list', 'itemList'); name.placeholder = 'item…'; name.value = o.name; name.autocomplete = 'off';
     const rate = el('input', 'row-rate'); rate.type = 'number'; rate.min = '0'; rate.step = 'any'; rate.value = o.rate;
-    const rm = el('button', 'row-rm', '×');
+    const rm = el('button', 'row-rm', '×'); rm.setAttribute('aria-label', 'Remove'); rm.title = 'Remove';
     name.addEventListener('input', () => { o.name = name.value; save(); solveAndRender(); });
     rate.addEventListener('input', () => { o.rate = parseFloat(rate.value) || 0; save(); solveAndRender(); });
     rm.addEventListener('click', () => { state.extraTargets.splice(i, 1); save(); buildPlannerExtra(); solveAndRender(); });
@@ -1300,7 +1299,7 @@ function buildOptOutputs() {
     const row = el('div', 'row');
     const name = el('input', 'row-item'); name.setAttribute('list', 'itemList'); name.placeholder = 'item…'; name.value = o.name; name.autocomplete = 'off';
     const rate = el('input', 'row-rate'); rate.type = 'number'; rate.min = '0'; rate.step = 'any'; rate.value = o.rate;
-    const rm = el('button', 'row-rm', '×');
+    const rm = el('button', 'row-rm', '×'); rm.setAttribute('aria-label', 'Remove'); rm.title = 'Remove';
     name.addEventListener('input', () => { o.name = name.value; if (i === 0 && nameToClass(name.value)) { state.targetItem = nameToClass(name.value); reflectPrimary('optimize'); } save(); solveAndRender(); });
     rate.addEventListener('input', () => { o.rate = parseFloat(rate.value) || 0; if (i === 0) { state.targetRate = o.rate; reflectPrimary('optimize'); } save(); solveAndRender(); });
     rm.addEventListener('click', () => { state.opt.outputs.splice(i, 1); if (!state.opt.outputs.length) state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); solveAndRender(); });
@@ -1332,7 +1331,7 @@ function buildMaxSupply() {
     const sel = el('select', 'row-item');
     for (const r of resList) { const o = el('option', null, r.n); o.value = r.c; if (r.c === s.item) o.selected = true; sel.appendChild(o); }
     const amt = el('input', 'row-rate'); amt.type = 'number'; amt.min = '0'; amt.step = 'any'; amt.value = s.amount;
-    const rm = el('button', 'row-rm', '×');
+    const rm = el('button', 'row-rm', '×'); rm.setAttribute('aria-label', 'Remove'); rm.title = 'Remove';
     sel.addEventListener('change', () => { s.item = sel.value; save(); solveAndRender(); });
     amt.addEventListener('input', () => { s.amount = parseFloat(amt.value) || 0; save(); solveAndRender(); });
     rm.addEventListener('click', () => { state.max.supply.splice(i, 1); if (!state.max.supply.length) state.max.supply.push({ item: resList[0].c, amount: 120 }); save(); buildMaxSupply(); solveAndRender(); });
@@ -1489,6 +1488,7 @@ function renderPlanBar() {
     tab.appendChild(lab);
     const x = el('button', 'plan-close', '×');
     x.title = 'Delete this plan';
+    x.setAttribute('aria-label', 'Delete plan ' + p.name);
     x.addEventListener('click', (e) => { e.stopPropagation(); deletePlan(p.id); });
     tab.appendChild(x);
     box.appendChild(tab);
@@ -1616,7 +1616,12 @@ function init() {
   $('planNew').addEventListener('click', () => newPlan());
   $('planDup').addEventListener('click', () => duplicatePlan(activeId));
   $('btnReset').addEventListener('click', () => { state.picks = {}; state.nodeClock = {}; save(); solveAndRender(); });
-  $('btnClear').addEventListener('click', () => { const p = activePlan(); const g = pickGlobals(p.state); p.state = defaultState(); applyGlobals(p.state, g); state = p.state; save(); applyStateToControls(); });
+  $('btnClear').addEventListener('click', () => {
+    // More destructive than "Reset recipes": wipes target, picks, extra outputs and
+    // flow layout for this plan. Confirm first (game-save + cost globals are kept).
+    if (typeof confirm === 'function' && !confirm('Clear this plan? Target, recipe choices, extra outputs and flowchart layout will be reset.')) return;
+    const p = activePlan(); const g = pickGlobals(p.state); p.state = defaultState(); applyGlobals(p.state, g); state = p.state; save(); applyStateToControls();
+  });
 
   // support modal
   const supportModal = $('supportModal');
