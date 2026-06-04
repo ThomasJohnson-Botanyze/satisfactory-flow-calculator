@@ -86,6 +86,9 @@
               <button id="optNoInputs" class="btn mini ghost">None</button>
             </div>
             <div id="optInputs" class="reslist"></div>
+            <div id="optExtraInputs" class="rowlist" style="margin-top:10px"></div>
+            <button id="optAddInput" class="btn mini ghost">+ add intermediate input</button>
+            <small class="hint">Supply a non-resource item (e.g. Iron Plate) as a free input — blank cap = unlimited.</small>
           </section>
 
           <section class="ctl-group">
@@ -103,7 +106,7 @@
         <div class="mode-panel" data-mode="max" hidden>
           <section class="ctl-group">
             <h2>Available inputs</h2>
-            <p class="hint" style="margin-top:-6px">Set how much of each resource you have (per&nbsp;min).</p>
+            <p class="hint" style="margin-top:-6px">Set how much of each item you have (per&nbsp;min) — raw resources or intermediates.</p>
             <div id="maxSupply" class="rowlist"></div>
             <button id="maxAddSupply" class="btn mini ghost">+ add input</button>
           </section>
@@ -338,6 +341,7 @@
     </div>
 
     <datalist id="itemList"></datalist>
+    <datalist id="inputList"></datalist>
     <script src="renderer.js"></script>
   </body>
 </html>

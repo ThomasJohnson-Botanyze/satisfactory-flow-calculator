@@ -139,6 +139,19 @@ const nameToClass = (name) => {
   const hit = targetable.find((t) => t.n.toLowerCase() === k);
   return hit ? hit.c : '';
 };
+// Any item that can serve as an input/supply: raw resources + every producible
+// item (so an Optimizer/Max run can start from an intermediate like Iron Plate,
+// not just the 13 raw resources). Deduped, sorted by name.
+const inputItems = (() => {
+  const seen = new Set(); const arr = [];
+  for (const t of [...resList, ...targetable]) if (!seen.has(t.c)) { seen.add(t.c); arr.push(t); }
+  return arr.sort((a, b) => a.n.localeCompare(b.n));
+})();
+const anyNameToClass = (name) => {
+  const k = (name || '').trim().toLowerCase();
+  const hit = inputItems.find((t) => t.n.toLowerCase() === k);
+  return hit ? hit.c : '';
+};
 
 // ---------- state ----------
 const defaultState = () => ({
@@ -174,6 +187,9 @@ const defaultState = () => ({
   opt: {
     outputs: [{ name: '', rate: 60 }],
     inputs: Object.fromEntries(resList.map((r) => [r.c, { on: true, cap: '' }])),
+    // Extra non-resource inputs the optimizer may consume freely (e.g. a supplied
+    // intermediate). Each { name, cap }; blank cap = unlimited.
+    extraInputs: [],
     objective: 'raw',
     alts: true,
   },
@@ -1342,6 +1358,7 @@ function renderOptimize() {
   if (!n) return showEmpty('Add at least one desired output item to optimize.');
   const allowedInputs = {};
   for (const r of resList) { const cfg = state.opt.inputs[r.c]; if (cfg && cfg.on) allowedInputs[r.c] = cfg.cap === '' || cfg.cap == null ? Infinity : Number(cfg.cap); }
+  for (const x of state.opt.extraInputs || []) { const c = anyNameToClass(x.name); if (c) allowedInputs[c] = x.cap === '' || x.cap == null ? Infinity : Number(x.cap); }
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
   const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet() });
@@ -1401,6 +1418,25 @@ function buildItemList() {
   const dl = $('itemList');
   dl.innerHTML = '';
   for (const it of targetable) { const o = el('option'); o.value = it.n; dl.appendChild(o); }
+  const il = $('inputList'); // resources + intermediates, for input/supply pickers
+  if (il) { il.innerHTML = ''; for (const it of inputItems) { const o = el('option'); o.value = it.n; il.appendChild(o); } }
+}
+// Optimizer "other inputs": extra non-resource items the optimizer may consume freely.
+function buildOptExtraInputs() {
+  const box = $('optExtraInputs');
+  if (!box) return;
+  box.innerHTML = '';
+  (state.opt.extraInputs || (state.opt.extraInputs = [])).forEach((x, i) => {
+    const row = el('div', 'row');
+    const name = el('input', 'row-item'); name.setAttribute('list', 'inputList'); name.placeholder = 'item…'; name.value = x.name; name.autocomplete = 'off';
+    const cap = el('input', 'row-rate'); cap.type = 'number'; cap.min = '0'; cap.step = 'any'; cap.placeholder = '∞'; cap.value = x.cap;
+    const rm = el('button', 'row-rm', '×'); rm.setAttribute('aria-label', 'Remove'); rm.title = 'Remove';
+    name.addEventListener('input', () => { x.name = name.value; save(); solveAndRender(); });
+    cap.addEventListener('input', () => { x.cap = cap.value; save(); solveAndRender(); });
+    rm.addEventListener('click', () => { state.opt.extraInputs.splice(i, 1); save(); buildOptExtraInputs(); solveAndRender(); });
+    row.append(name, cap, rm);
+    box.appendChild(row);
+  });
 }
 function buildGameSelect(id, values, cur) {
   const sel = $(id);
@@ -1462,14 +1498,13 @@ function buildMaxSupply() {
   box.innerHTML = '';
   state.max.supply.forEach((s, i) => {
     const row = el('div', 'row');
-    const sel = el('select', 'row-item');
-    for (const r of resList) { const o = el('option', null, r.n); o.value = r.c; if (r.c === s.item) o.selected = true; sel.appendChild(o); }
+    const name = el('input', 'row-item'); name.setAttribute('list', 'inputList'); name.placeholder = 'item…'; name.value = s.item ? itemName(s.item) : ''; name.autocomplete = 'off';
     const amt = el('input', 'row-rate'); amt.type = 'number'; amt.min = '0'; amt.step = 'any'; amt.value = s.amount;
     const rm = el('button', 'row-rm', '×'); rm.setAttribute('aria-label', 'Remove'); rm.title = 'Remove';
-    sel.addEventListener('change', () => { s.item = sel.value; save(); solveAndRender(); });
+    name.addEventListener('input', () => { s.item = anyNameToClass(name.value); save(); solveAndRender(); });
     amt.addEventListener('input', () => { s.amount = parseFloat(amt.value) || 0; save(); solveAndRender(); });
     rm.addEventListener('click', () => { state.max.supply.splice(i, 1); if (!state.max.supply.length) state.max.supply.push({ item: resList[0].c, amount: 120 }); save(); buildMaxSupply(); solveAndRender(); });
-    row.append(sel, amt, rm);
+    row.append(name, amt, rm);
     box.appendChild(row);
   });
 }
@@ -1690,6 +1725,7 @@ function applyStateToControls() {
   buildPlannerExtra();
   buildOptOutputs();
   buildOptInputs();
+  buildOptExtraInputs();
   buildMaxSupply();
   buildGameSelect('mRecipe', GAME.recipe, state.recipeCost);
   buildGameSelect('mPower', GAME.power, state.powerMult);
@@ -1768,6 +1804,7 @@ function init() {
   $('optAlts').addEventListener('change', (e) => { state.opt.alts = e.target.checked; save(); solveAndRender(); });
   $('optAllInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = true)); save(); buildOptInputs(); solveAndRender(); });
   $('optNoInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = false)); save(); buildOptInputs(); solveAndRender(); });
+  $('optAddInput').addEventListener('click', () => { (state.opt.extraInputs || (state.opt.extraInputs = [])).push({ name: '', cap: '' }); save(); buildOptExtraInputs(); });
 
   $('maxAddSupply').addEventListener('click', () => { state.max.supply.push({ item: resList[0].c, amount: 60 }); save(); buildMaxSupply(); });
   const onProduct = (v) => { const c = nameToClass(v); state.max.product = c; if (c) { state.targetItem = c; reflectPrimary('max'); } save(); solveAndRender(); };

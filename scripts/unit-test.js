@@ -44,6 +44,14 @@ check('planner uses 2 machines total', plan.totalMachines === 2);
 const bad = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: {}, objective: 'raw', allowAlternates: false });
 check('optimize infeasible with no inputs', bad.feasible === false);
 
+// Intermediate as a free input (what U4 surfaces in the UI): supply Iron Ingot and
+// make Iron Plate — the ingot is consumed directly, no ore pulled.
+const interm = LP.optimize({ outputs: { [IronPlate]: 20 }, allowedInputs: { [IronIngot]: Infinity }, objective: 'raw', allowAlternates: false });
+check('optimize from an intermediate input feasible', interm.feasible === true);
+const ingotIn = interm.raw.find((r) => r.item === IronIngot);
+check('supplied intermediate consumed (~30 ingot for 20 plate)', !!ingotIn && near(ingotIn.rate, 30, 0.5));
+check('no ore pulled when ingot supplied', !interm.raw.some((r) => r.item === IronOre));
+
 // ---- factory-extract ----
 console.log('\n### FACTORY-EXTRACT');
 check('quatToYaw identity = 0', near(FE.quatToYaw({ x: 0, y: 0, z: 0, w: 1 }), 0));
