@@ -15,14 +15,34 @@ and an acceptance check. Built to be worked one-at-a-time in an improvement loop
 - 🟠 **Medium** — real defect or notable gap; not everyone hits it.
 - 🟡 **Low** — polish, edge case, minor perf, tech debt.
 
-## Priority order (quick list)
-1. [S1] XSS→RCE via untrusted save strings in tooltips 🔴
-2. [B1] Vanilla save nodes hidden by default 🔴
-3. [T1] No unit tests for solver / save-reader / extractors 🟠
-4. [S2] Electron hardening (contextIsolation/nodeIntegration) 🟠
-5. [B3] Byproduct-only items treated as raw in Planner 🟠
-6. [B2] Double flowchart render per solve 🟡
-7. Everything else below 🟡
+## Status — improvement loop, round 1
+Done (13): S1, B1, B2, B3, B4, B5, P1, U1, U5, U6, U7, T1, T2. All shipped with
+`npm test` green (35 unit + 52 UI = 87 checks).
+
+Remaining (7) — need a product/UX decision or a larger refactor; not pure bug fixes:
+- **S2** Electron hardening 🟠 — real follow-up, but a structural change (preload +
+  IPC; the renderer currently `require()`s data/solver/save-reader directly, which
+  `contextIsolation` forbids). S1 already closes the concrete XSS→RCE path; S2 is
+  defence-in-depth. Deferred — needs a manual Electron run to verify, can't be
+  covered by the headless tests.
+- **P2** Debounce LP 🟡 — the UI test asserts the DOM synchronously after every
+  `input` event, so any debounce breaks it. Needs the test harness reworked to
+  flush timers first. Deferred.
+- **U2** Unify the two save selectors 🟡 — minor; sync the dropdowns.
+- **U3** Persist / auto-load the map 🟡 — product call: auto-parse on launch (slow
+  on big saves) vs. just remember the selection.
+- **U4** Allow intermediates as Optimizer/Max inputs 🟡 — feature.
+- **U8** Flowchart label overlap 🟡 — needs visual iteration.
+- **U9** Export results (CSV / PNG / SVG) 🟡 — feature; format TBD.
+
+## Priority order (original)
+1. [S1] XSS→RCE via untrusted save strings in tooltips 🔴 — ✅ DONE
+2. [B1] Vanilla save nodes hidden by default 🔴 — ✅ DONE
+3. [T1] No unit tests for solver / save-reader / extractors 🟠 — ✅ DONE
+4. [S2] Electron hardening (contextIsolation/nodeIntegration) 🟠 — ⏸ deferred
+5. [B3] Byproduct-only items treated as raw in Planner 🟠 — ✅ DONE
+6. [B2] Double flowchart render per solve 🟡 — ✅ DONE
+7. Everything else below 🟡 — B4/B5/P1/U1/U5/U6/U7 done; P2/U2/U3/U4/U8/U9 open
 
 ---
 
