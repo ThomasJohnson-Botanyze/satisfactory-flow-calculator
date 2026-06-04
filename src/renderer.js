@@ -1,8 +1,37 @@
 'use strict';
-const DATA = require('./data.json');
-const LP = require('./solver-lp');
-const SAVE = require('./save-reader');
-const BMETA = require('./building-meta');
+// Load the bundled modules behind a guard. If a packaging mistake ships the app
+// without its runtime deps or sibling files (e.g. node_modules got stripped by an
+// over-eager --prune), every top-level require throws and the whole renderer dies
+// silently — blank tabs, empty dropdowns, no plan list, which reads to the user as
+// "it deleted my factories." Catch that, show a readable error, and make clear the
+// saved data is untouched (it lives in localStorage, not in the app bundle).
+let DATA, LP, SAVE, BMETA;
+try {
+  DATA = require('./data.json');
+  LP = require('./solver-lp');
+  SAVE = require('./save-reader');
+  BMETA = require('./building-meta');
+} catch (err) {
+  showFatalLoadError(err);
+  throw err; // the rest of the renderer can't run without these — halt cleanly
+}
+function showFatalLoadError(err) {
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;padding:32px;background:#15171c;color:#e6e8ee;font:15px/1.55 system-ui,Segoe UI,Roboto,sans-serif';
+  box.innerHTML =
+    '<div style="max-width:640px">' +
+    '<h1 style="margin:0 0 12px;font-size:20px;color:#ff6b6b">This build is missing a component</h1>' +
+    '<p>The app couldn’t start because a bundled dependency failed to load:</p>' +
+    '<pre style="white-space:pre-wrap;background:#1e2129;padding:12px;border-radius:8px;color:#ffb4a2;margin:8px 0 16px">' +
+    esc((err && err.message) || err) + '</pre>' +
+    '<p><strong>Your saved factories are safe.</strong> They’re stored separately and were not touched — ' +
+    'reinstalling a correct build brings them back. This is a packaging bug, not data loss.</p>' +
+    '</div>';
+  const attach = () => document.body.appendChild(box);
+  if (document.body) attach();
+  else document.addEventListener('DOMContentLoaded', attach);
+}
 
 // ---------- support links ----------
 const SUPPORT_LINKS = {
