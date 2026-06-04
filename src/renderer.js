@@ -91,6 +91,7 @@ const defaultState = () => ({
   // Absent = that step follows the global Overclock slider (state.clock).
   nodeClock: {},
   flowPos: {}, // saved flowchart node positions for this plan (nodeId -> {x,y})
+  flowView: null, // saved flowchart zoom/pan for this plan ({k, tx, ty}); null = fit on render
   // null = no save loaded → every alternate available (original behavior).
   // [] = a save was read but no alternates unlocked. [...classNames] = restrict to these.
   unlockedAlts: null,
@@ -397,6 +398,7 @@ function renderTables(res) {
 // ---------- flowchart ----------
 let lastResult = null;
 let lastTargets = null;
+let currentFlow = null; // last laid-out flow, for zoom/fit buttons to re-apply without rebuilding
 
 function buildFlow(res, targets) {
   const nodes = [];
@@ -497,12 +499,15 @@ function edgePath(e, byId) {
 function drawFlow(flow) {
   const svg = $('flowSvg');
   while (svg.firstChild) svg.removeChild(svg.firstChild);
-  svg.setAttribute('width', flow.width);
-  svg.setAttribute('height', flow.height);
-  svg.setAttribute('viewBox', `0 0 ${flow.width} ${flow.height}`);
+  // SVG fills the container (1 user unit = 1px); zoom/pan is a transform on the root
+  // <g> so the graph scales to the window instead of running off the right edge.
+  svg.removeAttribute('viewBox');
+  const root = document.createElementNS(SVGNS, 'g');
+  root.setAttribute('id', 'flowRoot');
   const gEdges = document.createElementNS(SVGNS, 'g');
   const gNodes = document.createElementNS(SVGNS, 'g');
-  svg.appendChild(gEdges); svg.appendChild(gNodes);
+  root.appendChild(gEdges); root.appendChild(gNodes);
+  svg.appendChild(root);
 
   flow.edges.forEach((e) => {
     const p = edgePath(e, flow.byId);
@@ -539,6 +544,7 @@ function drawFlow(flow) {
     gNodes.appendChild(g);
     attachDrag(g, n, flow);
   });
+  ensureFlowControls();
 }
 
 function attachDrag(g, node, flow) {
@@ -546,8 +552,9 @@ function attachDrag(g, node, flow) {
   g.addEventListener('pointerdown', (ev) => { last = { x: ev.clientX, y: ev.clientY }; g.setPointerCapture(ev.pointerId); g.classList.add('dragging'); ev.preventDefault(); });
   g.addEventListener('pointermove', (ev) => {
     if (!last) return;
-    node.x += ev.clientX - last.x;
-    node.y += ev.clientY - last.y;
+    const k = (state.flowView && state.flowView.k) || 1; // screen px → world units under zoom
+    node.x += (ev.clientX - last.x) / k;
+    node.y += (ev.clientY - last.y) / k;
     last = { x: ev.clientX, y: ev.clientY };
     g.setAttribute('transform', `translate(${node.x},${node.y})`);
     [...node.ins, ...node.outs].forEach((e) => {
@@ -565,10 +572,91 @@ function attachDrag(g, node, flow) {
   g.addEventListener('pointercancel', end);
 }
 
+// ---------- flowchart zoom / pan ----------
+const FLOW_MINK = 0.12, FLOW_MAXK = 2;
+const clampFlowK = (k) => Math.max(FLOW_MINK, Math.min(FLOW_MAXK, k));
+let flowSaveT = null;
+const saveFlowViewSoon = () => { if (flowSaveT) return; flowSaveT = setTimeout(() => { flowSaveT = null; save(); }, 250); };
+
+function applyFlowTransform() {
+  const root = $('flowRoot'); if (!root) return;
+  const v = state.flowView || { k: 1, tx: 0, ty: 0 };
+  root.setAttribute('transform', `translate(${v.tx},${v.ty}) scale(${v.k})`);
+  const pct = $('flowZoomPct'); if (pct) pct.textContent = Math.round(v.k * 100) + '%';
+}
+
+function flowViewport() {
+  const svg = $('flowSvg'); if (!svg) return { w: 800, h: 440, left: 0, top: 0 };
+  const r = svg.getBoundingClientRect();
+  return { w: r.width || 800, h: r.height || 440, left: r.left, top: r.top };
+}
+
+// Scale the whole graph to fit the visible area, centered — never upscaled past 100% —
+// so even big factories show end-to-end with nothing clipped off the right.
+function fitFlow(flow) {
+  if (!flow) return;
+  const vp = flowViewport(), m = 24;
+  const k = clampFlowK(Math.min((vp.w - 2 * m) / Math.max(1, flow.width), (vp.h - 2 * m) / Math.max(1, flow.height), 1));
+  state.flowView = { k, tx: (vp.w - k * flow.width) / 2, ty: (vp.h - k * flow.height) / 2 };
+  applyFlowTransform();
+}
+
+// Zoom by `factor` keeping the world point under (sx,sy) — screen px from the svg
+// top-left — fixed on screen, so it zooms toward the cursor.
+function zoomFlowAt(sx, sy, factor) {
+  const v = state.flowView || { k: 1, tx: 0, ty: 0 };
+  const nk = clampFlowK(v.k * factor);
+  state.flowView = { k: nk, tx: sx - nk * (sx - v.tx) / v.k, ty: sy - nk * (sy - v.ty) / v.k };
+  applyFlowTransform();
+  saveFlowViewSoon();
+}
+function zoomFlowCenter(factor) { const vp = flowViewport(); zoomFlowAt(vp.w / 2, vp.h / 2, factor); }
+
+// Wire pan (drag empty background) + wheel-zoom on the svg, once per element.
+function ensureFlowControls() {
+  const svg = $('flowSvg');
+  if (!svg || svg._fcWired) return;
+  svg._fcWired = true;
+  let pan = null;
+  svg.addEventListener('pointerdown', (ev) => {
+    if (ev.target !== svg) return; // nodes handle their own drag; only blank space pans
+    const v = state.flowView || { k: 1, tx: 0, ty: 0 };
+    pan = { x: ev.clientX, y: ev.clientY, tx: v.tx, ty: v.ty };
+    svg.setPointerCapture(ev.pointerId); svg.classList.add('panning');
+  });
+  svg.addEventListener('pointermove', (ev) => {
+    if (!pan) return;
+    const v = state.flowView || { k: 1, tx: 0, ty: 0 };
+    state.flowView = { k: v.k, tx: pan.tx + (ev.clientX - pan.x), ty: pan.ty + (ev.clientY - pan.y) };
+    applyFlowTransform();
+  });
+  const endPan = (ev) => {
+    if (!pan) return;
+    pan = null; svg.classList.remove('panning');
+    try { svg.releasePointerCapture(ev.pointerId); } catch (_) {}
+    save();
+  };
+  svg.addEventListener('pointerup', endPan);
+  svg.addEventListener('pointercancel', endPan);
+  svg.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    const vp = flowViewport();
+    zoomFlowAt(ev.clientX - vp.left, ev.clientY - vp.top, ev.deltaY < 0 ? 1.12 : 1 / 1.12);
+  }, { passive: false });
+}
+
 function renderFlowView() {
   if (!lastResult) return;
-  const flow = layoutFlow(buildFlow(lastResult, lastTargets));
-  drawFlow(flow);
+  currentFlow = layoutFlow(buildFlow(lastResult, lastTargets));
+  drawFlow(currentFlow);
+  // Keep the saved zoom/pan across tab toggles; first render of a plan fits to window.
+  if (state.flowView && isFinite(state.flowView.k)) applyFlowTransform();
+  else {
+    fitFlow(currentFlow); // first pass — may run before the just-shown panel has its final size
+    // Re-fit next frame once layout settled, but only if the user hasn't taken over yet.
+    const flow = currentFlow;
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { if (flow === currentFlow) fitFlow(flow); });
+  }
 }
 function applyView() {
   const flow = state.view === 'flow';
@@ -577,6 +665,231 @@ function applyView() {
   $('viewFlow').classList.toggle('active', flow);
   $('viewTables').classList.toggle('active', !flow);
   if (flow) renderFlowView();
+}
+
+// ---------- resource map ----------
+// World coordinate bounds of the bundled 5000x5000 map render (Satisfactory Wiki).
+// North is -Y, so the image top edge = MAP_BOUNDS.north. Values are the community
+// standard used by the in-game map / SCIM (centimetres).
+const MAP_BOUNDS = { west: -324698.832031, east: 425301.832031, north: -375000, south: 375000 };
+const MAP_IMG_W = 5000, MAP_IMG_H = 5000;
+const RES_COLORS = {
+  Desc_OreIron_C: '#c2693f', Desc_OreCopper_C: '#e08a3a', Desc_Stone_C: '#cdbf95',
+  Desc_Coal_C: '#586271', Desc_OreGold_C: '#e8c84a', Desc_RawQuartz_C: '#e08ad6',
+  Desc_Sulfur_C: '#e6db4a', Desc_OreBauxite_C: '#b07a52', Desc_OreUranium_C: '#5fd35f',
+  Desc_SAM_C: '#9b5fd3', Desc_LiquidOil_C: '#a98bd0', Desc_NitrogenGas_C: '#6fc0cf',
+  Desc_Water_C: '#3f8fd9',
+};
+const KIND_COLOR = { geyser: '#efe9ff', frackingCore: '#a98bd0', frackingSatellite: '#8d79b8', deposit: '#9aa0a8', node: '#c9cdd3' };
+const KIND_LABEL = { node: 'Resource node', geyser: 'Geyser', frackingCore: 'Resource well', frackingSatellite: 'Well satellite', deposit: 'Small deposit' };
+const PURITY_R = { Pure: 6, Normal: 4.6, Impure: 3.4 };
+
+let mapImg = null, mapImgReady = false;
+let mapNodes = [];                 // resource nodes from the loaded save
+let mapResOn = null;               // Set of enabled resourceClass keys ('__unknown' bucket allowed)
+let mapKindOn = { geyser: true, frackingCore: true, deposit: false };
+let mapV = { s: 1, ox: 0, oy: 0, ready: false };  // view transform: image px -> css px (screen = img*s + o)
+let mapFitS = 1;                   // scale at which the whole map fits (zoom clamp reference)
+let mapDrag = null;
+let mapRAF = 0;
+
+function ensureMapImg() {
+  if (mapImg) return;
+  mapImg = new Image();
+  mapImg.onload = () => { mapImgReady = true; if (state.mode === 'map') { if (!mapV.ready) fitMapView(); drawMap(); } };
+  mapImg.onerror = () => { mapImgReady = false; if (state.mode === 'map') drawMap(); };
+  mapImg.src = 'map.jpg'; // same dir as index.html -> same-origin, satisfies CSP 'self'
+}
+function worldToImgX(x) { return (x - MAP_BOUNDS.west) / (MAP_BOUNDS.east - MAP_BOUNDS.west) * MAP_IMG_W; }
+function worldToImgY(y) { return (y - MAP_BOUNDS.north) / (MAP_BOUNDS.south - MAP_BOUNDS.north) * MAP_IMG_H; }
+function resourceColor(n) { return (n.resourceClass && RES_COLORS[n.resourceClass]) || KIND_COLOR[n.kind] || '#bbb'; }
+
+function resOn(n) {
+  if (!mapResOn) return true;
+  return mapResOn.has(n.resourceClass || '__unknown');
+}
+function nodeVisible(n) {
+  switch (n.kind) {
+    case 'geyser': return mapKindOn.geyser;
+    case 'frackingCore':
+    case 'frackingSatellite': return mapKindOn.frackingCore;
+    case 'deposit': return mapKindOn.deposit && resOn(n);
+    default: return resOn(n); // mineable 'node'
+  }
+}
+
+function resizeMapCanvas() {
+  const wrap = $('mapWrap'), cv = $('mapCanvas');
+  const dpr = window.devicePixelRatio || 1;
+  const cw = wrap.clientWidth || 1, ch = wrap.clientHeight || 1;
+  cv.width = Math.round(cw * dpr); cv.height = Math.round(ch * dpr);
+  cv.style.width = cw + 'px'; cv.style.height = ch + 'px';
+  return { cw, ch, dpr };
+}
+function fitMapView() {
+  const wrap = $('mapWrap'); if (!wrap) return;
+  const cw = wrap.clientWidth || 800, ch = wrap.clientHeight || 600;
+  const s = Math.min(cw / MAP_IMG_W, ch / MAP_IMG_H) * 0.98;
+  mapFitS = s;
+  mapV = { s, ox: (cw - MAP_IMG_W * s) / 2, oy: (ch - MAP_IMG_H * s) / 2, ready: true };
+}
+function scheduleMapDraw() { if (mapRAF) return; mapRAF = requestAnimationFrame(() => { mapRAF = 0; drawMap(); }); }
+
+function drawMarker(ctx, n, ix, iy, s) {
+  const base = PURITY_R[n.purity] || 4;
+  const screenR = n.kind === 'deposit' ? 2.4 : n.kind === 'frackingSatellite' ? 3 : base;
+  const r = screenR / s;
+  ctx.beginPath();
+  if (n.kind === 'geyser') { ctx.moveTo(ix, iy - r); ctx.lineTo(ix + r, iy); ctx.lineTo(ix, iy + r); ctx.lineTo(ix - r, iy); ctx.closePath(); }
+  else if (n.kind === 'frackingCore') { ctx.rect(ix - r, iy - r, 2 * r, 2 * r); }
+  else { ctx.arc(ix, iy, r, 0, Math.PI * 2); }
+  ctx.fillStyle = resourceColor(n);
+  ctx.fill();
+  ctx.lineWidth = 1.3 / s; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.stroke();
+  if (n.purity === 'Pure') { ctx.beginPath(); ctx.arc(ix, iy, r + 2.4 / s, 0, Math.PI * 2); ctx.lineWidth = 1.3 / s; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke(); }
+}
+function drawMap() {
+  const cv = $('mapCanvas'); if (!cv) return;
+  const { dpr } = resizeMapCanvas();
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#10141b'; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!mapV.ready) fitMapView();
+  ctx.setTransform(dpr * mapV.s, 0, 0, dpr * mapV.s, dpr * mapV.ox, dpr * mapV.oy);
+  if (mapImgReady) ctx.drawImage(mapImg, 0, 0, MAP_IMG_W, MAP_IMG_H);
+  else { ctx.fillStyle = '#1b2230'; ctx.fillRect(0, 0, MAP_IMG_W, MAP_IMG_H); }
+  const s = mapV.s;
+  for (const n of mapNodes) {
+    if (!nodeVisible(n)) continue;
+    drawMarker(ctx, n, worldToImgX(n.x), worldToImgY(n.y), s);
+  }
+  updateMapCount();
+}
+function updateMapCount() {
+  const c = $('mapCount'); if (!c) return;
+  if (!mapNodes.length) { c.textContent = 'No save loaded.'; return; }
+  const vis = mapNodes.reduce((a, n) => a + (nodeVisible(n) ? 1 : 0), 0);
+  c.textContent = `${vis} shown · ${mapNodes.length} nodes in save`;
+}
+
+function buildMapResFilter() {
+  const box = $('mapResFilter'); if (!box) return;
+  box.innerHTML = '';
+  const counts = new Map();
+  for (const n of mapNodes) { if (n.kind !== 'node' && n.kind !== 'deposit') continue; const k = n.resourceClass || '__unknown'; counts.set(k, (counts.get(k) || 0) + 1); }
+  if (!counts.size) { box.appendChild(el('small', 'hint', 'No mineable nodes in this save.')); return; }
+  // Default: every known resource on, the unknown/vanilla bucket off (it is mostly noise).
+  if (!mapResOn) mapResOn = new Set([...counts.keys()].filter((k) => k !== '__unknown'));
+  const keys = [...counts.keys()].sort((a, b) => {
+    const an = a === '__unknown' ? '￿' : itemName(a), bn = b === '__unknown' ? '￿' : itemName(b);
+    return an.localeCompare(bn);
+  });
+  for (const k of keys) {
+    const row = el('label', 'check map-res-row');
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = mapResOn.has(k); cb.dataset.res = k;
+    cb.addEventListener('change', () => { if (cb.checked) mapResOn.add(k); else mapResOn.delete(k); scheduleMapDraw(); });
+    const sw = el('span', 'map-swatch'); sw.style.background = k === '__unknown' ? '#888' : (RES_COLORS[k] || '#bbb');
+    row.appendChild(cb); row.appendChild(sw);
+    row.appendChild(document.createTextNode(' ' + (k === '__unknown' ? 'Unknown / vanilla' : itemName(k)) + ' (' + counts.get(k) + ')'));
+    box.appendChild(row);
+  }
+}
+function setAllMapRes(on) {
+  const box = $('mapResFilter'); if (!box) return;
+  mapResOn = new Set();
+  box.querySelectorAll('input[type=checkbox]').forEach((cb) => { cb.checked = on; if (on) mapResOn.add(cb.dataset.res); });
+  scheduleMapDraw();
+}
+function buildPurityLegend() {
+  const box = $('mapPurityLegend'); if (!box || box.dataset.built) return;
+  box.dataset.built = '1';
+  [['pure', 'Pure — larger + white ring'], ['normal', 'Normal — medium'], ['impure', 'Impure — small']].forEach(([cls, txt]) => {
+    const row = el('div', 'map-legend-row');
+    row.appendChild(el('span', 'map-legend-dot map-pur-' + cls));
+    row.appendChild(el('span', 'map-legend-txt', txt));
+    box.appendChild(row);
+  });
+}
+
+function loadMapFromSave() {
+  const sel = $('mapSaveSelect'), st = $('mapStatus');
+  if (!sel || !sel.value) { if (st) st.textContent = 'No save selected.'; return; }
+  st.classList.remove('warn-text'); st.textContent = 'Parsing save…';
+  const file = sel.value;
+  // Defer so "Parsing…" paints before the synchronous parse blocks the thread.
+  setTimeout(() => {
+    let res;
+    try { res = SAVE.readResourceNodes(file); }
+    catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+    if (!res.ok) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); return; }
+    mapNodes = res.nodes; mapResOn = null;
+    buildMapResFilter(); buildPurityLegend();
+    const c = res.counts || {};
+    st.textContent = `${res.saveName}: ${c.node || 0} nodes · ${c.geyser || 0} geysers · ${c.frackingCore || 0} wells`;
+    $('mapEmpty').hidden = true;
+    ensureMapImg(); fitMapView(); drawMap();
+  }, 20);
+}
+
+function mapTipHtml(n) {
+  const title = n.name || KIND_LABEL[n.kind] || 'Resource node';
+  const sub = [];
+  if (n.kind !== 'node' && KIND_LABEL[n.kind]) sub.push(KIND_LABEL[n.kind]);
+  if (n.purity) sub.push(n.purity);
+  const co = `X ${Math.round(n.x / 100)} · Y ${Math.round(n.y / 100)}`;
+  return `<b>${title}</b>` + (sub.length ? `<br><span class="map-tip-sub">${sub.join(' · ')}</span>` : '') + `<br><span class="map-tip-co">${co}</span>`;
+}
+function mapHover(e) {
+  const cv = $('mapCanvas'), tip = $('mapTip'); if (!cv || !tip) return;
+  const r = cv.getBoundingClientRect();
+  const sx = e.clientX - r.left, sy = e.clientY - r.top;
+  let best = null, bestD = 11 * 11; // markers are constant screen-size, so hit-test in screen px
+  for (const n of mapNodes) {
+    if (!nodeVisible(n)) continue;
+    const px = worldToImgX(n.x) * mapV.s + mapV.ox, py = worldToImgY(n.y) * mapV.s + mapV.oy;
+    const d = (px - sx) * (px - sx) + (py - sy) * (py - sy);
+    if (d < bestD) { bestD = d; best = n; }
+  }
+  if (!best) { tip.hidden = true; return; }
+  tip.innerHTML = mapTipHtml(best);
+  tip.hidden = false;
+  const wrapR = $('mapWrap').getBoundingClientRect();
+  tip.style.left = (e.clientX - wrapR.left + 14) + 'px';
+  tip.style.top = (e.clientY - wrapR.top + 14) + 'px';
+}
+function zoomMapAt(sx, sy, f) {
+  const ns = Math.max(mapFitS * 0.5, Math.min(mapFitS * 60, mapV.s * f));
+  const k = ns / mapV.s;
+  mapV.ox = sx - (sx - mapV.ox) * k; mapV.oy = sy - (sy - mapV.oy) * k; mapV.s = ns;
+  $('mapTip').hidden = true; scheduleMapDraw();
+}
+function wireMap() {
+  const cv = $('mapCanvas'); if (!cv) return;
+  cv.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    zoomMapAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
+  }, { passive: false });
+  cv.addEventListener('pointerdown', (e) => { mapDrag = { x: e.clientX, y: e.clientY, ox: mapV.ox, oy: mapV.oy }; try { cv.setPointerCapture(e.pointerId); } catch (_) {} });
+  cv.addEventListener('pointermove', (e) => {
+    if (mapDrag) { mapV.ox = mapDrag.ox + (e.clientX - mapDrag.x); mapV.oy = mapDrag.oy + (e.clientY - mapDrag.y); $('mapTip').hidden = true; scheduleMapDraw(); }
+    else mapHover(e);
+  });
+  const up = (e) => { if (mapDrag) { try { cv.releasePointerCapture(e.pointerId); } catch (_) {} mapDrag = null; } };
+  cv.addEventListener('pointerup', up);
+  cv.addEventListener('pointercancel', up);
+  cv.addEventListener('pointerleave', () => { $('mapTip').hidden = true; });
+  window.addEventListener('resize', () => {
+    if (state.mode === 'map') scheduleMapDraw();
+    if (state.view === 'flow' && $('flowView') && !$('flowView').hidden) applyFlowTransform();
+  });
+}
+function renderMap() {
+  ensureMapImg();
+  if (!$('mapWrap')) return;
+  $('mapEmpty').hidden = mapNodes.length > 0;
+  if (mapNodes.length && !mapV.ready) fitMapView();
+  drawMap();
 }
 
 // ---------- mode dispatch ----------
@@ -737,11 +1050,8 @@ function buildMaxSupply() {
   });
 }
 // ---------- unlocked alternates from save file ----------
-function buildSaveList() {
-  const sel = $('saveSelect');
+function fillSaveSelect(sel, info) {
   if (!sel) return;
-  let info;
-  try { info = SAVE.listSaves(); } catch (e) { info = { exists: false, saves: [] }; }
   sel.innerHTML = '';
   if (!info.saves.length) {
     const o = el('option', null, info.exists ? 'No .sav files found' : 'Save folder not found');
@@ -756,6 +1066,12 @@ function buildSaveList() {
     o.value = s.file;
     sel.appendChild(o);
   }
+}
+function buildSaveList() {
+  let info;
+  try { info = SAVE.listSaves(); } catch (e) { info = { exists: false, saves: [] }; }
+  fillSaveSelect($('saveSelect'), info);
+  fillSaveSelect($('mapSaveSelect'), info);
 }
 let altSearch = '';
 // Alternates the user can manage: the unlocked set when a save is loaded, else all.
@@ -852,9 +1168,13 @@ function setMode(mode) {
   state.mode = mode;
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.mode === mode));
   document.querySelectorAll('.mode-panel').forEach((p) => { p.hidden = p.dataset.mode !== mode; });
+  const isMap = mode === 'map';
+  document.querySelectorAll('.calc-only').forEach((e) => { e.style.display = isMap ? 'none' : ''; });
   $('btnReset').style.display = mode === 'planner' ? '' : 'none';
+  $('mapView').hidden = !isMap;
   save();
-  solveAndRender();
+  if (isMap) { $('empty').hidden = true; $('output').hidden = true; renderMap(); }
+  else solveAndRender();
 }
 
 // ---------- plan bar ----------
@@ -941,7 +1261,10 @@ function init() {
   document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setMode(t.dataset.mode)));
   $('viewTables').addEventListener('click', () => { state.view = 'tables'; save(); applyView(); });
   $('viewFlow').addEventListener('click', () => { state.view = 'flow'; save(); applyView(); });
-  $('flowReset').addEventListener('click', () => { state.flowPos = {}; save(); renderFlowView(); });
+  $('flowReset').addEventListener('click', () => { state.flowPos = {}; state.flowView = null; save(); renderFlowView(); });
+  $('flowFit').addEventListener('click', () => { fitFlow(currentFlow); save(); });
+  $('flowZoomIn').addEventListener('click', () => zoomFlowCenter(1.2));
+  $('flowZoomOut').addEventListener('click', () => zoomFlowCenter(1 / 1.2));
 
   const onTarget = (v) => { const c = nameToClass(v); state.targetItem = c; $('rateUnit').textContent = c && isFluid(c) ? 'm³ / min' : '/ min'; reflectPrimary('planner'); save(); solveAndRender(); };
   $('targetItem').addEventListener('change', (e) => onTarget(e.target.value));
@@ -960,6 +1283,17 @@ function init() {
   $('altSearch').addEventListener('input', (e) => { altSearch = e.target.value; renderSaveStatus(); });
   $('altAllOn').addEventListener('click', () => setAllAlts(true));
   $('altAllOff').addEventListener('click', () => setAllAlts(false));
+
+  // resource map
+  wireMap();
+  $('mapLoad').addEventListener('click', loadMapFromSave);
+  $('mapRefresh').addEventListener('click', buildSaveList);
+  $('mapResetView').addEventListener('click', () => { fitMapView(); drawMap(); });
+  $('mapAllRes').addEventListener('click', () => setAllMapRes(true));
+  $('mapNoRes').addEventListener('click', () => setAllMapRes(false));
+  $('mapShowGeyser').addEventListener('change', (e) => { mapKindOn.geyser = e.target.checked; scheduleMapDraw(); });
+  $('mapShowFrack').addEventListener('change', (e) => { mapKindOn.frackingCore = e.target.checked; scheduleMapDraw(); });
+  $('mapShowDeposit').addEventListener('change', (e) => { mapKindOn.deposit = e.target.checked; scheduleMapDraw(); });
 
   $('optAddOutput').addEventListener('click', () => { state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); });
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });

@@ -33,6 +33,7 @@
       <button class="tab active" data-mode="planner">Planner</button>
       <button class="tab" data-mode="optimize">Recipe Optimizer</button>
       <button class="tab" data-mode="max">Max Throughput</button>
+      <button class="tab" data-mode="map">Resource Map</button>
     </nav>
 
     <main class="layout">
@@ -113,8 +114,44 @@
           </section>
         </div>
 
+        <!-- ============ RESOURCE MAP ============ -->
+        <div class="mode-panel" data-mode="map" hidden>
+          <section class="ctl-group">
+            <h2>Map from save</h2>
+            <p class="hint" style="margin-top:-6px">Plots the real resource nodes stored in your save — including randomized node layouts.</p>
+            <label class="fld">
+              <span>Game save</span>
+              <select id="mapSaveSelect" class="sel"></select>
+            </label>
+            <div class="chip-toolbar">
+              <button id="mapLoad" class="btn mini" title="Read resource nodes from the selected save">Load map</button>
+              <button id="mapRefresh" class="btn mini ghost" title="Rescan the save folder">↻</button>
+            </div>
+            <small id="mapStatus" class="hint">Pick your save and Load to plot resource nodes.</small>
+          </section>
+
+          <section class="ctl-group">
+            <h2>Show resources</h2>
+            <div class="chip-toolbar">
+              <button id="mapAllRes" class="btn mini ghost">All</button>
+              <button id="mapNoRes" class="btn mini ghost">None</button>
+            </div>
+            <div id="mapResFilter" class="reslist"><small class="hint">Load a save to list resources.</small></div>
+          </section>
+
+          <section class="ctl-group">
+            <h2>Node types &amp; legend</h2>
+            <label class="check"><input type="checkbox" id="mapShowGeyser" checked /> Geysers (geothermal)</label>
+            <label class="check"><input type="checkbox" id="mapShowFrack" checked /> Resource wells (fracking)</label>
+            <label class="check"><input type="checkbox" id="mapShowDeposit" /> Small deposits</label>
+            <div id="mapPurityLegend" class="map-legend"></div>
+            <button id="mapResetView" class="btn mini ghost" style="margin-top:8px">Reset view</button>
+            <small class="hint">Scroll to zoom · drag to pan · hover a node for details.</small>
+          </section>
+        </div>
+
         <!-- ============ SHARED: ALTERNATE RECIPES (save unlock + manual veto) ============ -->
-        <section class="ctl-group">
+        <section class="ctl-group calc-only">
           <h2>Alternate recipes <small class="badge">save + manual</small></h2>
           <label class="fld">
             <span>Game save</span>
@@ -139,7 +176,7 @@
         </section>
 
         <!-- ============ SHARED: COST MULTIPLIER (game settings) ============ -->
-        <section class="ctl-group">
+        <section class="ctl-group calc-only">
           <h2>Cost Multiplier <small class="badge">Advanced Game Settings</small></h2>
           <label class="fld">
             <span>Recipe Parts Cost Multiplier</span>
@@ -157,7 +194,7 @@
         </section>
 
         <!-- ============ SHARED SUMMARY ============ -->
-        <section class="ctl-group summary">
+        <section class="ctl-group summary calc-only">
           <h2>Summary</h2>
           <div id="maxBanner" class="banner" hidden></div>
           <div class="stat"><span>Total power</span><b id="sumPower">—</b></div>
@@ -180,8 +217,14 @@
 
           <div id="flowView" hidden>
             <div class="flow-head">
-              <span class="hint flow-hint">Drag nodes to rearrange — positions are saved per plan. Gray = raw · orange = machine · green = output.</span>
-              <button id="flowReset" class="btn mini ghost" title="Restore the automatic layout">Reset layout</button>
+              <span class="hint flow-hint">Drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output.</span>
+              <div class="flow-tools">
+                <button id="flowZoomOut" class="btn mini ghost" title="Zoom out">−</button>
+                <span id="flowZoomPct" class="flow-zoom-pct">100%</span>
+                <button id="flowZoomIn" class="btn mini ghost" title="Zoom in">+</button>
+                <button id="flowFit" class="btn mini ghost" title="Fit the whole factory in view">Fit</button>
+                <button id="flowReset" class="btn mini ghost" title="Restore the automatic layout">Reset layout</button>
+              </div>
             </div>
             <div class="flow-scroll"><svg id="flowSvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
           </div>
@@ -219,6 +262,18 @@
             </div>
           </div>
           </div><!-- /tableView -->
+        </div>
+
+        <div id="mapView" hidden>
+          <div class="map-toolbar">
+            <span id="mapCount" class="hint">No save loaded.</span>
+            <span class="map-attribution">Map © Coffee Stain Studios · image via Satisfactory&nbsp;Wiki</span>
+          </div>
+          <div class="map-canvas-wrap" id="mapWrap">
+            <canvas id="mapCanvas"></canvas>
+            <div id="mapEmpty" class="map-empty">Load a save (left panel) to plot resource nodes on the map.</div>
+            <div id="mapTip" class="map-tip" hidden></div>
+          </div>
         </div>
       </section>
     </main>

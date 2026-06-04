@@ -427,17 +427,24 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .vt.active { background: var(--accent); color: #1a1300; border-color: var(--accent); }
 
 /* flowchart */
-.flow-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.flow-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
 .flow-hint { margin: 0; }
+.flow-tools { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.flow-zoom-pct { font-size: 12px; color: var(--muted); min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
 .flow-scroll {
+  position: relative; /* containing block so the svg can absolutely fill it */
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #11141a;
-  overflow: auto;
+  overflow: hidden;
   height: calc(100% - 96px);
   min-height: 440px;
+  touch-action: none;
 }
-#flowSvg { display: block; }
+/* Absolute-fill instead of height:100% — the parent's height comes from min-height,
+   which percentage heights don't resolve against (svg would collapse to 150px). */
+#flowSvg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: grab; }
+#flowSvg.panning { cursor: grabbing; }
 .node { cursor: grab; }
 .node.dragging { cursor: grabbing; }
 .node rect { stroke-width: 1.5; }
@@ -566,3 +573,57 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 ::-webkit-scrollbar-thumb:hover { background: #4a5161; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:active { background: var(--muted); background-clip: padding-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---------- resource map ---------- */
+#mapView { height: 100%; display: flex; flex-direction: column; }
+.map-toolbar { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.map-toolbar .hint { margin-top: 0; font-variant-numeric: tabular-nums; }
+.map-attribution { color: var(--muted); font-size: 10px; opacity: 0.65; }
+.map-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: calc(100vh - 240px);
+  min-height: 420px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #10141b;
+}
+#mapCanvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+#mapCanvas:active { cursor: grabbing; }
+.map-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 24px;
+  color: var(--muted);
+  font-size: 14px;
+  pointer-events: none;
+}
+.map-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  background: rgba(12, 16, 22, 0.96);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  max-width: 220px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.map-tip-sub { color: var(--accent); font-size: 11px; }
+.map-tip-co { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.map-res-row { gap: 6px; }
+.map-swatch { width: 11px; height: 11px; border-radius: 3px; border: 1px solid rgba(0, 0, 0, 0.5); display: inline-block; flex: 0 0 auto; }
+.map-legend { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.map-legend-row { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--muted); }
+.map-legend-dot { display: inline-block; border-radius: 50%; background: #cfc6e8; border: 1px solid rgba(0, 0, 0, 0.6); flex: 0 0 auto; }
+.map-pur-pure { width: 13px; height: 13px; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.8); }
+.map-pur-normal { width: 10px; height: 10px; }
+.map-pur-impure { width: 7px; height: 7px; }

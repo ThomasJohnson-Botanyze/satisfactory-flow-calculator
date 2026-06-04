@@ -18,7 +18,8 @@ const os = require('os');
 // which finds are recognized by this app. Kept optional so the module still
 // works (raw output) if the data file moves.
 let RECIPES = null;
-try { RECIPES = require('./data.json').recipes; } catch (e) { RECIPES = null; }
+let ITEMS = null;
+try { const D = require('./data.json'); RECIPES = D.recipes; ITEMS = D.items; } catch (e) { RECIPES = null; ITEMS = null; }
 
 function defaultSaveRoot() {
   const localAppData =
@@ -106,9 +107,10 @@ function extractAlternates(save) {
   return found;
 }
 
-// Read + parse a .sav and return the unlocked alternates.
-// { ok, saveName, alternates:[classNames], recognized:[{className,name}], unknown:[classNames], error }
-function readUnlockedAlternates(savFile) {
+// Read + parse a .sav once. { ok, save, saveName } or { ok:false, error }.
+// Shared by readUnlockedAlternates and readResourceNodes so a save is never
+// read/parsed twice for the same call.
+function parseSaveFile(savFile) {
   let buf;
   try {
     buf = fs.readFileSync(savFile);
@@ -121,13 +123,12 @@ function readUnlockedAlternates(savFile) {
         : 'Could not read save: ' + (e && e.message ? e.message : String(e)),
     };
   }
-
-  let save;
   try {
     const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
     // Lazy-require so listSaves()/path logic still work even if the parser dep is absent.
     const { Parser } = require('@etothepii/satisfactory-file-parser');
-    save = Parser.ParseSave(path.basename(savFile), ab, { throwErrors: true });
+    const save = Parser.ParseSave(path.basename(savFile), ab, { throwErrors: true });
+    return { ok: true, save, saveName: path.basename(savFile, '.sav') };
   } catch (e) {
     return {
       ok: false,
@@ -136,8 +137,15 @@ function readUnlockedAlternates(savFile) {
         (e && e.message ? e.message : String(e)),
     };
   }
+}
 
-  const altSet = extractAlternates(save);
+// Read + parse a .sav and return the unlocked alternates.
+// { ok, saveName, alternates:[classNames], recognized:[{className,name}], unknown:[classNames], error }
+function readUnlockedAlternates(savFile) {
+  const p = parseSaveFile(savFile);
+  if (!p.ok) return { ok: false, error: p.error };
+
+  const altSet = extractAlternates(p.save);
   const alternates = [...altSet].sort();
   const recognized = [];
   const unknown = [];
@@ -145,15 +153,87 @@ function readUnlockedAlternates(savFile) {
     if (RECIPES && RECIPES[rc]) recognized.push({ className: rc, name: RECIPES[rc].name });
     else unknown.push(rc);
   }
-  return { ok: true, saveName: path.basename(savFile, '.sav'), alternates, recognized, unknown };
+  return { ok: true, saveName: p.saveName, alternates, recognized, unknown };
+}
+
+// ---------- resource nodes (for the map view) ----------
+// Resource-bearing actors the game persists with a world position. Their resource
+// type and purity live in *Override properties — which the Resource Node
+// Randomizer mod writes — so reading the save is the only way to know a
+// randomized map's true node layout. (Vanilla untouched nodes have no override;
+// their resource is static map data not stored in the save.)
+const NODE_KIND = {
+  BP_ResourceNode_C: 'node',
+  BP_ResourceNodeGeyser_C: 'geyser',
+  BP_FrackingCore_C: 'frackingCore',
+  BP_FrackingSatellite_C: 'frackingSatellite',
+  BP_ResourceDeposit_C: 'deposit',
+};
+function nodeKindOf(typePath) {
+  const stem = typePath.slice(typePath.lastIndexOf('.') + 1); // BP_ResourceNode.BP_ResourceNode_C -> BP_ResourceNode_C
+  return NODE_KIND[stem] || null;
+}
+// "/Game/.../CrudeOil/Desc_LiquidOil.Desc_LiquidOil_C" -> "Desc_LiquidOil_C"
+function classFromPath(pathName) {
+  if (!pathName) return null;
+  const s = String(pathName);
+  const dot = s.lastIndexOf('.');
+  return dot >= 0 ? s.slice(dot + 1) : s;
+}
+const PURITY_LABEL = { RP_Pure: 'Pure', RP_Normal: 'Normal', RP_Inpure: 'Impure' };
+
+// Pull every resource node out of a parsed save with world position + (when
+// present) resource class and purity.
+function extractResourceNodes(save) {
+  const levels = (save && save.levels) || {};
+  const out = [];
+  for (const lvlName in levels) {
+    const objs = (levels[lvlName] && levels[lvlName].objects) || [];
+    for (const o of objs) {
+      const tp = o && o.typePath;
+      if (typeof tp !== 'string') continue;
+      const kind = nodeKindOf(tp);
+      if (!kind) continue;
+      const tr = o.transform && o.transform.translation;
+      if (!tr) continue;
+      const props = o.properties || {};
+      const purRaw = props.mPurityOverride && props.mPurityOverride.value && props.mPurityOverride.value.value;
+      const resPath = props.mResourceClassOverride && props.mResourceClassOverride.value && props.mResourceClassOverride.value.pathName;
+      const resClass = classFromPath(resPath);
+      out.push({
+        kind,
+        x: tr.x,
+        y: tr.y,
+        z: tr.z,
+        purity: purRaw ? (PURITY_LABEL[purRaw] || String(purRaw).replace(/^RP_/, '')) : null,
+        resourceClass: resClass || null,
+        name: resClass && ITEMS && ITEMS[resClass] ? ITEMS[resClass].name : null,
+      });
+    }
+  }
+  return out;
+}
+
+// Read + parse a .sav and return its resource nodes for the map.
+// { ok, saveName, nodes:[{kind,x,y,z,purity,resourceClass,name}], counts:{kind:n}, error }
+function readResourceNodes(savFile) {
+  const p = parseSaveFile(savFile);
+  if (!p.ok) return { ok: false, error: p.error };
+  const nodes = extractResourceNodes(p.save);
+  const counts = {};
+  for (const n of nodes) counts[n.kind] = (counts[n.kind] || 0) + 1;
+  return { ok: true, saveName: p.saveName, nodes, counts };
 }
 
 module.exports = {
   defaultSaveRoot,
   listSaves,
+  parseSaveFile,
   extractAlternates,
   collectAlternates,
   readUnlockedAlternates,
+  extractResourceNodes,
+  readResourceNodes,
 };
 
 // CLI harness: `node src/save-reader.js [path-to-save-or-root]`
