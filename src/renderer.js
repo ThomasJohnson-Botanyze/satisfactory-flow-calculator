@@ -88,6 +88,9 @@ const defaultState = () => ({
   powerMult: 1,
   spaceMult: 1,
   picks: {},
+  // Per-step overclock overrides, keyed by recipe className (rc -> clock fraction).
+  // Absent = that step follows the global Overclock slider (state.clock).
+  nodeClock: {},
   flowPos: {}, // saved flowchart node positions for this plan (nodeId -> {x,y})
   // null = no save loaded → every alternate available (original behavior).
   // [] = a save was read but no alternates unlocked. [...classNames] = restrict to these.
@@ -182,54 +185,68 @@ function chosenRecipeClass(item) {
   if (RESOURCES.has(item)) return null;
   return defaultRecipeClass(item);
 }
+// Overclock applied to one step: its per-step override, else the global slider.
+function effectiveClock(rc) {
+  const o = state.nodeClock && state.nodeClock[rc];
+  return o != null && isFinite(o) && o > 0 ? o : state.clock;
+}
 function computePlanner() {
-  const demand = {};
-  const path = new Set();
-  let cycle = false;
-  function add(item, rate) {
-    demand[item] = (demand[item] || 0) + rate;
-    if (path.has(item)) { cycle = true; return; }
-    const rc = chosenRecipeClass(item);
-    if (!rc) return;
-    const r = RECIPES[rc];
-    const prod = r.products.find((p) => p.item === item) || r.products[0];
-    const ratio = rate / prod.amount;
-    path.add(item);
-    for (const ing of r.ingredients) add(ing.item, ratio * ing.amount * state.recipeCost);
-    path.delete(item);
-  }
-  const tRate = state.targetRate * (isDeliverable(state.targetItem) ? state.spaceMult : 1);
-  if (state.targetItem && tRate > 0) add(state.targetItem, tRate);
+  const target = state.targetItem;
+  const tRate = state.targetRate * (isDeliverable(target) ? state.spaceMult : 1);
+  const empty = { ok: !!target, feasible: true, recipes: [], raw: [], surplus: [], totalPower: 0, totalMachines: 0, targets: target ? { [target]: tRate } : {} };
+  if (!target || !(tRate > 0)) return empty;
 
-  const recipes = [];
-  const raw = [];
-  const surplus = {};
+  // Walk the chosen-recipe graph from the target. We track visited *items* (not a
+  // DFS path), so loops terminate instead of being cut — the LP then balances the
+  // whole graph at once, crediting by-products and resolving recycle cycles.
+  const usedRc = new Set();
+  const rawItems = new Set();
+  const chosenItemOf = {}; // rc -> the item whose dropdown selected it (row label)
+  const seen = new Set();
+  const stack = [target];
+  while (stack.length) {
+    const item = stack.pop();
+    if (seen.has(item)) continue;
+    seen.add(item);
+    const rc = chosenRecipeClass(item);
+    if (!rc) { rawItems.add(item); continue; } // resource or ⛏ Raw input
+    if (chosenItemOf[rc] == null) chosenItemOf[rc] = item;
+    if (!usedRc.has(rc)) {
+      usedRc.add(rc);
+      for (const ing of RECIPES[rc].ingredients) if (!seen.has(ing.item)) stack.push(ing.item);
+    }
+  }
+  // Target is itself a raw/imported item — nothing to build.
+  if (!usedRc.size) return Object.assign({}, empty, { raw: [{ item: target, rate: tRate }] });
+
+  const sol = LP.planner({ target, rate: tRate, recipes: [...usedRc], rawItems: [...rawItems], recipeCost: state.recipeCost });
+  if (!sol.feasible) return Object.assign({}, empty, { feasible: false });
+
   let totalPower = 0;
   let totalMachines = 0;
-  for (const item of Object.keys(demand)) {
-    const rc = chosenRecipeClass(item);
-    if (!rc) { if (demand[item] > 1e-9) raw.push({ item, rate: demand[item] }); continue; }
-    const r = RECIPES[rc];
-    const prod = r.products.find((p) => p.item === item) || r.products[0];
+  const recipes = sol.recipes.filter((s) => s.machines > 1e-9).map((s) => {
+    const r = RECIPES[s.rc];
     const b = BUILDINGS[r.building] || { name: r.building, power: 0, exponent: 1.321929, speed: 1 };
-    const perMachine = prod.amount * (60 / r.time) * (b.speed || 1) * state.clock * state.sloop;
-    const machines = demand[item] / perMachine;
-    const powerPer = b.power * Math.pow(state.clock, b.exponent) * Math.pow(state.sloop, 2) * state.powerMult;
+    const item = chosenItemOf[s.rc] || s.item;
+    const m100 = s.machines; // machine-equivalents at 100 % clock / 1× sloop
+    const ck = effectiveClock(s.rc);
+    const machines = m100 / (ck * state.sloop);
+    const powerPer = b.power * Math.pow(ck, b.exponent) * Math.pow(state.sloop, 2) * state.powerMult;
     const power = machines * powerPer;
+    const rate = (LP.RC_INFO[s.rc].out[item] || 0) * m100; // gross /min of the row's item
     totalPower += power;
     totalMachines += Math.ceil(machines - 1e-9);
-    r.products.forEach((p) => { if (p.item !== item) surplus[p.item] = (surplus[p.item] || 0) + (demand[item] / prod.amount) * p.amount; });
-    recipes.push({ item, rc, machines, building: r.building, buildingName: b.name, rate: demand[item], power, interactive: true });
-  }
+    return { item, rc: s.rc, machines, building: r.building, buildingName: b.name, rate, power, clock: ck, interactive: true };
+  });
   return {
-    ok: !!state.targetItem,
-    cycle,
+    ok: true,
+    feasible: true,
     recipes,
-    raw,
-    surplus: Object.entries(surplus).filter(([, v]) => v > 1e-9).map(([item, rate]) => ({ item, rate })),
+    raw: (sol.raw || []).filter((r) => r.rate > 1e-4),
+    surplus: (sol.outputs || []).filter((o) => o.item !== target && o.rate > 1e-4),
     totalPower,
     totalMachines,
-    targets: state.targetItem ? { [state.targetItem]: tRate } : {},
+    targets: { [target]: tRate },
   };
 }
 
@@ -275,6 +292,30 @@ function itemCell(item) {
   span.appendChild(document.createTextNode(itemName(item)));
   return span;
 }
+// Per-step overclock editor (Planner rows). Typing the global value clears the
+// override so the step tracks the global slider again.
+function clockCell(s) {
+  const td = el('td', 'num');
+  if (!s.interactive) { td.textContent = '—'; return td; }
+  const inp = el('input', 'clock-input');
+  inp.type = 'number'; inp.min = '1'; inp.max = '250'; inp.step = '1';
+  inp.value = Math.round((s.clock || state.clock) * 100);
+  inp.title = 'Overclock this step independently of the global slider';
+  const apply = () => {
+    let v = Math.round(parseFloat(inp.value) || 100);
+    v = Math.max(1, Math.min(250, v));
+    inp.value = v;
+    state.nodeClock = state.nodeClock || {};
+    if (v === Math.round(state.clock * 100)) delete state.nodeClock[s.rc];
+    else state.nodeClock[s.rc] = v / 100;
+    save();
+    solveAndRender();
+  };
+  inp.addEventListener('change', apply);
+  td.appendChild(inp);
+  td.appendChild(document.createTextNode(' %'));
+  return td;
+}
 function renderTables(res) {
   const tb = $('prodTable').querySelector('tbody');
   tb.innerHTML = '';
@@ -289,6 +330,7 @@ function renderTables(res) {
     const tdM = el('td', 'num');
     tdM.innerHTML = `<span class="mach-main">${fmt(Math.ceil(s.machines - 1e-9), 0)}×</span> <span class="mach-sub">(${fmt(s.machines)})</span>`;
     tr.appendChild(tdM);
+    tr.appendChild(clockCell(s));
     tr.appendChild(el('td', null, s.buildingName));
     tr.appendChild(el('td', 'num', fmtPower(s.power)));
     tb.appendChild(tr);
@@ -356,8 +398,10 @@ function buildFlow(res, targets) {
     // Alternate recipes show the recipe name; standard recipes show the output item.
     const title = r && r.alternate ? '★ ' + r.name.replace(/^Alternate:\s*/, '') : itemName(s.item);
     // Exact (fractional) machine count for perfect-ratio / 100%-uptime planning,
-    // e.g. "7.5× Assembler" = 7 machines at 100% + 1 at 50%.
-    addNode(s._nid, 'machine', title, `${fmt(s.machines)}× ${s.buildingName}`);
+    // e.g. "7.5× Assembler" = 7 machines at 100% + 1 at 50%. Append the clock only
+    // when this step is overclocked away from the global slider.
+    const oc = s.clock != null && Math.abs(s.clock - state.clock) > 1e-9 ? ` · ${Math.round(s.clock * 100)}%` : '';
+    addNode(s._nid, 'machine', title, `${fmt(s.machines)}× ${s.buildingName}${oc}`);
   });
   res.raw.forEach((r) => addNode('raw|' + r.item, 'raw', itemName(r.item), fmt(r.rate) + '/min'));
   const producers = {};
@@ -547,10 +591,11 @@ function showOutput() { $('empty').hidden = true; $('output').hidden = false; ap
 function renderPlanner() {
   $('sumExtraLabel').textContent = 'Raw resource types';
   if (!state.targetItem) return showEmpty('Pick a target item to build a production flow.');
+  if (!(state.targetRate > 0)) return showEmpty('Set a target rate above 0.');
   const res = computePlanner();
+  if (!res.feasible) return showEmpty('No feasible plan: the selected recipes can’t balance — a recycle loop that consumes more than it makes. Switch one alternate to break it.');
   present(res, res.targets);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
-  if (res.cycle) { $('warnBox').hidden = false; $('warnBox').textContent = '⚠ Recipe loop detected — a selected recipe feeds itself. Tree was cut; switch one alternate to break the cycle.'; }
 }
 
 function renderOptimize() {
@@ -915,7 +960,7 @@ function init() {
 
   $('planNew').addEventListener('click', () => newPlan());
   $('planDup').addEventListener('click', () => duplicatePlan(activeId));
-  $('btnReset').addEventListener('click', () => { state.picks = {}; save(); solveAndRender(); });
+  $('btnReset').addEventListener('click', () => { state.picks = {}; state.nodeClock = {}; save(); solveAndRender(); });
   $('btnClear').addEventListener('click', () => { const p = activePlan(); p.state = defaultState(); state = p.state; save(); applyStateToControls(); });
 
   // support modal

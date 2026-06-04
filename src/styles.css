@@ -167,6 +167,19 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .recipe-select.alt { border-color: var(--accent-2); color: #ffd9b0; }
 .recipe-select:focus { outline: none; border-color: var(--accent); }
 
+.clock-input {
+  width: 52px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.clock-input:focus { outline: none; border-color: var(--accent); }
+
 .mach-main { font-weight: 700; }
 .mach-sub { color: var(--muted); font-size: 11px; }
 

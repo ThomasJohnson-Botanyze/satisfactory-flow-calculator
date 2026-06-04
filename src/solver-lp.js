@@ -133,4 +133,40 @@ function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1
   return sum;
 }
 
-module.exports = { optimize, maxThroughput, RC_INFO, RES };
+// Fixed-recipe material balance for the Planner. `recipes` is the exact set of
+// chosen recipe classNames (one per produced item); the LP finds machine counts
+// that meet `rate` of `target` while crediting by-products and resolving loops —
+// both impossible with naive tree recursion. `rawItems` are treated as free
+// inputs (map resources are always free). Solved at 100 % clock; the renderer
+// rescales machines & power for clock / somersloop afterwards (those cancel in
+// the material ratios, so they don't belong in the balance).
+function planner({ target, rate, recipes = [], rawItems = [], recipeCost = 1 }) {
+  const pool = recipes.filter((rc) => RECIPES[rc]);
+  if (!pool.length) return { feasible: false };
+  const free = new Set(rawItems);
+  const inPlay = new Set();
+  for (const rc of pool) for (const it of itemsOf(RC_INFO[rc])) inPlay.add(it);
+
+  const variables = {};
+  for (const rc of pool) {
+    const info = RC_INFO[rc];
+    const v = { _machines: 1 };
+    for (const it of itemsOf(info)) v[it] = coefOf(info, it, recipeCost);
+    variables[rc] = v;
+  }
+  const constraints = {};
+  for (const it of inPlay) {
+    if (it === target) constraints[it] = { min: rate }; // meet the target demand
+    else if (RES.has(it) || free.has(it)) constraints[it] = { min: -BIG }; // free input
+    else constraints[it] = { min: 0 }; // intermediates: produce ≥ consume (surplus ok)
+  }
+  // Minimise total machines so by-products are consumed before extra machines are
+  // built; whatever is over-produced floats up as genuine surplus.
+  const res = solver.Solve({ optimize: '_machines', opType: 'min', constraints, variables });
+  if (!res.feasible) return { feasible: false };
+  const sum = summarize(res, pool, recipeCost, 1);
+  sum.feasible = true;
+  return sum;
+}
+
+module.exports = { optimize, maxThroughput, planner, RC_INFO, RES };

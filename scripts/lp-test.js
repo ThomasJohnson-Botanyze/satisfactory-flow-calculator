@@ -1,5 +1,5 @@
 const DATA = require('../src/data.json');
-const { optimize, maxThroughput } = require('../src/solver-lp');
+const { optimize, maxThroughput, planner } = require('../src/solver-lp');
 
 const nm = (c) => (DATA.items[c] ? DATA.items[c].name : c);
 const cls = (name) => Object.keys(DATA.items).find((k) => DATA.items[k].name === name);
@@ -57,3 +57,24 @@ if (m3.feasible) {
   m3.utilization.forEach((u) => console.log(`    ${nm(u.item)}: ${u.used.toFixed(1)}/${u.avail} (${(u.pct * 100).toFixed(0)}%)`));
   console.log('  binding (limiting factor):', m3.binding.map(nm).join(', '));
 }
+
+// 5. Planner balance — by-product crediting + recycle-loop resolution.
+const rc = (name) => Object.keys(DATA.recipes).find((k) => DATA.recipes[k].name === name);
+const HOR = cls('Heavy Oil Residue'), FUEL = cls('Fuel'), PLASTIC = cls('Plastic'), RUBBER = cls('Rubber');
+let lpPass = 0, lpFail = 0;
+const lpCheck = (label, cond) => { console.log(`  ${cond ? 'PASS' : 'FAIL'}  ${label}`); cond ? lpPass++ : lpFail++; };
+
+console.log('\n=== PLANNER: by-product credited (Residual Fuel fed by Plastic\'s Heavy Oil Residue) ===');
+const credit = planner({ target: FUEL, rate: 40, recipes: [rc('Residual Fuel'), rc('Plastic')], rawItems: [OIL] });
+lpCheck('feasible', credit.feasible);
+lpCheck('Heavy Oil Residue net ≈ 0 (byproduct fully consumed, no dedicated source)', credit.feasible && Math.abs(credit.net[HOR] || 0) < 1e-6);
+lpCheck('only crude oil is drawn raw', credit.feasible && credit.raw.length === 1 && credit.raw[0].item === OIL);
+
+console.log('\n=== PLANNER: recycle loop resolves instead of being cut ===');
+const loop = planner({ target: PLASTIC, rate: 60, recipes: [rc('Alternate: Recycled Plastic'), rc('Alternate: Recycled Rubber')], rawItems: [FUEL] });
+lpCheck('loop is feasible (was cut + warned before)', loop.feasible);
+lpCheck('both recycled recipes run with finite machines', loop.feasible && loop.recipes.length === 2 && loop.recipes.every((x) => isFinite(x.machines) && x.machines > 0));
+lpCheck('net Plastic ≈ 60', loop.feasible && Math.abs((loop.net[PLASTIC] || 0) - 60) < 1e-6);
+
+console.log(`\n${lpFail === 0 ? '✅ planner checks pass' : '❌ ' + lpFail + ' planner checks FAILED'} (${lpPass} passed)`);
+process.exit(lpFail ? 1 : 0);

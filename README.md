@@ -26,11 +26,19 @@ online tool's tabs.
   relaunch). **Reset layout** restores the automatic placement.
 
 ### 1. Planner
-- Pick a target item + output rate; expands the full recipe tree, aggregates shared intermediates,
-  reports machine counts, raw-resource demand, building totals, and power.
+- Pick a target item + output rate; it solves the whole recipe graph as one **material balance**,
+  aggregates shared intermediates, reports machine counts, raw-resource demand, building totals, and power.
 - **Alternate recipe selection** — every produced item has a dropdown of all recipes that make it
   (standard + ★ alternates). Switch any node; re-solves instantly. **⛏ Raw input** treats an item as
   imported and stops expanding it.
+- **By-products are credited** — a step's secondary output (e.g. Heavy Oil Residue from Plastic) is
+  fed to anything downstream that needs it before extra machines are built; only true surplus is listed.
+- **Recycle loops resolve** — mutually-feeding chains (e.g. Recycled Plastic ⇄ Recycled Rubber) are
+  balanced simultaneously instead of being cut. A genuinely impossible loop (consumes more than it makes)
+  is reported as infeasible with a hint to switch an alternate.
+- **Per-step overclock** — each production row has its own **Clock %** field that overrides the global
+  Overclock slider for that step only (changes its machine count and power; leave it at the global value
+  to keep following the slider). Saved per plan.
 
 ### Cost Multiplier — exact Advanced Game Settings *(applies to all modes)*
 Dropdowns matching the in-game **Advanced Game Settings → Cost Multiplier** values exactly:
@@ -42,6 +50,7 @@ Dropdowns matching the in-game **Advanced Game Settings → Cost Multiplier** va
 
 ### Machine tuning (Planner)
 - **Overclock** (1–250 %) — fewer machines, power scales by `clock^1.32` per machine (in-game curve).
+  This slider is the **default**; override any individual step with its per-row **Clock %** field.
 - **Somersloop amplification** (1.0×–4.0×) — production amplification: output ×amp, power ×amp².
 
 ### 2. Recipe Optimizer  *(auto-pick best alternates)*
@@ -59,7 +68,8 @@ Dropdowns matching the in-game **Advanced Game Settings → Cost Multiplier** va
 - Use it to answer "I have 120 iron ore + 40 coal — how much steel, and what runs out first?"
 
 **Persistent** — every mode's inputs, picks, and slider positions are saved to local storage.
-By-products / surplus are listed (not credited back).
+By-products are **credited back** into the balance (a step's by-product feeds anything downstream
+that needs it); only genuine left-over **surplus** is listed.
 
 ## Optimizer / Max math
 
@@ -133,21 +143,28 @@ npm run test:ui   # drives the real renderer.js in jsdom, prints production/raw/
 
 ## How the math works
 
-For a chosen recipe making the target item with product amount `p` over `t` seconds in a building of
-`speed` s:
+With the recipe fixed per item, the Planner solves the whole graph as one **material balance** (the same
+`javascript-lp-solver` the other modes use, restricted to your chosen recipes): for every item, total
+production − consumption must meet demand (target rate for the target, ≥ 0 for intermediates so surplus
+is allowed, free draw for raws). This is what lets by-products be **credited** and recycle **loops** be
+balanced rather than expanded — the recursion that needed loop-cutting is gone. The balance is solved at
+100 % clock (clock/sloop cancel in the ratios), then each step is rescaled for its clock and sloop. For a
+chosen recipe making item with product amount `p` over `t` seconds in a building of `speed` s, at that
+step's `clock` (its per-row override, else the global slider):
 
 ```
 output/min/machine = p * (60/t) * speed * clock * sloop
 machines           = demand / (output/min/machine)
 power/machine      = basePower * clock^exponent * sloop^2
-ingredient demand  = demand * (ingredientAmount * costMult) / p     // per ingredient, recursive
+ingredient draw    = demand * (ingredientAmount * costMult) / p     // per ingredient
 ```
 
 Raw resources are items with no selected recipe (the 12 map resources, or anything set to **Raw input**).
 
 ## Limitations
 
-- By-products are reported but not auto-consumed/credited.
-- One global slider set applies to all machines (not per-node overclock yet).
-- Recipe loops (e.g. some alternate plastic/rubber + recycled chains) are cut to avoid infinite
-  expansion and flagged with a warning — break the loop by switching one alternate.
+- **Somersloop amplification** is still a single global setting (not per-step).
+- The **flowchart** draws each item from its primary producer; when a by-product feeds another step
+  the credit is reflected in the **tables** (exact) but not drawn as an extra edge.
+- **Power for variable-draw machines** (Particle Accelerator, Converter, Quantum Encoder) uses the
+  building's mid-range figure, so power for those is approximate.

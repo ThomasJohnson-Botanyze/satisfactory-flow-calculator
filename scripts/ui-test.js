@@ -62,6 +62,24 @@ setVal(D.getElementById('mPower'), '5', 'change');
 check('power x5 applied', D.getElementById('sumPower').textContent === '390 MW');
 setVal(D.getElementById('mPower'), '1', 'change');
 
+// ---- per-node overclock ----
+console.log('\n### PER-NODE OVERCLOCK');
+const mw = () => parseFloat(D.getElementById('sumPower').textContent);
+const clockInputs = () => [...D.querySelectorAll('#prodTable tbody .clock-input')];
+check('Clock column present', D.querySelectorAll('#prodTable thead th').length === 7);
+check('every step has a clock input', clockInputs().length === prodRows());
+const mwBefore = mw();
+setVal(clockInputs()[0], '250', 'change');
+check('overclock one step raises total power', mw() > mwBefore);
+const ocStore = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'));
+const ocPlan = ocStore.plans.find((p) => p.id === ocStore.activeId);
+check('per-node clock persisted', ocPlan.state.nodeClock && Object.keys(ocPlan.state.nodeClock).length === 1);
+setVal(clockInputs()[0], '100', 'change'); // back to global → override cleared
+const ocStore2 = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'));
+const ocPlan2 = ocStore2.plans.find((p) => p.id === ocStore2.activeId);
+check('typing the global value clears the override', Object.keys(ocPlan2.state.nodeClock || {}).length === 0);
+check('power restored after clearing override', mw() === mwBefore);
+
 // ---- factory plans ----
 console.log('\n### FACTORY PLANS');
 check('starts with 1 plan', planNames().length === 1 && planNames()[0] === 'Factory 1');
