@@ -355,3 +355,17 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
 .edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }
 .edge-label { fill: #9aa3b2; font-size: 9px; paint-order: stroke; stroke: #11141a; stroke-width: 3px; }
+
+/* unlocked alternates from save */
+#saveStatus { margin-top: 8px; }
+#saveStatus.warn-text { color: #ffb4b2; }
+.save-alts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+.save-alt-chip {
+  font-size: 10px;
+  background: rgba(255, 112, 67, 0.14);
+  color: var(--accent-2);
+  border: 1px solid var(--accent-2);
+  border-radius: 4px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}

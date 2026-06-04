@@ -105,6 +105,22 @@
           </section>
         </div>
 
+        <!-- ============ SHARED: UNLOCKED ALTERNATES FROM SAVE ============ -->
+        <section class="ctl-group">
+          <h2>Unlocked alternates <small class="badge">from save</small></h2>
+          <label class="fld">
+            <span>Game save</span>
+            <select id="saveSelect" class="sel"></select>
+          </label>
+          <div class="chip-toolbar">
+            <button id="saveLoad" class="btn mini" title="Read unlocked alternate recipes from the selected save">Load unlocked</button>
+            <button id="saveRefresh" class="btn mini ghost" title="Rescan the save folder">↻</button>
+            <button id="saveClear" class="btn mini ghost" title="Clear filter — make all alternates available">All</button>
+          </div>
+          <small id="saveStatus" class="hint"></small>
+          <div id="saveList" class="save-alts" hidden></div>
+        </section>
+
         <!-- ============ SHARED: COST MULTIPLIER (game settings) ============ -->
         <section class="ctl-group">
           <h2>Cost Multiplier <small class="badge">Advanced Game Settings</small></h2>

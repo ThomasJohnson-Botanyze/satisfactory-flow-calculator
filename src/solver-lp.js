@@ -40,12 +40,18 @@ const rawRateOf = (info, cost) => {
   return s;
 };
 
-function recipePool(allowAlternates) {
-  return Object.keys(RECIPES).filter((rc) => allowAlternates || !RECIPES[rc].alternate);
+// unlockedAlts: optional Set of unlocked alternate recipe classNames (from a save
+// file). null/undefined = no restriction (every alternate allowed, original behavior).
+function recipePool(allowAlternates, unlockedAlts) {
+  return Object.keys(RECIPES).filter((rc) => {
+    if (!RECIPES[rc].alternate) return true;
+    if (!allowAlternates) return false;
+    return !unlockedAlts || unlockedAlts.has(rc);
+  });
 }
 
-function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1 }) {
-  const pool = recipePool(allowAlternates);
+function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null }) {
+  const pool = recipePool(allowAlternates, unlockedAlts);
   const inPlay = new Set();
   for (const rc of pool) for (const it of itemsOf(RC_INFO[rc])) inPlay.add(it);
 
@@ -96,10 +102,10 @@ function summarize(res, pool, recipeCost, powerMult) {
   return { recipes, raw, outputs, net, totalPower, totalMachines };
 }
 
-function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1 }) {
+function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null }) {
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
-  const { model, pool } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult });
+  const { model, pool } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts });
   const res = solver.Solve(model);
   if (!res.feasible) return { feasible: false };
   const sum = summarize(res, pool, recipeCost, powerMult);
@@ -109,8 +115,8 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   return sum;
 }
 
-function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1, powerMult = 1 }) {
-  const { model, pool } = buildModel({ inputs: supply, maxItem: product, allowAlternates, recipeCost, powerMult });
+function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null }) {
+  const { model, pool } = buildModel({ inputs: supply, maxItem: product, allowAlternates, recipeCost, powerMult, unlockedAlts });
   const res = solver.Solve(model);
   if (!res.feasible || !(res.result > 1e-6)) return { feasible: false };
   const sum = summarize(res, pool, recipeCost, powerMult);

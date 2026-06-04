@@ -1,6 +1,7 @@
 'use strict';
 const DATA = require('./data.json');
 const LP = require('./solver-lp');
+const SAVE = require('./save-reader');
 
 // ---------- indexes ----------
 const ITEMS = DATA.items;
@@ -33,6 +34,16 @@ function defaultRecipeClass(item) {
   const cands = recipesByPrimary[item] || [];
   return cands.filter((rc) => !RECIPES[rc].alternate)[0] || null;
 }
+// Is recipe rc usable given the unlocked-from-save filter? Standard recipes are
+// always available; alternates only when no save is loaded (state.unlockedAlts
+// null) or when present in the unlocked list.
+function altUnlocked(rc) {
+  const r = RECIPES[rc];
+  if (!r || !r.alternate) return true;
+  if (!state.unlockedAlts) return true;
+  return state.unlockedAlts.includes(rc);
+}
+const unlockedAltSet = () => (state.unlockedAlts ? new Set(state.unlockedAlts) : null);
 const targetable = Object.keys(recipesByPrimary).map((c) => ({ c, n: itemName(c) })).sort((a, b) => a.n.localeCompare(b.n));
 const resList = [...RESOURCES].map((c) => ({ c, n: itemName(c) })).sort((a, b) => a.n.localeCompare(b.n));
 const nameToClass = (name) => {
@@ -53,6 +64,10 @@ const defaultState = () => ({
   powerMult: 1,
   spaceMult: 1,
   picks: {},
+  // null = no save loaded → every alternate available (original behavior).
+  // [] = a save was read but no alternates unlocked. [...classNames] = restrict to these.
+  unlockedAlts: null,
+  saveName: '',
   opt: {
     outputs: [{ name: '', rate: 60 }],
     inputs: Object.fromEntries(resList.map((r) => [r.c, { on: true, cap: '' }])),
@@ -80,7 +95,8 @@ function load() {
 function chosenRecipeClass(item) {
   const pick = state.picks[item];
   if (pick === 'RAW') return null;
-  if (pick && RECIPES[pick]) return pick;
+  // A previously-picked alternate that a loaded save doesn't unlock falls back to default.
+  if (pick && RECIPES[pick] && altUnlocked(pick)) return pick;
   if (RESOURCES.has(item)) return null;
   return defaultRecipeClass(item);
 }
@@ -152,7 +168,7 @@ function recipeOptionLabel(rc) {
 }
 function recipeSelect(item, currentRc) {
   const sel = el('select', 'recipe-select');
-  const cands = (recipesByProduct[item] || []).slice().sort((a, b) => {
+  const cands = (recipesByProduct[item] || []).filter((rc) => altUnlocked(rc) || rc === currentRc).sort((a, b) => {
     const ra = RECIPES[a], rb = RECIPES[b];
     if (ra.alternate !== rb.alternate) return ra.alternate ? 1 : -1;
     return ra.name.localeCompare(rb.name);
@@ -448,7 +464,7 @@ function renderOptimize() {
   for (const r of resList) { const cfg = state.opt.inputs[r.c]; if (cfg && cfg.on) allowedInputs[r.c] = cfg.cap === '' || cfg.cap == null ? Infinity : Number(cfg.cap); }
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
-  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult });
+  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: unlockedAltSet() });
   if (!res.feasible) return showEmpty('No feasible recipe set: those outputs cannot be made from the allowed inputs. Enable more resources or alternate recipes.');
   res.surplus = res.outputs.filter((o) => !outputs[o.item]);
   present(res, outputs);
@@ -470,7 +486,7 @@ function renderMax() {
   let n = 0;
   for (const s of state.max.supply) if (s.item && s.amount > 0) { supply[s.item] = (supply[s.item] || 0) + Number(s.amount); n++; }
   if (!n) return showEmpty('Add at least one available input with an amount.');
-  const res = LP.maxThroughput({ product, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult });
+  const res = LP.maxThroughput({ product, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: unlockedAltSet() });
   if (!res.feasible) return showEmpty(`Cannot produce ${itemName(product)} from the given inputs.`);
   res.surplus = res.outputs.filter((o) => o.item !== product);
   present(res, { [product]: res.maxOutput });
@@ -558,6 +574,82 @@ function buildMaxSupply() {
     box.appendChild(row);
   });
 }
+// ---------- unlocked alternates from save file ----------
+function buildSaveList() {
+  const sel = $('saveSelect');
+  if (!sel) return;
+  let info;
+  try { info = SAVE.listSaves(); } catch (e) { info = { exists: false, saves: [] }; }
+  sel.innerHTML = '';
+  if (!info.saves.length) {
+    const o = el('option', null, info.exists ? 'No .sav files found' : 'Save folder not found');
+    o.value = '';
+    sel.appendChild(o);
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  for (const s of info.saves) {
+    const o = el('option', null, (s.folder ? s.folder.slice(0, 8) + '…/' : '') + s.name);
+    o.value = s.file;
+    sel.appendChild(o);
+  }
+}
+function renderSaveStatus() {
+  const st = $('saveStatus');
+  const list = $('saveList');
+  if (!st || !list) return;
+  st.classList.remove('warn-text');
+  if (!state.unlockedAlts) {
+    st.textContent = 'No save loaded — all alternate recipes available.';
+    list.hidden = true;
+    list.innerHTML = '';
+    return;
+  }
+  const n = state.unlockedAlts.length;
+  st.textContent = `${n} alternate${n === 1 ? '' : 's'} unlocked${state.saveName ? ' · ' + state.saveName : ''} — only these are offered.`;
+  list.innerHTML = '';
+  const names = state.unlockedAlts
+    .map((rc) => (RECIPES[rc] ? RECIPES[rc].name.replace(/^Alternate:\s*/, '') : rc))
+    .sort((a, b) => a.localeCompare(b));
+  for (const nm of names) list.appendChild(el('span', 'save-alt-chip', nm));
+  list.hidden = names.length === 0;
+}
+function loadFromSelectedSave() {
+  const sel = $('saveSelect');
+  const st = $('saveStatus');
+  if (!sel || !sel.value) return;
+  st.classList.remove('warn-text');
+  st.textContent = 'Parsing save…';
+  const file = sel.value;
+  // Defer so "Parsing…" paints before the synchronous parse blocks the thread.
+  setTimeout(() => {
+    let res;
+    try { res = SAVE.readUnlockedAlternates(file); }
+    catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+    if (!res.ok) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); return; }
+    state.unlockedAlts = res.recognized.map((r) => r.className);
+    state.saveName = res.saveName || '';
+    for (const item in state.picks) {
+      const p = state.picks[item];
+      if (p && p !== 'RAW' && RECIPES[p] && RECIPES[p].alternate && !state.unlockedAlts.includes(p)) delete state.picks[item];
+    }
+    save();
+    renderSaveStatus();
+    if (res.unknown && res.unknown.length) {
+      st.textContent += ` (+${res.unknown.length} not in app data)`;
+    }
+    solveAndRender();
+  }, 20);
+}
+function clearUnlockedFilter() {
+  state.unlockedAlts = null;
+  state.saveName = '';
+  save();
+  renderSaveStatus();
+  solveAndRender();
+}
+
 function setMode(mode) {
   state.mode = mode;
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.mode === mode));
@@ -581,6 +673,8 @@ function init() {
   buildGameSelect('mRecipe', GAME.recipe, state.recipeCost);
   buildGameSelect('mPower', GAME.power, state.powerMult);
   buildGameSelect('mSpace', GAME.space, state.spaceMult);
+  buildSaveList();
+  renderSaveStatus();
 
   if (state.targetItem) $('targetItem').value = itemName(state.targetItem);
   $('targetRate').value = state.targetRate;
@@ -607,6 +701,10 @@ function init() {
   $('mRecipe').addEventListener('change', (e) => { state.recipeCost = Number(e.target.value); save(); solveAndRender(); });
   $('mPower').addEventListener('change', (e) => { state.powerMult = Number(e.target.value); save(); solveAndRender(); });
   $('mSpace').addEventListener('change', (e) => { state.spaceMult = Number(e.target.value); save(); solveAndRender(); });
+
+  $('saveLoad').addEventListener('click', loadFromSelectedSave);
+  $('saveRefresh').addEventListener('click', buildSaveList);
+  $('saveClear').addEventListener('click', clearUnlockedFilter);
 
   $('optAddOutput').addEventListener('click', () => { state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); });
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });
