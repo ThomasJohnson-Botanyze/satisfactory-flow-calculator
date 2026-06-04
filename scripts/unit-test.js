@@ -78,6 +78,23 @@ check('belt spline unwrapped to world X', !!belt && near(belt.path[1].x, 800));
 const sum = FE.summarize(blds);
 check('summarize totals', sum.total === 2 && sum.byKind.machine === 1 && sum.byKind.belt === 1);
 
+// Lightweight (instanced) buildables — foundations/walls modern saves pack into
+// FGLightweightBuildableSubsystem instead of per-actor objects.
+const lwSave = { levels: { Persistent: { objects: [
+  { typePath: '/Script/FactoryGame.FGLightweightBuildableSubsystem',
+    specialProperties: { buildables: [
+      { typeReference: { pathName: '/Game/X/Build_Foundation_8x4_01.Build_Foundation_8x4_01_C' },
+        instances: [
+          { transform: { translation: { x: 10, y: 20, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale3d: { x: 1, y: 1, z: 1 } }, usedSwatchSlot: { pathName: '/Game/X/SwatchDesc_Slot3.SwatchDesc_Slot3_C' } },
+          { transform: { translation: { x: 30, y: 40, z: 0 } } },
+        ] } ] } } ] } } };
+const lw = [];
+FE.extractLightweight(lwSave, lw);
+check('extractLightweight reads instanced buildables', lw.length === 2);
+check('lightweight record is a machine footprint', lw[0].kind === 'machine' && lw[0].lightweight === true);
+check('lightweight class + swatch parsed', lw[0].className === 'Build_Foundation_8x4_01_C' && lw[0].swatch === 'SwatchDesc_Slot3_C');
+check('extractBuildings includes lightweight pass', FE.extractBuildings(lwSave).length === 2);
+
 // ---- building-meta ----
 console.log('\n### BUILDING-META');
 check('constructor = production', BM.buildingMeta('Build_ConstructorMk1_C').category === 'production');
