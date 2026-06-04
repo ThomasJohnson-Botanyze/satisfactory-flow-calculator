@@ -345,19 +345,19 @@ function buildFlow(res, targets) {
   const nodes = [];
   const byId = {};
   const edges = [];
-  const addNode = (id, kind, title, sub, sub2) => {
-    if (!byId[id]) { const n = { id, kind, title, sub, sub2: sub2 || '', ins: [], outs: [] }; nodes.push(n); byId[id] = n; }
+  const addNode = (id, kind, title, sub) => {
+    if (!byId[id]) { const n = { id, kind, title, sub, ins: [], outs: [] }; nodes.push(n); byId[id] = n; }
     return byId[id];
   };
-  // Clock only applies in the Planner (LP modes solve at 100%).
-  const clockPct = Math.round((state.mode === 'planner' ? state.clock : 1) * 100);
   // stable id keyed by recipe class so saved drag positions survive re-solves
   res.recipes.forEach((s, i) => {
     s._nid = 'mac|' + (s.rc || i);
     const r = RECIPES[s.rc];
     // Alternate recipes show the recipe name; standard recipes show the output item.
     const title = r && r.alternate ? '★ ' + r.name.replace(/^Alternate:\s*/, '') : itemName(s.item);
-    addNode(s._nid, 'machine', title, `${fmt(Math.ceil(s.machines - 1e-9), 0)}× ${s.buildingName}`, `${clockPct}% clock`);
+    // Exact (fractional) machine count for perfect-ratio / 100%-uptime planning,
+    // e.g. "7.5× Assembler" = 7 machines at 100% + 1 at 50%.
+    addNode(s._nid, 'machine', title, `${fmt(s.machines)}× ${s.buildingName}`);
   });
   res.raw.forEach((r) => addNode('raw|' + r.item, 'raw', itemName(r.item), fmt(r.rate) + '/min'));
   const producers = {};
@@ -414,7 +414,7 @@ function layoutFlow(flow) {
   const saved = state.flowPos || {};
   Object.keys(cols).map(Number).sort((a, b) => a - b).forEach((c) => {
     cols[c].forEach((n, i) => {
-      n.w = NW; n.h = n.sub2 ? NH + 14 : NH; // taller for the 3rd (clock) line
+      n.w = NW; n.h = NH;
       const sp = saved[n.id];
       if (sp && isFinite(sp.x) && isFinite(sp.y)) { n.x = sp.x; n.y = sp.y; }
       else { n.x = PADX + c * COLW; n.y = PADY + i * ROWH; }
@@ -476,12 +476,6 @@ function drawFlow(flow) {
     t2.setAttribute('class', 'n-sub'); t2.setAttribute('x', 10); t2.setAttribute('y', 35);
     t2.textContent = n.sub;
     g.appendChild(t2);
-    if (n.sub2) {
-      const t3 = document.createElementNS(SVGNS, 'text');
-      t3.setAttribute('class', 'n-sub n-clock'); t3.setAttribute('x', 10); t3.setAttribute('y', 51);
-      t3.textContent = n.sub2;
-      g.appendChild(t3);
-    }
     n._g = g;
     gNodes.appendChild(g);
     attachDrag(g, n, flow);
