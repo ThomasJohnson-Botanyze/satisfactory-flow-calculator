@@ -433,6 +433,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .node.out rect { fill: #15361f; stroke: var(--good); }
 .node .n-title { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
+.node .n-clock { fill: var(--accent); font-weight: 600; }
 .edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }
 .edge-label { fill: #c2cad8; font-size: 11px; paint-order: stroke; stroke: #11141a; stroke-width: 4px; }
 
