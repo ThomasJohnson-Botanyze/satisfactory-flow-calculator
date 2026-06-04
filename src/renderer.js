@@ -38,9 +38,33 @@ const SUPPORT_LINKS = {
   kofi: 'https://ko-fi.com/satisfactoryflow',
 };
 // shell.openExternal in Electron; window.open fallback if ever bundled for web
-let _shell = null;
-try { ({ shell: _shell } = require('electron')); } catch (_) { /* non-Electron host */ }
+let _shell = null, _ipc = null;
+try { ({ shell: _shell, ipcRenderer: _ipc } = require('electron')); } catch (_) { /* non-Electron host */ }
 const openExternal = (url) => { if (_shell && _shell.openExternal) _shell.openExternal(url); else window.open(url, '_blank', 'noopener'); };
+
+// ---------- update notifier (Level 1) ----------
+// main.js polls GitHub Releases on launch and fires 'update-available' when a
+// newer version is published. Show a non-blocking toast; "Download" opens the
+// release page for a manual install (no in-app auto-update). Dismissing a
+// given version is remembered so we don't nag for the same one every launch.
+function showUpdateToast(info) {
+  if (!info || !info.version) return;
+  try { if (localStorage.getItem('updateDismissed') === info.version) return; } catch (_) {}
+  const toast = document.getElementById('updateToast');
+  if (!toast) return;
+  const msg = document.getElementById('updateMsg');
+  if (msg) msg.textContent = `Version ${info.version} is ready to install.`;
+  document.getElementById('updateGet').onclick = () => {
+    if (info.url) openExternal(info.url);
+    toast.hidden = true;
+  };
+  document.getElementById('updateDismiss').onclick = () => {
+    try { localStorage.setItem('updateDismissed', info.version); } catch (_) {}
+    toast.hidden = true;
+  };
+  toast.hidden = false;
+}
+if (_ipc) _ipc.on('update-available', (_e, info) => showUpdateToast(info));
 
 // ---------- indexes ----------
 const ITEMS = DATA.items;

@@ -323,6 +323,17 @@
       </div>
     </div>
 
+    <!-- ============ UPDATE TOAST ============ -->
+    <div id="updateToast" class="update-toast" hidden role="status" aria-live="polite">
+      <span class="update-ic" aria-hidden="true">⬆</span>
+      <div class="update-txt">
+        <b>Update available</b>
+        <small id="updateMsg">A new version is ready.</small>
+      </div>
+      <button id="updateGet" class="btn mini">Download</button>
+      <button id="updateDismiss" class="update-x" aria-label="Dismiss" title="Dismiss">✕</button>
+    </div>
+
     <datalist id="itemList"></datalist>
     <script src="renderer.js"></script>
   </body>
