@@ -112,9 +112,9 @@
           </section>
         </div>
 
-        <!-- ============ SHARED: UNLOCKED ALTERNATES FROM SAVE ============ -->
+        <!-- ============ SHARED: ALTERNATE RECIPES (save unlock + manual veto) ============ -->
         <section class="ctl-group">
-          <h2>Unlocked alternates <small class="badge">from save</small></h2>
+          <h2>Alternate recipes <small class="badge">save + manual</small></h2>
           <label class="fld">
             <span>Game save</span>
             <select id="saveSelect" class="sel"></select>
@@ -122,10 +122,19 @@
           <div class="chip-toolbar">
             <button id="saveLoad" class="btn mini" title="Read unlocked alternate recipes from the selected save">Load unlocked</button>
             <button id="saveRefresh" class="btn mini ghost" title="Rescan the save folder">↻</button>
-            <button id="saveClear" class="btn mini ghost" title="Clear filter — make all alternates available">All</button>
+            <button id="saveClear" class="btn mini ghost" title="Forget the loaded save — treat all alternates as unlocked">Clear</button>
           </div>
           <small id="saveStatus" class="hint"></small>
-          <div id="saveList" class="save-alts" hidden></div>
+          <div class="alt-manage-head">
+            <input id="altSearch" class="alt-search" placeholder="filter recipes…" autocomplete="off" />
+            <span id="altCount" class="alt-count"></span>
+          </div>
+          <div class="chip-toolbar">
+            <button id="altAllOn" class="btn mini ghost" title="Enable every alternate in the list">Enable all</button>
+            <button id="altAllOff" class="btn mini ghost" title="Exclude every alternate in the list from calculations">Disable all</button>
+          </div>
+          <small class="hint">Untick a recipe to stop the optimizer using it — even if unlocked or optimal.</small>
+          <div id="altList" class="alt-list"></div>
         </section>
 
         <!-- ============ SHARED: COST MULTIPLIER (game settings) ============ -->

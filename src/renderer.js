@@ -43,7 +43,21 @@ function altUnlocked(rc) {
   if (!state.unlockedAlts) return true;
   return state.unlockedAlts.includes(rc);
 }
-const unlockedAltSet = () => (state.unlockedAlts ? new Set(state.unlockedAlts) : null);
+const ALT_CLASSES = Object.keys(RECIPES).filter((rc) => RECIPES[rc].alternate);
+// Effective gate = unlocked by the save AND not manually excluded by the user.
+function altEnabled(rc) {
+  const r = RECIPES[rc];
+  if (!r || !r.alternate) return true;
+  if ((state.disabledAlts || []).includes(rc)) return false;
+  return altUnlocked(rc);
+}
+// Set of alternates the solver may use, or null when there is no restriction at all.
+function effectiveAltSet() {
+  const disabled = state.disabledAlts || [];
+  if (!state.unlockedAlts && !disabled.length) return null;
+  const base = state.unlockedAlts || ALT_CLASSES;
+  return new Set(base.filter((rc) => !disabled.includes(rc)));
+}
 const targetable = Object.keys(recipesByPrimary).map((c) => ({ c, n: itemName(c) })).sort((a, b) => a.n.localeCompare(b.n));
 const resList = [...RESOURCES].map((c) => ({ c, n: itemName(c) })).sort((a, b) => a.n.localeCompare(b.n));
 const nameToClass = (name) => {
@@ -68,6 +82,9 @@ const defaultState = () => ({
   // [] = a save was read but no alternates unlocked. [...classNames] = restrict to these.
   unlockedAlts: null,
   saveName: '',
+  // Alternate recipe classNames the user has manually excluded from this plan's
+  // calculations (independent of unlock status — vetoes even unlocked/optimal ones).
+  disabledAlts: [],
   opt: {
     outputs: [{ name: '', rate: 60 }],
     inputs: Object.fromEntries(resList.map((r) => [r.c, { on: true, cap: '' }])),
@@ -149,8 +166,8 @@ function switchPlan(id) {
 function chosenRecipeClass(item) {
   const pick = state.picks[item];
   if (pick === 'RAW') return null;
-  // A previously-picked alternate that a loaded save doesn't unlock falls back to default.
-  if (pick && RECIPES[pick] && altUnlocked(pick)) return pick;
+  // A picked alternate that's locked by the save or manually excluded falls back to default.
+  if (pick && RECIPES[pick] && altEnabled(pick)) return pick;
   if (RESOURCES.has(item)) return null;
   return defaultRecipeClass(item);
 }
@@ -222,7 +239,7 @@ function recipeOptionLabel(rc) {
 }
 function recipeSelect(item, currentRc) {
   const sel = el('select', 'recipe-select');
-  const cands = (recipesByProduct[item] || []).filter((rc) => altUnlocked(rc) || rc === currentRc).sort((a, b) => {
+  const cands = (recipesByProduct[item] || []).filter((rc) => altEnabled(rc) || rc === currentRc).sort((a, b) => {
     const ra = RECIPES[a], rb = RECIPES[b];
     if (ra.alternate !== rb.alternate) return ra.alternate ? 1 : -1;
     return ra.name.localeCompare(rb.name);
@@ -518,7 +535,7 @@ function renderOptimize() {
   for (const r of resList) { const cfg = state.opt.inputs[r.c]; if (cfg && cfg.on) allowedInputs[r.c] = cfg.cap === '' || cfg.cap == null ? Infinity : Number(cfg.cap); }
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
-  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: unlockedAltSet() });
+  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet() });
   if (!res.feasible) return showEmpty('No feasible recipe set: those outputs cannot be made from the allowed inputs. Enable more resources or alternate recipes.');
   res.surplus = res.outputs.filter((o) => !outputs[o.item]);
   present(res, outputs);
@@ -540,7 +557,7 @@ function renderMax() {
   let n = 0;
   for (const s of state.max.supply) if (s.item && s.amount > 0) { supply[s.item] = (supply[s.item] || 0) + Number(s.amount); n++; }
   if (!n) return showEmpty('Add at least one available input with an amount.');
-  const res = LP.maxThroughput({ product, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: unlockedAltSet() });
+  const res = LP.maxThroughput({ product, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet() });
   if (!res.feasible) return showEmpty(`Cannot produce ${itemName(product)} from the given inputs.`);
   res.surplus = res.outputs.filter((o) => o.item !== product);
   present(res, { [product]: res.maxOutput });
@@ -649,25 +666,61 @@ function buildSaveList() {
     sel.appendChild(o);
   }
 }
+let altSearch = '';
+// Alternates the user can manage: the unlocked set when a save is loaded, else all.
+function altUniverse() {
+  return (state.unlockedAlts ? state.unlockedAlts : ALT_CLASSES).slice();
+}
+// Renders the save status line AND the per-recipe enable/disable checkbox list.
+// (Called by applyStateToControls on plan switch, so the list tracks the plan.)
 function renderSaveStatus() {
   const st = $('saveStatus');
-  const list = $('saveList');
-  if (!st || !list) return;
-  st.classList.remove('warn-text');
-  if (!state.unlockedAlts) {
-    st.textContent = 'No save loaded — all alternate recipes available.';
-    list.hidden = true;
-    list.innerHTML = '';
-    return;
+  if (st) {
+    st.classList.remove('warn-text');
+    st.textContent = !state.unlockedAlts
+      ? 'No save loaded — all alternates available. Untick any to exclude it.'
+      : `${state.unlockedAlts.length} alternate${state.unlockedAlts.length === 1 ? '' : 's'} unlocked${state.saveName ? ' · ' + state.saveName : ''}.`;
   }
-  const n = state.unlockedAlts.length;
-  st.textContent = `${n} alternate${n === 1 ? '' : 's'} unlocked${state.saveName ? ' · ' + state.saveName : ''} — only these are offered.`;
+  const list = $('altList');
+  if (!list) return;
+  const disabled = state.disabledAlts || [];
+  const universe = altUniverse()
+    .map((rc) => ({ rc, name: RECIPES[rc] ? RECIPES[rc].name.replace(/^Alternate:\s*/, '') : rc }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const cnt = $('altCount');
+  if (cnt) cnt.textContent = `${universe.filter((u) => !disabled.includes(u.rc)).length}/${universe.length} on`;
+  const q = altSearch.trim().toLowerCase();
+  const shown = q ? universe.filter((u) => u.name.toLowerCase().includes(q)) : universe;
   list.innerHTML = '';
-  const names = state.unlockedAlts
-    .map((rc) => (RECIPES[rc] ? RECIPES[rc].name.replace(/^Alternate:\s*/, '') : rc))
-    .sort((a, b) => a.localeCompare(b));
-  for (const nm of names) list.appendChild(el('span', 'save-alt-chip', nm));
-  list.hidden = names.length === 0;
+  for (const u of shown) {
+    const row = el('label', 'alt-row');
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = !disabled.includes(u.rc);
+    cb.addEventListener('change', () => {
+      const arr = state.disabledAlts || (state.disabledAlts = []);
+      const i = arr.indexOf(u.rc);
+      if (cb.checked) { if (i >= 0) arr.splice(i, 1); }
+      else if (i < 0) arr.push(u.rc);
+      save();
+      renderSaveStatus();
+      solveAndRender();
+    });
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(' ' + u.name));
+    list.appendChild(row);
+  }
+  if (!shown.length) list.appendChild(el('div', 'hint', q ? 'No matches.' : 'No alternates.'));
+}
+// Enable (on=true) or exclude (on=false) every alternate currently in the list.
+function setAllAlts(on) {
+  const uni = altUniverse();
+  const arr = state.disabledAlts || (state.disabledAlts = []);
+  if (on) state.disabledAlts = arr.filter((rc) => !uni.includes(rc));
+  else { const s = new Set(arr); uni.forEach((rc) => s.add(rc)); state.disabledAlts = [...s]; }
+  save();
+  renderSaveStatus();
+  solveAndRender();
 }
 function loadFromSelectedSave() {
   const sel = $('saveSelect');
@@ -792,6 +845,9 @@ function init() {
   $('saveLoad').addEventListener('click', loadFromSelectedSave);
   $('saveRefresh').addEventListener('click', buildSaveList);
   $('saveClear').addEventListener('click', clearUnlockedFilter);
+  $('altSearch').addEventListener('input', (e) => { altSearch = e.target.value; renderSaveStatus(); });
+  $('altAllOn').addEventListener('click', () => setAllAlts(true));
+  $('altAllOff').addEventListener('click', () => setAllAlts(false));
 
   $('optAddOutput').addEventListener('click', () => { state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); });
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });
