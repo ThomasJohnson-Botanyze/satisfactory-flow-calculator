@@ -192,5 +192,42 @@ const g4 = JSON.parse(dom4.window.localStorage.getItem('satisfactory-factory-pla
 check('globals snapshot persisted', !!g4 && g4.powerMult === 2 && g4.recipeCost === 2);
 check('globals include save-unlock keys', !!g4 && 'unlockedAlts' in g4 && 'saveName' in g4);
 
+// planner multiple desired outputs (parity with the optimizer)
+console.log('\n### PLANNER MULTI-OUTPUT');
+const dom5 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom5.window; global.document = dom5.window.document; global.localStorage = dom5.window.localStorage;
+global.location = dom5.window.location; global.Event = dom5.window.Event;
+if (!dom5.window.SVGElement.prototype.setPointerCapture) dom5.window.SVGElement.prototype.setPointerCapture = () => {};
+dom5.window.localStorage.clear();
+delete require.cache[require.resolve('../src/renderer.js')];
+require('../src/renderer.js');
+dom5.window.dispatchEvent(new dom5.window.Event('DOMContentLoaded'));
+const d5 = dom5.window.document;
+const fire5 = (n, t) => n.dispatchEvent(new dom5.window.Event(t, { bubbles: true }));
+const setVal5 = (n, v, t = 'input') => { n.value = v; fire5(n, t); };
+const click5 = (n) => n.dispatchEvent(new dom5.window.Event('click', { bubbles: true }));
+const rows5 = () => d5.querySelectorAll('#prodTable tbody tr').length;
+const itemTexts5 = () => [...d5.querySelectorAll('#prodTable tbody tr td:first-child')].map((td) => td.textContent);
+click5([...d5.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
+setVal5(d5.getElementById('targetItem'), 'Iron Plate'); setVal5(d5.getElementById('targetRate'), '30');
+const baseRows5 = rows5();
+check('single target excludes Iron Rod', baseRows5 > 0 && !itemTexts5().some((t) => /Iron Rod/.test(t)));
+click5(d5.getElementById('plannerAddOutput'));
+const exName = d5.querySelector('#plannerExtra .row .row-item');
+const exRate = d5.querySelector('#plannerExtra .row .row-rate');
+check('add output creates an extra row', !!exName && !!exRate);
+setVal5(exName, 'Iron Rod'); setVal5(exRate, '30');
+check('second output adds production rows', rows5() > baseRows5);
+check('second output (Iron Rod) is produced', itemTexts5().some((t) => /Iron Rod/.test(t)));
+const ps5 = JSON.parse(dom5.window.localStorage.getItem('satisfactory-factory-plans-v1'));
+const pp5 = ps5.plans.find((p) => p.id === ps5.activeId);
+check('extra target persisted', pp5.state.extraTargets && pp5.state.extraTargets.length === 1);
+click5(d5.getElementById('viewFlow'));
+check('flow has 2 output nodes (one per desired output)', d5.querySelectorAll('#flowSvg .node.out').length === 2);
+click5(d5.getElementById('viewTables'));
+click5(d5.querySelector('#plannerExtra .row .row-rm'));
+check('removing extra reverts to single-target rows', rows5() === baseRows5);
+check('Iron Rod gone after removing extra', !itemTexts5().some((t) => /Iron Rod/.test(t)));
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

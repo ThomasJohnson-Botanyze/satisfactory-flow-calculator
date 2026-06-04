@@ -135,12 +135,15 @@ function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1
 
 // Fixed-recipe material balance for the Planner. `recipes` is the exact set of
 // chosen recipe classNames (one per produced item); the LP finds machine counts
-// that meet `rate` of `target` while crediting by-products and resolving loops —
-// both impossible with naive tree recursion. `rawItems` are treated as free
+// that meet the demanded rate of each target while crediting by-products and
+// resolving loops — both impossible with naive tree recursion. Demand is given as
+// `targets` (a {item: rate} map for one or more desired outputs); the legacy
+// single `target`/`rate` pair is still accepted. `rawItems` are treated as free
 // inputs (map resources are always free). Solved at 100 % clock; the renderer
 // rescales machines & power for clock / somersloop afterwards (those cancel in
 // the material ratios, so they don't belong in the balance).
-function planner({ target, rate, recipes = [], rawItems = [], recipeCost = 1 }) {
+function planner({ target, rate, targets = null, recipes = [], rawItems = [], recipeCost = 1 }) {
+  const demand = targets || (target != null ? { [target]: rate } : {});
   const pool = recipes.filter((rc) => RECIPES[rc]);
   if (!pool.length) return { feasible: false };
   const free = new Set(rawItems);
@@ -156,7 +159,7 @@ function planner({ target, rate, recipes = [], rawItems = [], recipeCost = 1 }) 
   }
   const constraints = {};
   for (const it of inPlay) {
-    if (it === target) constraints[it] = { min: rate }; // meet the target demand
+    if (demand[it] != null) constraints[it] = { min: demand[it] }; // meet each target's demand
     else if (RES.has(it) || free.has(it)) constraints[it] = { min: -BIG }; // free input
     else constraints[it] = { min: 0 }; // intermediates: produce ≥ consume (surplus ok)
   }

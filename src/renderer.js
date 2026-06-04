@@ -82,6 +82,10 @@ const defaultState = () => ({
   view: 'tables',
   targetItem: '',
   targetRate: 60,
+  // Additional desired outputs for the Planner, beyond the primary target above.
+  // Each { name, rate }. The primary stays in targetItem/targetRate so it keeps
+  // syncing across the Planner/Optimizer/Max tabs; these extras are Planner-local.
+  extraTargets: [],
   clock: 1.0,
   sloop: 1.0,
   recipeCost: 1,
@@ -207,20 +211,29 @@ function effectiveClock(rc) {
   const o = state.nodeClock && state.nodeClock[rc];
   return o != null && isFinite(o) && o > 0 ? o : state.clock;
 }
-function computePlanner() {
-  const target = state.targetItem;
-  const tRate = state.targetRate * (isDeliverable(target) ? state.spaceMult : 1);
-  const empty = { ok: !!target, feasible: true, recipes: [], raw: [], surplus: [], totalPower: 0, totalMachines: 0, targets: target ? { [target]: tRate } : {} };
-  if (!target || !(tRate > 0)) return empty;
+// Desired outputs for the Planner: the primary target plus any extra rows.
+// Deliverables are scaled by the space-elevator multiplier, same as the optimizer.
+function plannerTargets() {
+  const t = {};
+  const add = (c, rate) => { if (c && rate > 0) t[c] = (t[c] || 0) + Number(rate) * (isDeliverable(c) ? state.spaceMult : 1); };
+  add(state.targetItem, state.targetRate);
+  for (const o of state.extraTargets || []) add(nameToClass(o.name), o.rate);
+  return t;
+}
+function computePlanner(targets) {
+  const tg = targets || plannerTargets();
+  const items = Object.keys(tg);
+  const empty = { ok: items.length > 0, feasible: true, recipes: [], raw: [], surplus: [], totalPower: 0, totalMachines: 0, targets: tg };
+  if (!items.length) return empty;
 
-  // Walk the chosen-recipe graph from the target. We track visited *items* (not a
+  // Walk the chosen-recipe graph from every target. We track visited *items* (not a
   // DFS path), so loops terminate instead of being cut — the LP then balances the
   // whole graph at once, crediting by-products and resolving recycle cycles.
   const usedRc = new Set();
   const rawItems = new Set();
   const chosenItemOf = {}; // rc -> the item whose dropdown selected it (row label)
   const seen = new Set();
-  const stack = [target];
+  const stack = items.slice();
   while (stack.length) {
     const item = stack.pop();
     if (seen.has(item)) continue;
@@ -233,10 +246,15 @@ function computePlanner() {
       for (const ing of RECIPES[rc].ingredients) if (!seen.has(ing.item)) stack.push(ing.item);
     }
   }
-  // Target is itself a raw/imported item — nothing to build.
-  if (!usedRc.size) return Object.assign({}, empty, { raw: [{ item: target, rate: tRate }] });
+  // Every target is itself a raw/imported item — nothing to build.
+  if (!usedRc.size) return Object.assign({}, empty, { raw: items.map((it) => ({ item: it, rate: tg[it] })) });
 
-  const sol = LP.planner({ target, rate: tRate, recipes: [...usedRc], rawItems: [...rawItems], recipeCost: state.recipeCost });
+  // Only producible targets (those with a chosen recipe) become LP demand; a raw
+  // item listed as a desired output has no producer and is just reported as raw.
+  const demand = {};
+  for (const it of items) if (!rawItems.has(it)) demand[it] = tg[it];
+
+  const sol = LP.planner({ targets: demand, recipes: [...usedRc], rawItems: [...rawItems], recipeCost: state.recipeCost });
   if (!sol.feasible) return Object.assign({}, empty, { feasible: false });
 
   let totalPower = 0;
@@ -260,10 +278,10 @@ function computePlanner() {
     feasible: true,
     recipes,
     raw: (sol.raw || []).filter((r) => r.rate > 1e-4),
-    surplus: (sol.outputs || []).filter((o) => o.item !== target && o.rate > 1e-4),
+    surplus: (sol.outputs || []).filter((o) => tg[o.item] == null && o.rate > 1e-4),
     totalPower,
     totalMachines,
-    targets: { [target]: tRate },
+    targets: tg,
   };
 }
 
@@ -1102,9 +1120,12 @@ function showOutput() { $('empty').hidden = true; $('output').hidden = false; ap
 
 function renderPlanner() {
   $('sumExtraLabel').textContent = 'Raw resource types';
-  if (!state.targetItem) return showEmpty('Pick a target item to build a production flow.');
-  if (!(state.targetRate > 0)) return showEmpty('Set a target rate above 0.');
-  const res = computePlanner();
+  const targets = plannerTargets();
+  if (!Object.keys(targets).length) {
+    const hasItem = !!state.targetItem || (state.extraTargets || []).some((o) => nameToClass(o.name));
+    return showEmpty(hasItem ? 'Set a rate above 0 for a desired output.' : 'Pick a target item to build a production flow.');
+  }
+  const res = computePlanner(targets);
   if (!res.feasible) return showEmpty('No feasible plan: the selected recipes can’t balance — a recycle loop that consumes more than it makes. Switch one alternate to break it.');
   present(res, res.targets);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
@@ -1185,6 +1206,25 @@ function buildGameSelect(id, values, cur) {
   const sel = $(id);
   sel.innerHTML = '';
   for (const v of values) { const o = el('option', null, v === 1 ? '1 (Default)' : String(v)); o.value = String(v); if (v === cur) o.selected = true; sel.appendChild(o); }
+}
+// Planner extra desired outputs (the primary stays in #targetItem/#targetRate).
+// These are Planner-local, so unlike the optimizer's first row they don't sync
+// across tabs; an empty list is fine because the primary is the anchor.
+function buildPlannerExtra() {
+  const box = $('plannerExtra');
+  if (!box) return;
+  box.innerHTML = '';
+  (state.extraTargets || (state.extraTargets = [])).forEach((o, i) => {
+    const row = el('div', 'row');
+    const name = el('input', 'row-item'); name.setAttribute('list', 'itemList'); name.placeholder = 'item…'; name.value = o.name; name.autocomplete = 'off';
+    const rate = el('input', 'row-rate'); rate.type = 'number'; rate.min = '0'; rate.step = 'any'; rate.value = o.rate;
+    const rm = el('button', 'row-rm', '×');
+    name.addEventListener('input', () => { o.name = name.value; save(); solveAndRender(); });
+    rate.addEventListener('input', () => { o.rate = parseFloat(rate.value) || 0; save(); solveAndRender(); });
+    rm.addEventListener('click', () => { state.extraTargets.splice(i, 1); save(); buildPlannerExtra(); solveAndRender(); });
+    row.append(name, rate, rm);
+    box.appendChild(row);
+  });
 }
 function buildOptOutputs() {
   const box = $('optOutputs');
@@ -1424,6 +1464,7 @@ function reflectPrimary(except) {
 }
 // Push the active plan's state into every control, then render.
 function applyStateToControls() {
+  buildPlannerExtra();
   buildOptOutputs();
   buildOptInputs();
   buildMaxSupply();
@@ -1461,6 +1502,7 @@ function init() {
   $('targetItem').addEventListener('change', (e) => onTarget(e.target.value));
   $('targetItem').addEventListener('input', (e) => { if (nameToClass(e.target.value)) onTarget(e.target.value); });
   $('targetRate').addEventListener('input', (e) => { state.targetRate = parseFloat(e.target.value) || 0; reflectPrimary('planner'); save(); solveAndRender(); });
+  $('plannerAddOutput').addEventListener('click', () => { (state.extraTargets || (state.extraTargets = [])).push({ name: '', rate: 60 }); save(); buildPlannerExtra(); });
   $('clock').addEventListener('input', (e) => { state.clock = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
   $('sloop').addEventListener('input', (e) => { state.sloop = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
 

@@ -76,5 +76,10 @@ lpCheck('loop is feasible (was cut + warned before)', loop.feasible);
 lpCheck('both recycled recipes run with finite machines', loop.feasible && loop.recipes.length === 2 && loop.recipes.every((x) => isFinite(x.machines) && x.machines > 0));
 lpCheck('net Plastic ≈ 60', loop.feasible && Math.abs((loop.net[PLASTIC] || 0) - 60) < 1e-6);
 
+console.log('\n=== PLANNER: multiple desired outputs solved together ===');
+const multi = planner({ targets: { [FUEL]: 40, [PLASTIC]: 30 }, recipes: [rc('Residual Fuel'), rc('Plastic')], rawItems: [OIL] });
+lpCheck('feasible with two targets', multi.feasible);
+lpCheck('both demands met (Fuel ≥ 40, Plastic ≥ 30)', multi.feasible && (multi.net[FUEL] || 0) >= 40 - 1e-6 && (multi.net[PLASTIC] || 0) >= 30 - 1e-6);
+
 console.log(`\n${lpFail === 0 ? '✅ planner checks pass' : '❌ ' + lpFail + ' planner checks FAILED'} (${lpPass} passed)`);
 process.exit(lpFail ? 1 : 0);

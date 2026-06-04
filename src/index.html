@@ -41,7 +41,7 @@
         <!-- ============ PLANNER ============ -->
         <div class="mode-panel" data-mode="planner">
           <section class="ctl-group">
-            <h2>Target</h2>
+            <h2>Desired outputs</h2>
             <label class="fld">
               <span>Item</span>
               <input id="targetItem" list="itemList" placeholder="Type an item…" autocomplete="off" />
@@ -50,6 +50,9 @@
               <span>Rate <small id="rateUnit">/ min</small></span>
               <input id="targetRate" type="number" min="0" step="any" value="60" />
             </label>
+            <div id="plannerExtra" class="rowlist"></div>
+            <button id="plannerAddOutput" class="btn mini ghost">+ add output</button>
+            <small class="hint">Add more items to build several products in one plan.</small>
           </section>
 
           <section class="ctl-group">
