@@ -74,11 +74,16 @@ that objective; switch to power/machines or restrict inputs for other trade-offs
 
 ## Data
 
-Recipe/item/building data: **152 items, 211 automatable recipes (88 alternates), 9 production buildings**,
-transformed from the community dataset (`data/raw.json`) into `src/data.json` via `scripts/transform.js`.
-Power figures use each building's `powerConsumption` and `powerConsumptionExponent`.
+Recipe/item/building data: **736 items, 291 automatable recipes (111 alternates), 11 production buildings**,
+generated directly from the game's own database (`Satisfactory/CommunityResources/Docs/en-US.json`) into
+`src/data.json` via `scripts/transform-docs.js`. This is the authoritative, version-matched source — it stays
+in sync with the installed game, so there are no recipe gaps (fluid amounts are converted from mL; recipes are
+filtered to those producible in a manufacturer). Power figures use each building's `mPowerConsumption` and
+exponent; variable-power machines (Particle Accelerator, Converter, Quantum Encoder) use their mid-range draw.
 
-To refresh data: replace `data/raw.json`, then `npm run data`.
+To refresh data: `npm run data` (reads the Steam install path baked into `scripts/transform-docs.js`; pass a
+path argument to point elsewhere). The older community-dataset pipeline (`data/raw.json` → `scripts/transform.js`)
+remains available as `npm run data:legacy`.
 
 ## Run from source
 
