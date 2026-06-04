@@ -9,6 +9,8 @@
     "data": "node scripts/transform-docs.js",
     "data:legacy": "node scripts/transform.js",
     "start": "electron .",
+    "test": "node scripts/unit-test.js && node scripts/ui-test.js",
+    "test:unit": "node scripts/unit-test.js",
     "test:ui": "node scripts/ui-test.js",
     "prepackage": "npm install --no-audit --no-fund",
     "package": "electron-packager . SatisfactoryFlowCalculator --platform=win32 --arch=x64 --out \"C:/Users/tjjrj/build-out\" --overwrite --prune=true --icon=src/icon.ico",
