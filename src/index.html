@@ -342,6 +342,9 @@
 
     <datalist id="itemList"></datalist>
     <datalist id="inputList"></datalist>
-    <script src="renderer.js"></script>
+    <!-- esbuild bundle of renderer.js + its pure deps (data/solver/building-meta),
+         so the page needs no require and can run with contextIsolation on. Built by
+         `npm run build:renderer` (auto-run on start/package). -->
+    <script src="renderer.bundle.js"></script>
   </body>
 </html>

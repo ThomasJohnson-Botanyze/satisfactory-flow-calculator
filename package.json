@@ -8,11 +8,13 @@
   "scripts": {
     "data": "node scripts/transform-docs.js",
     "data:legacy": "node scripts/transform.js",
+    "build:renderer": "esbuild src/renderer.js --bundle --outfile=src/renderer.bundle.js --format=iife --platform=browser --target=es2020",
+    "prestart": "npm run build:renderer",
     "start": "electron .",
-    "test": "node scripts/unit-test.js && node scripts/ui-test.js",
+    "test": "node scripts/unit-test.js && node scripts/ui-test.js && npm run build:renderer && node scripts/bundle-smoke.js",
     "test:unit": "node scripts/unit-test.js",
     "test:ui": "node scripts/ui-test.js",
-    "prepackage": "npm install --no-audit --no-fund",
+    "prepackage": "npm install --no-audit --no-fund && npm run build:renderer",
     "package": "electron-packager . SatisfactoryFlowCalculator --platform=win32 --arch=x64 --out \"C:/Users/tjjrj/build-out\" --overwrite --prune=true --icon=src/icon.ico",
     "postpackage": "node scripts/verify-build.js \"C:/Users/tjjrj/build-out/SatisfactoryFlowCalculator-win32-x64\"",
     "verify:build": "node scripts/verify-build.js",
@@ -48,6 +50,7 @@
     "@electron/packager": "^20.0.0",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
+    "esbuild": "^0.28.0",
     "jsdom": "^29.1.1"
   },
   "dependencies": {

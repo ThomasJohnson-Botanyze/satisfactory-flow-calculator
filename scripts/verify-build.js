@@ -26,14 +26,12 @@ if (!fs.existsSync(archive)) {
 }
 
 const REQUIRED = [
-  'src/renderer.js',
+  'src/renderer.bundle.js', // what index.html actually loads (esbuild output)
+  'src/preload.js',         // contextBridge: exposes save helpers to the page
   'src/index.html',
-  'src/data.json',
-  'src/solver-lp.js',
-  'src/save-reader.js',
-  'src/building-meta.js',
-  'src/factory-extract.js',
-  'node_modules/javascript-lp-solver/package.json',
+  'src/save-reader.js',     // required by preload (Node side)
+  'src/factory-extract.js', // required by save-reader
+  'src/data.json',          // required by save-reader (display names)
   'node_modules/@etothepii/satisfactory-file-parser/package.json',
   'node_modules/pako/package.json',
 ];

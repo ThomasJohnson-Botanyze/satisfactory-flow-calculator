@@ -6,6 +6,7 @@ dist/
 build/
 out/
 *.exe
+src/renderer.bundle.js
 
 # Logs
 *.log

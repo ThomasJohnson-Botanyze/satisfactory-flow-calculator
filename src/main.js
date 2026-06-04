@@ -48,8 +48,13 @@ function createWindow() {
     title: 'Satisfactory Flow Calculator',
     icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      // Hardened: the page gets no Node access. A small allow-list of save helpers
+      // is bridged in via preload.js (contextBridge -> window.api). sandbox stays
+      // off so the preload can require the Node-side save-reader (fs + parser).
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
     },
   });
 
@@ -72,11 +77,10 @@ function createWindow() {
     ])
   );
 
-  // Hardening (defense-in-depth around the Node-enabled renderer): the app is a
-  // single local page, so open external links in the OS browser rather than an
-  // in-app window, and block any navigation away from index.html. This caps the
-  // blast radius of any injected content — it can't load a remote page into a
-  // context that has Node access. (Full contextIsolation is tracked separately.)
+  // Hardening (defense-in-depth on top of contextIsolation): the app is a single
+  // local page, so open external links in the OS browser rather than an in-app
+  // window, and block any navigation away from index.html — so injected content
+  // can't load a remote page into the app window at all.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     return { action: 'deny' };

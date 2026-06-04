@@ -5,11 +5,13 @@
 // silently — blank tabs, empty dropdowns, no plan list, which reads to the user as
 // "it deleted my factories." Catch that, show a readable error, and make clear the
 // saved data is untouched (it lives in localStorage, not in the app bundle).
-let DATA, LP, SAVE, BMETA;
+// data/solver/building-meta are pure compute and get bundled into this script by
+// esbuild (so the renderer needs no Node require at runtime, which lets the window
+// run with contextIsolation on / nodeIntegration off).
+let DATA, LP, BMETA;
 try {
   DATA = require('./data.json');
   LP = require('./solver-lp');
-  SAVE = require('./save-reader');
   BMETA = require('./building-meta');
 } catch (err) {
   showFatalLoadError(err);
@@ -33,20 +35,31 @@ function showFatalLoadError(err) {
   else document.addEventListener('DOMContentLoaded', attach);
 }
 
+// ---------- preload bridge (Node-side helpers) ----------
+// With contextIsolation on the renderer has no Node access; file reading and shell
+// links are exposed by preload.js via contextBridge as window.api. Guarded so the
+// renderer (and the jsdom test harness) still loads when the bridge is absent — the
+// save features simply report unavailable rather than throwing at load.
+const api = (typeof window !== 'undefined' && window.api) ? window.api : null;
+const SAVE_UNAVAILABLE = { ok: false, error: 'Save reading is unavailable in this context.' };
+const SAVE = {
+  listSaves: (root) => (api ? api.listSaves(root) : { exists: false, saves: [] }),
+  readUnlockedAlternates: (file) => (api ? api.readUnlockedAlternates(file) : SAVE_UNAVAILABLE),
+  readMap: (file) => (api ? api.readMap(file) : SAVE_UNAVAILABLE),
+};
+
 // ---------- support links ----------
 const SUPPORT_LINKS = {
   kofi: 'https://ko-fi.com/satisfactoryflow',
 };
-// shell.openExternal in Electron; window.open fallback if ever bundled for web
-let _shell = null, _ipc = null;
-try { ({ shell: _shell, ipcRenderer: _ipc } = require('electron')); } catch (_) { /* non-Electron host */ }
-const openExternal = (url) => { if (_shell && _shell.openExternal) _shell.openExternal(url); else window.open(url, '_blank', 'noopener'); };
+const openExternal = (url) => { if (api && api.openExternal) api.openExternal(url); else window.open(url, '_blank', 'noopener'); };
 
 // ---------- update notifier (Level 1) ----------
 // main.js polls GitHub Releases on launch and fires 'update-available' when a
-// newer version is published. Show a non-blocking toast; "Download" opens the
-// release page for a manual install (no in-app auto-update). Dismissing a
-// given version is remembered so we don't nag for the same one every launch.
+// newer version is published — delivered to the page via the preload bridge
+// (window.api.onUpdateAvailable), since the renderer has no ipcRenderer under
+// contextIsolation. Show a non-blocking toast; "Download" opens the release page
+// for a manual install. Dismissing a given version is remembered so we don't nag.
 function showUpdateToast(info) {
   if (!info || !info.version) return;
   try { if (localStorage.getItem('updateDismissed') === info.version) return; } catch (_) {}
@@ -64,7 +77,7 @@ function showUpdateToast(info) {
   };
   toast.hidden = false;
 }
-if (_ipc) _ipc.on('update-available', (_e, info) => showUpdateToast(info));
+if (api && api.onUpdateAvailable) api.onUpdateAvailable((info) => showUpdateToast(info));
 
 // ---------- indexes ----------
 const ITEMS = DATA.items;
