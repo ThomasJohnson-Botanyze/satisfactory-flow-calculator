@@ -3,9 +3,8 @@ const DATA = require('./data.json');
 const LP = require('./solver-lp');
 const SAVE = require('./save-reader');
 
-// ---------- support links — REPLACE with your real handles ----------
+// ---------- support links ----------
 const SUPPORT_LINKS = {
-  patreon: 'https://www.patreon.com/satisfactoryflow',
   kofi: 'https://ko-fi.com/satisfactoryflow',
 };
 // shell.openExternal in Electron; window.open fallback if ever bundled for web

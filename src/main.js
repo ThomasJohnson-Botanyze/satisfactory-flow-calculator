@@ -9,6 +9,7 @@ function createWindow() {
     minHeight: 640,
     backgroundColor: '#15171c',
     title: 'Satisfactory Flow Calculator',
+    icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,

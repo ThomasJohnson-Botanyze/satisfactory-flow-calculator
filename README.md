@@ -3,7 +3,20 @@
 Desktop production-flow planner for **Satisfactory** — like the online satisfactory calculator, plus
 sliders for new game-mode recipe-cost options. Built with Electron, ships as a Windows `.exe`.
 
-![panel](src/index.html)
+<p align="center"><img src="assets/gear-512.png" width="110" alt="Satisfactory Flow Calculator"></p>
+
+## ⬇ Download
+
+**[Download the latest release →](https://github.com/ThomasJohnson-Botanyze/satisfactory-flow-calculator/releases/latest)**
+
+Unzip anywhere and run `SatisfactoryFlowCalculator.exe`. No installer, no admin needed. Windows x64.
+
+## ♥ Support
+
+Free to use, and kept up to date for new Satisfactory versions by one person. If it saved you planning
+time, you can chip in — it keeps the updates coming:
+
+**[☕ Support on Ko-fi →](https://ko-fi.com/satisfactoryflow)**
 
 ## Factory plans (multiple calculators)
 

@@ -10,7 +10,7 @@
     "data:legacy": "node scripts/transform.js",
     "start": "electron .",
     "test:ui": "node scripts/ui-test.js",
-    "package": "electron-packager . SatisfactoryFlowCalculator --platform=win32 --arch=x64 --out \"C:/Users/tjjrj/build-out\" --overwrite --app-version=1.0.0 --prune=true",
+    "package": "electron-packager . SatisfactoryFlowCalculator --platform=win32 --arch=x64 --out \"C:/Users/tjjrj/build-out\" --overwrite --app-version=1.0.0 --prune=true --icon=src/icon.ico",
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable"
   },
@@ -25,6 +25,7 @@
       "package.json"
     ],
     "win": {
+      "icon": "src/icon.ico",
       "target": [
         "nsis",
         "portable"
