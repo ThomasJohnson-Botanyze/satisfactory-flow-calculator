@@ -1171,6 +1171,13 @@ function setMode(mode) {
   const isMap = mode === 'map';
   document.querySelectorAll('.calc-only').forEach((e) => { e.style.display = isMap ? 'none' : ''; });
   $('btnReset').style.display = mode === 'planner' ? '' : 'none';
+  // The alternate list auto-selects recipes only in Optimizer/Max. Planner builds
+  // from the per-row dropdowns, so spell that out instead of letting users expect a
+  // re-solve when they untick an alt here.
+  const altHelp = $('altHelp');
+  if (altHelp) altHelp.textContent = mode === 'planner'
+    ? 'Planner uses the recipe picked in each row below. This list filters those row dropdowns; it auto-selects recipes only in Recipe Optimizer & Max Throughput.'
+    : 'Untick a recipe to stop the optimizer using it — even if unlocked or optimal.';
   $('mapView').hidden = !isMap;
   save();
   if (isMap) { $('empty').hidden = true; $('output').hidden = true; renderMap(); }
