@@ -580,11 +580,18 @@ function layoutFlow(flow) {
   return flow;
 }
 
+// Label positions cycle through these curve parameters (set per-edge in drawFlow)
+// so labels of edges sharing a column band spread out instead of stacking.
+const EDGE_LABEL_TS = [0.5, 0.4, 0.6, 0.45, 0.55, 0.35, 0.65];
 function edgePath(e, byId) {
   const s = byId[e.src], d = byId[e.dst];
   const sx = s.x + s.w, sy = s.y + s.h / 2, dx = d.x, dy = d.y + d.h / 2;
-  const mx = (sx + dx) / 2;
-  return { d: `M ${sx} ${sy} C ${sx + 50} ${sy} ${dx - 50} ${dy} ${dx} ${dy}`, lx: mx, ly: (sy + dy) / 2 - 5 };
+  // Place the label at parameter t along the cubic bezier (control points carry the
+  // ±50 horizontal handles). Default mid-curve; drawFlow staggers t to de-clutter.
+  const t = (e && e._lt != null) ? e._lt : 0.5, mt = 1 - t;
+  const lx = mt * mt * mt * sx + 3 * mt * mt * t * (sx + 50) + 3 * mt * t * t * (dx - 50) + t * t * t * dx;
+  const ly = mt * mt * mt * sy + 3 * mt * mt * t * sy + 3 * mt * t * t * dy + t * t * t * dy;
+  return { d: `M ${sx} ${sy} C ${sx + 50} ${sy} ${dx - 50} ${dy} ${dx} ${dy}`, lx, ly: ly - 5 };
 }
 
 function drawFlow(flow) {
@@ -600,7 +607,8 @@ function drawFlow(flow) {
   root.appendChild(gEdges); root.appendChild(gNodes);
   svg.appendChild(root);
 
-  flow.edges.forEach((e) => {
+  flow.edges.forEach((e, i) => {
+    e._lt = EDGE_LABEL_TS[i % EDGE_LABEL_TS.length]; // stagger label along the curve
     const p = edgePath(e, flow.byId);
     const path = document.createElementNS(SVGNS, 'path');
     path.setAttribute('class', 'edge-path');
@@ -1216,6 +1224,78 @@ function renderMap() {
   drawMap();
 }
 
+// ---------- export (CSV tables, PNG flow + map) ----------
+const safeName = (s) => (s || 'plan').replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '') || 'plan';
+function downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = el('a'); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+const csvCell = (v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+const csvRow = (arr) => arr.map(csvCell).join(',');
+// Production tables -> CSV (steps, raw inputs, buildings, summary). Mirrors the
+// on-screen tables so a plan can drop straight into a spreadsheet.
+function buildCsv(res) {
+  const L = [];
+  L.push('Production steps');
+  L.push(csvRow(['Item', 'Recipe', 'Rate/min', 'Machines', 'Clock %', 'Building', 'Power MW']));
+  res.recipes.slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((s) => {
+    const r = RECIPES[s.rc];
+    L.push(csvRow([itemName(s.item), r ? r.name : s.rc, fmt(s.rate), Math.ceil(s.machines - 1e-9), Math.round((s.clock || state.clock) * 100), s.buildingName, fmt(s.power, 1)]));
+  });
+  L.push('');
+  L.push('Raw resources');
+  L.push(csvRow(['Resource', 'Rate/min']));
+  (res.raw || []).slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((r) => L.push(csvRow([itemName(r.item), fmt(r.rate)])));
+  const sur = res.surplus || [];
+  if (sur.length) {
+    L.push('');
+    L.push('By-products / surplus');
+    L.push(csvRow(['Item', 'Rate/min']));
+    sur.slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((s) => L.push(csvRow([itemName(s.item), fmt(s.rate)])));
+  }
+  L.push('');
+  L.push(csvRow(['Total power MW', fmt(res.totalPower, 1)]));
+  L.push(csvRow(['Production machines', res.totalMachines]));
+  return L.join('\r\n');
+}
+function exportCsv() {
+  if (!lastResult || !lastResult.recipes || !lastResult.recipes.length) return;
+  downloadBlob(safeName(activePlan() && activePlan().name) + '.csv', new Blob([buildCsv(lastResult)], { type: 'text/csv;charset=utf-8' }));
+}
+// The live <svg> is styled by stylesheet rules and carries the zoom/pan transform;
+// neither survives serialization, so the export embeds its own <style> + opaque
+// background and resets the transform to render the whole graph at 1:1.
+const FLOW_EXPORT_CSS =
+  '.edge-path{fill:none;stroke:#4b566c;stroke-width:1.5}' +
+  '.edge-label{fill:#c2cad8;font:11px "Segoe UI",system-ui,sans-serif;paint-order:stroke;stroke:#11141a;stroke-width:4px}' +
+  '.node rect{stroke-width:1.5}' +
+  '.node.raw rect{fill:#2b313c;stroke:#5b6675}.node.machine rect{fill:#3a2a12;stroke:#f9a825}.node.out rect{fill:#15361f;stroke:#66bb6a}' +
+  '.node .n-title{fill:#e7eaf0;font:700 12px "Segoe UI",system-ui,sans-serif}.node .n-sub{fill:#9aa3b2;font:10px "Segoe UI",system-ui,sans-serif}';
+function exportFlowPng() {
+  if (!currentFlow) return;
+  const w = Math.max(1, Math.ceil(currentFlow.width)), h = Math.max(1, Math.ceil(currentFlow.height));
+  const clone = $('flowSvg').cloneNode(true);
+  const root = clone.querySelector('#flowRoot'); if (root) root.removeAttribute('transform'); // full graph, 1:1
+  clone.setAttribute('width', w); clone.setAttribute('height', h); clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  const style = document.createElementNS(SVGNS, 'style'); style.textContent = FLOW_EXPORT_CSS;
+  const bg = document.createElementNS(SVGNS, 'rect'); bg.setAttribute('width', w); bg.setAttribute('height', h); bg.setAttribute('fill', '#11141a');
+  clone.insertBefore(bg, clone.firstChild); clone.insertBefore(style, clone.firstChild);
+  const svgText = new XMLSerializer().serializeToString(clone);
+  const img = new Image();
+  img.onload = () => {
+    const cv = el('canvas'); cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(img, 0, 0);
+    cv.toBlob((blob) => { if (blob) downloadBlob(safeName(activePlan() && activePlan().name) + '-flow.png', blob); });
+  };
+  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
+}
+function exportMapPng() {
+  const cv = $('mapCanvas'); if (!cv || !cv.width) return;
+  cv.toBlob((blob) => { if (blob) downloadBlob((mapNodes.length || mapBuildings.length ? safeName(state.saveName) + '-' : '') + 'map.png', blob); });
+}
+
 // ---------- mode dispatch ----------
 function present(res, targets) {
   lastResult = res; lastTargets = targets;
@@ -1640,6 +1720,8 @@ function init() {
   $('flowFit').addEventListener('click', () => { fitFlow(currentFlow); save(); });
   $('flowZoomIn').addEventListener('click', () => zoomFlowCenter(1.2));
   $('flowZoomOut').addEventListener('click', () => zoomFlowCenter(1 / 1.2));
+  $('exportCsv').addEventListener('click', exportCsv);
+  $('flowPng').addEventListener('click', exportFlowPng);
 
   const onTarget = (v) => { const c = nameToClass(v); state.targetItem = c; $('rateUnit').textContent = c && isFluid(c) ? 'm³ / min' : '/ min'; reflectPrimary('planner'); save(); solveAndRender(); };
   $('targetItem').addEventListener('change', (e) => onTarget(e.target.value));
@@ -1667,6 +1749,7 @@ function init() {
   wireMap();
   $('mapLoad').addEventListener('click', loadMapFromSave);
   $('mapRefresh').addEventListener('click', buildSaveList);
+  $('mapPng').addEventListener('click', exportMapPng);
   $('mapResetView').addEventListener('click', () => { fitMapView(); drawMap(); });
   $('mapAllRes').addEventListener('click', () => setAllMapRes(true));
   $('mapNoRes').addEventListener('click', () => setAllMapRes(false));

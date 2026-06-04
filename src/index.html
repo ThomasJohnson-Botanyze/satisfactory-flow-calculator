@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:" />
     <title>Satisfactory Flow Calculator</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -236,6 +236,7 @@
           <div class="view-toggle">
             <button id="viewTables" class="vt active">▦ Tables</button>
             <button id="viewFlow" class="vt">⤳ Flowchart</button>
+            <button id="exportCsv" class="vt vt-export" title="Download the production tables as a CSV file">⤓ CSV</button>
           </div>
 
           <div id="modeExtras"></div>
@@ -249,6 +250,7 @@
                 <button id="flowZoomIn" class="btn mini ghost" aria-label="Zoom in" title="Zoom in">+</button>
                 <button id="flowFit" class="btn mini ghost" title="Fit the whole factory in view">Fit</button>
                 <button id="flowReset" class="btn mini ghost" title="Restore the automatic layout">Reset layout</button>
+                <button id="flowPng" class="btn mini ghost" aria-label="Export flowchart as PNG" title="Export the flowchart as a PNG image">⤓ PNG</button>
               </div>
             </div>
             <div class="flow-scroll"><svg id="flowSvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
@@ -292,6 +294,7 @@
         <div id="mapView" hidden>
           <div class="map-toolbar">
             <span id="mapCount" class="hint">No save loaded.</span>
+            <button id="mapPng" class="btn mini ghost" aria-label="Export map as PNG" title="Export the current map view as a PNG image">⤓ PNG</button>
             <span class="map-attribution">Map © Coffee Stain Studios · image via Satisfactory&nbsp;Wiki</span>
           </div>
           <div class="map-canvas-wrap" id="mapWrap">
