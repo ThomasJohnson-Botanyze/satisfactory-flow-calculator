@@ -619,8 +619,8 @@ function buildOptOutputs() {
     const name = el('input', 'row-item'); name.setAttribute('list', 'itemList'); name.placeholder = 'item…'; name.value = o.name; name.autocomplete = 'off';
     const rate = el('input', 'row-rate'); rate.type = 'number'; rate.min = '0'; rate.step = 'any'; rate.value = o.rate;
     const rm = el('button', 'row-rm', '×');
-    name.addEventListener('input', () => { o.name = name.value; save(); solveAndRender(); });
-    rate.addEventListener('input', () => { o.rate = parseFloat(rate.value) || 0; save(); solveAndRender(); });
+    name.addEventListener('input', () => { o.name = name.value; if (i === 0 && nameToClass(name.value)) { state.targetItem = nameToClass(name.value); reflectPrimary('optimize'); } save(); solveAndRender(); });
+    rate.addEventListener('input', () => { o.rate = parseFloat(rate.value) || 0; if (i === 0) { state.targetRate = o.rate; reflectPrimary('optimize'); } save(); solveAndRender(); });
     rm.addEventListener('click', () => { state.opt.outputs.splice(i, 1); if (!state.opt.outputs.length) state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); solveAndRender(); });
     row.append(name, rate, rm);
     box.appendChild(row);
@@ -814,6 +814,25 @@ function syncSliderLabels() {
   $('clockOut').textContent = Math.round(state.clock * 100) + '%';
   $('sloopOut').textContent = fmt(state.sloop, 1) + '×';
 }
+// Carry the primary desired output (item + rate) across the Planner target,
+// the Optimizer's first output row, and the Max product. `except` is the mode
+// being edited; its own control is left untouched so typing isn't disrupted.
+// Canonical source = state.targetItem + state.targetRate.
+function reflectPrimary(except) {
+  const item = state.targetItem;
+  const disp = item ? itemName(item) : '';
+  state.max.product = item || '';
+  const o0 = state.opt.outputs[0] || (state.opt.outputs[0] = { name: '', rate: 60 });
+  o0.name = disp;
+  o0.rate = state.targetRate;
+  if (except !== 'planner') {
+    if ($('targetItem')) $('targetItem').value = disp;
+    if ($('targetRate')) $('targetRate').value = state.targetRate;
+    if ($('rateUnit')) $('rateUnit').textContent = item && isFluid(item) ? 'm³ / min' : '/ min';
+  }
+  if (except !== 'max' && $('maxProduct')) $('maxProduct').value = disp;
+  if (except !== 'optimize') buildOptOutputs();
+}
 // Push the active plan's state into every control, then render.
 function applyStateToControls() {
   buildOptOutputs();
@@ -839,16 +858,17 @@ function init() {
   load();
   buildItemList();
   buildSaveList();
+  window.addEventListener('beforeunload', save); // belt-and-suspenders autosave on close
 
   document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setMode(t.dataset.mode)));
   $('viewTables').addEventListener('click', () => { state.view = 'tables'; save(); applyView(); });
   $('viewFlow').addEventListener('click', () => { state.view = 'flow'; save(); applyView(); });
   $('flowReset').addEventListener('click', () => { state.flowPos = {}; save(); renderFlowView(); });
 
-  const onTarget = (v) => { const c = nameToClass(v); state.targetItem = c; $('rateUnit').textContent = c && isFluid(c) ? 'm³ / min' : '/ min'; save(); solveAndRender(); };
+  const onTarget = (v) => { const c = nameToClass(v); state.targetItem = c; $('rateUnit').textContent = c && isFluid(c) ? 'm³ / min' : '/ min'; reflectPrimary('planner'); save(); solveAndRender(); };
   $('targetItem').addEventListener('change', (e) => onTarget(e.target.value));
   $('targetItem').addEventListener('input', (e) => { if (nameToClass(e.target.value)) onTarget(e.target.value); });
-  $('targetRate').addEventListener('input', (e) => { state.targetRate = parseFloat(e.target.value) || 0; save(); solveAndRender(); });
+  $('targetRate').addEventListener('input', (e) => { state.targetRate = parseFloat(e.target.value) || 0; reflectPrimary('planner'); save(); solveAndRender(); });
   $('clock').addEventListener('input', (e) => { state.clock = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
   $('sloop').addEventListener('input', (e) => { state.sloop = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
 
@@ -870,7 +890,7 @@ function init() {
   $('optNoInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = false)); save(); buildOptInputs(); solveAndRender(); });
 
   $('maxAddSupply').addEventListener('click', () => { state.max.supply.push({ item: resList[0].c, amount: 60 }); save(); buildMaxSupply(); });
-  const onProduct = (v) => { state.max.product = nameToClass(v); save(); solveAndRender(); };
+  const onProduct = (v) => { const c = nameToClass(v); state.max.product = c; if (c) { state.targetItem = c; reflectPrimary('max'); } save(); solveAndRender(); };
   $('maxProduct').addEventListener('change', (e) => onProduct(e.target.value));
   $('maxProduct').addEventListener('input', (e) => { if (nameToClass(e.target.value)) onProduct(e.target.value); });
   $('maxAlts').addEventListener('change', (e) => { state.max.alts = e.target.checked; save(); solveAndRender(); });
