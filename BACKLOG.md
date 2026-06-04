@@ -15,25 +15,33 @@ and an acceptance check. Built to be worked one-at-a-time in an improvement loop
 - 🟠 **Medium** — real defect or notable gap; not everyone hits it.
 - 🟡 **Low** — polish, edge case, minor perf, tech debt.
 
-## Status — improvement loop, round 1
-Done (13): S1, B1, B2, B3, B4, B5, P1, U1, U5, U6, U7, T1, T2. All shipped with
-`npm test` green (35 unit + 52 UI = 87 checks).
+## Status — improvement loop, round 1 (merged to main)
+Done (13): S1, B1, B2, B3, B4, B5, P1, U1, U5, U6, U7, T1, T2.
 
-Remaining (7) — need a product/UX decision or a larger refactor; not pure bug fixes:
-- **S2** Electron hardening 🟠 — real follow-up, but a structural change (preload +
-  IPC; the renderer currently `require()`s data/solver/save-reader directly, which
-  `contextIsolation` forbids). S1 already closes the concrete XSS→RCE path; S2 is
-  defence-in-depth. Deferred — needs a manual Electron run to verify, can't be
-  covered by the headless tests.
-- **P2** Debounce LP 🟡 — the UI test asserts the DOM synchronously after every
-  `input` event, so any debounce breaks it. Needs the test harness reworked to
-  flush timers first. Deferred.
-- **U2** Unify the two save selectors 🟡 — minor; sync the dropdowns.
-- **U3** Persist / auto-load the map 🟡 — product call: auto-parse on launch (slow
-  on big saves) vs. just remember the selection.
-- **U4** Allow intermediates as Optimizer/Max inputs 🟡 — feature.
-- **U8** Flowchart label overlap 🟡 — needs visual iteration.
-- **U9** Export results (CSV / PNG / SVG) 🟡 — feature; format TBD.
+## Status — improvement loop, round 2 (branch `claude/backlog-round-2`)
+Done (5): U2, U3, U4, U8, U9. S2 partially done. `npm test` green (42 unit + 52 UI).
+- **U2** save pickers synced.
+- **U3** selected save remembered (`saveFile` global) + map auto-loads on first open.
+- **U4** intermediates allowed as Optimizer/Max inputs (new `inputList` + `opt.extraInputs`).
+- **U8** edge labels staggered along their bezier to reduce overlap.
+- **U9** export production tables (CSV), flowchart (PNG), map (PNG); CSP relaxed to
+  `img-src 'self' data: blob:` for SVG→PNG.
+- **S2 (partial)** navigation hardened in `main.js` (deny in-app windows, route
+  external links to the OS browser, block navigation away from index.html).
+
+Still open (2):
+- **S2 (full)** contextIsolation:true / nodeIntegration:false 🟠 — needs a renderer
+  bundling step (esbuild) so the renderer's `require()`s of data/solver/building-meta
+  resolve without Node, plus a `preload.js` exposing save-reader/shell via
+  contextBridge. Deliberately NOT landed unverified: it's a high-blast-radius main-
+  process change (the v1.2.0 incident was exactly an unverified packaging/load break)
+  and can't be GUI-smoke-tested in a headless env. Land it with a manual `npm start`
+  pass. The tooltip escaping (S1) + navigation lockdown (S2 partial) already cap the
+  practical risk.
+- **P2** Debounce LP 🟡 — deliberately not done (proportionality): the only blocker is
+  the synchronous UI test (asserts DOM right after each `input`), and reworking that
+  230-line harness to async-flush isn't justified by an imperceptible perf gain on
+  already-sub-5ms solves. Revisit if a genuinely large plan ever shows lag.
 
 ## Priority order (original)
 1. [S1] XSS→RCE via untrusted save strings in tooltips 🔴 — ✅ DONE
