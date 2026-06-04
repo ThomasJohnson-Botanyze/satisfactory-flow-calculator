@@ -2,6 +2,7 @@
 const DATA = require('./data.json');
 const LP = require('./solver-lp');
 const SAVE = require('./save-reader');
+const BMETA = require('./building-meta');
 
 // ---------- support links ----------
 const SUPPORT_LINKS = {
@@ -693,6 +694,58 @@ let mapFitS = 1;                   // scale at which the whole map fits (zoom cl
 let mapDrag = null;
 let mapRAF = 0;
 
+// ---------- factory buildings overlay (Cartograph-style) ----------
+// Buildings are drawn as vectors every frame (not baked to an offscreen) so that
+// thin belts/wires stay one screen-pixel wide at any zoom — exactly how the node
+// markers keep a constant screen size. Image-space px per world cm (uniform on
+// both axes): the 5000px render spans MAP_BOUNDS east-west = ~750000 cm.
+const IMG_PX_PER_CM = MAP_IMG_W / (MAP_BOUNDS.east - MAP_BOUNDS.west);
+// Default in-game customization swatch slot -> approximate paint color. Used only
+// in "By paint" color mode; unknown/custom swatches fall back to a neutral grey.
+const SWATCH_COLORS = {
+  SwatchDesc_Slot0_C: '#e8a33d', SwatchDesc_Slot1_C: '#c64a3b', SwatchDesc_Slot2_C: '#d98b3a',
+  SwatchDesc_Slot3_C: '#e0c84a', SwatchDesc_Slot4_C: '#7bbf48', SwatchDesc_Slot5_C: '#46b06a',
+  SwatchDesc_Slot6_C: '#3fb59b', SwatchDesc_Slot7_C: '#3f9fd9', SwatchDesc_Slot8_C: '#4a6fd0',
+  SwatchDesc_Slot9_C: '#7a5fd3', SwatchDesc_Slot10_C: '#b05fd0', SwatchDesc_Slot11_C: '#d05f9f',
+  SwatchDesc_Slot12_C: '#8a939e', SwatchDesc_Slot13_C: '#5c6670', SwatchDesc_Slot14_C: '#3a4048',
+  SwatchDesc_Slot15_C: '#cfd4da', SwatchDesc_Slot16_C: '#9a8c7a', SwatchDesc_Slot17_C: '#6b5b45',
+  SwatchDesc_FoundationModern_C: '#9aa0a8', SwatchDesc_ProjectAssembly_C: '#e08a3a',
+};
+const CAT_LABEL = {
+  production: 'Production', extraction: 'Extraction', power: 'Power', logistics: 'Logistics',
+  storage: 'Storage', foundation: 'Foundations', vehicle: 'Vehicles', organization: 'Organization',
+  decoration: 'Decoration', other: 'Other',
+};
+// Stroke width (screen px) per path kind; machine footprints use a min screen size.
+const PATH_W = { belt: 1.7, pipe: 1.7, wire: 0.9 };
+const MACHINE_MIN_PX = 3;          // smallest a footprint is drawn, so it stays visible when zoomed out
+
+let mapBuildings = [];             // building records from the loaded save
+let mapBuildShow = true;           // master overlay toggle
+let mapBuildOpacity = 0.9;
+let mapCatOn = null;               // Set of enabled categories (null => all on)
+let mapColorMode = 'category';     // 'category' | 'paint'
+let mapMarkClock = false;          // ring machines that are overclocked / somerslooped
+
+function catVisible(cat) { return !mapCatOn || mapCatOn.has(cat); }
+function buildingColor(b) {
+  if (mapColorMode === 'paint') return SWATCH_COLORS[b.swatch] || '#8a8f98';
+  return b._catColor || BMETA.buildingMeta(b.className).color;
+}
+// Annotate raw building records with stable render fields (category/footprint/
+// color) once at load, so the per-frame draw loop does no metadata lookups.
+function annotateBuildings(list) {
+  for (const b of list) {
+    const m = BMETA.buildingMeta(b.className);
+    b._cat = m.category; b._w = m.w; b._d = m.d; b._catColor = m.color;
+  }
+  return list;
+}
+function buildingDisplayName(cn) {
+  if (BUILDINGS[cn] && BUILDINGS[cn].name) return BUILDINGS[cn].name;
+  return String(cn).replace(/^Build_/, '').replace(/_C$/, '').replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\bMk(\d)/, 'Mk $1').trim();
+}
+
 function ensureMapImg() {
   if (mapImg) return;
   mapImg = new Image();
@@ -748,9 +801,70 @@ function drawMarker(ctx, n, ix, iy, s) {
   ctx.lineWidth = 1.3 / s; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.stroke();
   if (n.purity === 'Pure') { ctx.beginPath(); ctx.arc(ix, iy, r + 2.4 / s, 0, Math.PI * 2); ctx.lineWidth = 1.3 / s; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke(); }
 }
+// Visible image-space rect (with margin) for viewport culling. screen = img*s + o.
+function visibleImgRect(cw, ch, mar) {
+  const s = mapV.s;
+  return {
+    x0: (0 - mapV.ox) / s - mar, x1: (cw - mapV.ox) / s + mar,
+    y0: (0 - mapV.oy) / s - mar, y1: (ch - mapV.oy) / s + mar,
+  };
+}
+// Draw the factory-buildings overlay in IMAGE space (ctx already carries the map
+// transform). Vector every frame, viewport-culled, with screen-constant stroke
+// widths and a minimum footprint size so the layer reads at any zoom.
+function drawBuildings(ctx, s, cw, ch) {
+  if (!mapBuildShow || !mapBuildings.length) return;
+  const vr = visibleImgRect(cw, ch, 200 / s);
+  ctx.save();
+  ctx.globalAlpha = mapBuildOpacity;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+
+  // Pass 1: paths (belts / pipes / wires), under the machines.
+  for (const b of mapBuildings) {
+    if (b.kind === 'machine' || !b.path) continue;
+    if (!catVisible(b._cat)) continue;
+    const ax = worldToImgX(b.x), ay = worldToImgY(b.y);
+    if (ax < vr.x0 || ax > vr.x1 || ay < vr.y0 || ay > vr.y1) continue; // cull by anchor point
+    ctx.beginPath();
+    for (let i = 0; i < b.path.length; i++) {
+      const px = worldToImgX(b.path[i].x), py = worldToImgY(b.path[i].y);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = buildingColor(b);
+    ctx.lineWidth = (PATH_W[b.kind] || 1.2) / s;
+    ctx.stroke();
+  }
+
+  // Pass 2: machine footprints (rotated rectangles) on top.
+  const minHalf = (MACHINE_MIN_PX / 2) / s;
+  for (const b of mapBuildings) {
+    if (b.kind !== 'machine') continue;
+    if (!catVisible(b._cat)) continue;
+    const ix = worldToImgX(b.x), iy = worldToImgY(b.y);
+    if (ix < vr.x0 || ix > vr.x1 || iy < vr.y0 || iy > vr.y1) continue;
+    const hw = Math.max(minHalf, (b._w * IMG_PX_PER_CM * (b.sx || 1)) / 2);
+    const hd = Math.max(minHalf, (b._d * IMG_PX_PER_CM * (b.sy || 1)) / 2);
+    ctx.save();
+    ctx.translate(ix, iy);
+    if (b.yaw) ctx.rotate(b.yaw);
+    ctx.fillStyle = buildingColor(b);
+    ctx.fillRect(-hw, -hd, 2 * hw, 2 * hd);
+    ctx.lineWidth = 0.7 / s; ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.strokeRect(-hw, -hd, 2 * hw, 2 * hd);
+    ctx.restore();
+    if (mapMarkClock && (Math.abs((b.overclock || 1) - 1) > 1e-3 || (b.boost || 0) > 0)) {
+      ctx.beginPath();
+      ctx.arc(ix, iy, Math.max(hw, hd) + 2.2 / s, 0, Math.PI * 2);
+      ctx.lineWidth = 1.4 / s;
+      ctx.strokeStyle = (b.boost || 0) > 0 ? 'rgba(236,99,60,0.95)' : 'rgba(255,255,255,0.9)';
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
 function drawMap() {
   const cv = $('mapCanvas'); if (!cv) return;
-  const { dpr } = resizeMapCanvas();
+  const { cw, ch, dpr } = resizeMapCanvas();
   const ctx = cv.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#10141b'; ctx.fillRect(0, 0, cv.width, cv.height);
@@ -759,6 +873,7 @@ function drawMap() {
   if (mapImgReady) ctx.drawImage(mapImg, 0, 0, MAP_IMG_W, MAP_IMG_H);
   else { ctx.fillStyle = '#1b2230'; ctx.fillRect(0, 0, MAP_IMG_W, MAP_IMG_H); }
   const s = mapV.s;
+  drawBuildings(ctx, s, cw, ch);
   for (const n of mapNodes) {
     if (!nodeVisible(n)) continue;
     drawMarker(ctx, n, worldToImgX(n.x), worldToImgY(n.y), s);
@@ -767,9 +882,17 @@ function drawMap() {
 }
 function updateMapCount() {
   const c = $('mapCount'); if (!c) return;
-  if (!mapNodes.length) { c.textContent = 'No save loaded.'; return; }
-  const vis = mapNodes.reduce((a, n) => a + (nodeVisible(n) ? 1 : 0), 0);
-  c.textContent = `${vis} shown · ${mapNodes.length} nodes in save`;
+  if (!mapNodes.length && !mapBuildings.length) { c.textContent = 'No save loaded.'; return; }
+  const parts = [];
+  if (mapNodes.length) {
+    const vis = mapNodes.reduce((a, n) => a + (nodeVisible(n) ? 1 : 0), 0);
+    parts.push(`${vis} / ${mapNodes.length} nodes`);
+  }
+  if (mapBuildings.length) {
+    const vis = mapBuildShow ? mapBuildings.reduce((a, b) => a + (catVisible(b._cat) ? 1 : 0), 0) : 0;
+    parts.push(`${vis} / ${mapBuildings.length} buildings`);
+  }
+  c.textContent = parts.join(' · ');
 }
 
 function buildMapResFilter() {
@@ -800,6 +923,34 @@ function setAllMapRes(on) {
   box.querySelectorAll('input[type=checkbox]').forEach((cb) => { cb.checked = on; if (on) mapResOn.add(cb.dataset.res); });
   scheduleMapDraw();
 }
+
+// Category filter for the buildings overlay: checkbox + color swatch + count per
+// category present in the loaded save. Mirrors buildMapResFilter.
+function buildBuildingCatFilter() {
+  const box = $('mapCatFilter'); if (!box) return;
+  box.innerHTML = '';
+  const counts = new Map();
+  for (const b of mapBuildings) counts.set(b._cat, (counts.get(b._cat) || 0) + 1);
+  if (!counts.size) { box.appendChild(el('small', 'hint', 'No buildings in this save.')); return; }
+  if (!mapCatOn) mapCatOn = new Set(counts.keys()); // default: every category on
+  const order = ['production', 'extraction', 'power', 'logistics', 'storage', 'foundation', 'vehicle', 'organization', 'decoration', 'other'];
+  const keys = [...counts.keys()].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  for (const k of keys) {
+    const row = el('label', 'check map-res-row');
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = mapCatOn.has(k); cb.dataset.cat = k;
+    cb.addEventListener('change', () => { if (cb.checked) mapCatOn.add(k); else mapCatOn.delete(k); scheduleMapDraw(); });
+    const sw = el('span', 'map-swatch'); sw.style.background = BMETA.CATEGORY_COLORS[k] || '#888';
+    row.appendChild(cb); row.appendChild(sw);
+    row.appendChild(document.createTextNode(' ' + (CAT_LABEL[k] || k) + ' (' + counts.get(k) + ')'));
+    box.appendChild(row);
+  }
+}
+function setAllMapCat(on) {
+  const box = $('mapCatFilter'); if (!box) return;
+  mapCatOn = new Set();
+  box.querySelectorAll('input[type=checkbox]').forEach((cb) => { cb.checked = on; if (on) mapCatOn.add(cb.dataset.cat); });
+  scheduleMapDraw();
+}
 function buildPurityLegend() {
   const box = $('mapPurityLegend'); if (!box || box.dataset.built) return;
   box.dataset.built = '1';
@@ -819,13 +970,15 @@ function loadMapFromSave() {
   // Defer so "Parsing…" paints before the synchronous parse blocks the thread.
   setTimeout(() => {
     let res;
-    try { res = SAVE.readResourceNodes(file); }
+    try { res = SAVE.readMap(file); }
     catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
     if (!res.ok) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); return; }
     mapNodes = res.nodes; mapResOn = null;
-    buildMapResFilter(); buildPurityLegend();
-    const c = res.counts || {};
-    st.textContent = `${res.saveName}: ${c.node || 0} nodes · ${c.geyser || 0} geysers · ${c.frackingCore || 0} wells`;
+    mapBuildings = annotateBuildings(res.buildings || []); mapCatOn = null;
+    buildMapResFilter(); buildPurityLegend(); buildBuildingCatFilter();
+    const nc = res.nodeCounts || {};
+    const bt = (res.buildingCounts && res.buildingCounts.total) || 0;
+    st.textContent = `${res.saveName}: ${nc.node || 0} nodes · ${nc.geyser || 0} geysers · ${nc.frackingCore || 0} wells · ${bt} buildings`;
     $('mapEmpty').hidden = true;
     ensureMapImg(); fitMapView(); drawMap();
   }, 20);
@@ -839,6 +992,30 @@ function mapTipHtml(n) {
   const co = `X ${Math.round(n.x / 100)} · Y ${Math.round(n.y / 100)}`;
   return `<b>${title}</b>` + (sub.length ? `<br><span class="map-tip-sub">${sub.join(' · ')}</span>` : '') + `<br><span class="map-tip-co">${co}</span>`;
 }
+// Nearest machine whose footprint is under the cursor (screen-space). Paths
+// (belts/pipes/wires) aren't hit-tested — only the machines carry useful detail.
+function pickMachineAt(sx, sy) {
+  const s = mapV.s;
+  let best = null, bestD = Infinity;
+  for (const b of mapBuildings) {
+    if (b.kind !== 'machine' || !catVisible(b._cat)) continue;
+    const px = worldToImgX(b.x) * s + mapV.ox, py = worldToImgY(b.y) * s + mapV.oy;
+    const dx = px - sx, dy = py - sy;
+    const reach = Math.max(6, Math.max(b._w, b._d) * IMG_PX_PER_CM * s * 0.6);
+    const d = dx * dx + dy * dy;
+    if (d <= reach * reach && d < bestD) { bestD = d; best = b; }
+  }
+  return best;
+}
+function buildingTipHtml(b) {
+  const sub = [CAT_LABEL[b._cat] || b._cat];
+  if (Math.abs((b.overclock || 1) - 1) > 1e-3) sub.push('OC ' + Math.round(b.overclock * 100) + '%');
+  if ((b.boost || 0) > 0) sub.push('Somerslooped');
+  const slot = b.swatch && b.swatch.match(/Slot(\d+)/);
+  if (slot) sub.push('Paint ' + slot[1]); else if (b.swatch) sub.push('Painted');
+  const co = `X ${Math.round(b.x / 100)} · Y ${Math.round(b.y / 100)}`;
+  return `<b>${buildingDisplayName(b.className)}</b><br><span class="map-tip-sub">${sub.join(' · ')}</span><br><span class="map-tip-co">${co}</span>`;
+}
 function mapHover(e) {
   const cv = $('mapCanvas'), tip = $('mapTip'); if (!cv || !tip) return;
   const r = cv.getBoundingClientRect();
@@ -850,8 +1027,15 @@ function mapHover(e) {
     const d = (px - sx) * (px - sx) + (py - sy) * (py - sy);
     if (d < bestD) { bestD = d; best = n; }
   }
-  if (!best) { tip.hidden = true; return; }
-  tip.innerHTML = mapTipHtml(best);
+  // Resource nodes win ties (they're the smaller, more precise target); fall back
+  // to a machine footprint under the cursor when no node is close.
+  let html = best ? mapTipHtml(best) : null;
+  if (!html && mapBuildShow && mapBuildings.length) {
+    const mb = pickMachineAt(sx, sy);
+    if (mb) html = buildingTipHtml(mb);
+  }
+  if (!html) { tip.hidden = true; return; }
+  tip.innerHTML = html;
   tip.hidden = false;
   const wrapR = $('mapWrap').getBoundingClientRect();
   tip.style.left = (e.clientX - wrapR.left + 14) + 'px';
@@ -1301,6 +1485,12 @@ function init() {
   $('mapShowGeyser').addEventListener('change', (e) => { mapKindOn.geyser = e.target.checked; scheduleMapDraw(); });
   $('mapShowFrack').addEventListener('change', (e) => { mapKindOn.frackingCore = e.target.checked; scheduleMapDraw(); });
   $('mapShowDeposit').addEventListener('change', (e) => { mapKindOn.deposit = e.target.checked; scheduleMapDraw(); });
+  $('mapBuildShow').addEventListener('change', (e) => { mapBuildShow = e.target.checked; scheduleMapDraw(); });
+  $('mapBuildOpacity').addEventListener('input', (e) => { mapBuildOpacity = (Number(e.target.value) || 0) / 100; scheduleMapDraw(); });
+  $('mapColorMode').addEventListener('change', (e) => { mapColorMode = e.target.value; scheduleMapDraw(); });
+  $('mapMarkClock').addEventListener('change', (e) => { mapMarkClock = e.target.checked; scheduleMapDraw(); });
+  $('mapAllCat').addEventListener('click', () => setAllMapCat(true));
+  $('mapNoCat').addEventListener('click', () => setAllMapCat(false));
 
   $('optAddOutput').addEventListener('click', () => { state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); });
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });

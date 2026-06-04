@@ -118,13 +118,13 @@
         <div class="mode-panel" data-mode="map" hidden>
           <section class="ctl-group">
             <h2>Map from save</h2>
-            <p class="hint" style="margin-top:-6px">Plots the real resource nodes stored in your save — including randomized node layouts.</p>
+            <p class="hint" style="margin-top:-6px">Plots the resource nodes and your built factory from your save — including randomized node layouts.</p>
             <label class="fld">
               <span>Game save</span>
               <select id="mapSaveSelect" class="sel"></select>
             </label>
             <div class="chip-toolbar">
-              <button id="mapLoad" class="btn mini" title="Read resource nodes from the selected save">Load map</button>
+              <button id="mapLoad" class="btn mini" title="Read resource nodes and buildings from the selected save">Load map</button>
               <button id="mapRefresh" class="btn mini ghost" title="Rescan the save folder">↻</button>
             </div>
             <small id="mapStatus" class="hint">Pick your save and Load to plot resource nodes.</small>
@@ -146,7 +146,30 @@
             <label class="check"><input type="checkbox" id="mapShowDeposit" /> Small deposits</label>
             <div id="mapPurityLegend" class="map-legend"></div>
             <button id="mapResetView" class="btn mini ghost" style="margin-top:8px">Reset view</button>
-            <small class="hint">Scroll to zoom · drag to pan · hover a node for details.</small>
+            <small class="hint">Scroll to zoom · drag to pan · hover a node or building for details.</small>
+          </section>
+
+          <section class="ctl-group">
+            <h2>Factory buildings</h2>
+            <p class="hint" style="margin-top:-6px">Overlays your built factory — machines as footprints, belts/pipes/power lines as routes.</p>
+            <label class="check"><input type="checkbox" id="mapBuildShow" checked /> Show buildings overlay</label>
+            <label class="fld">
+              <span>Overlay opacity</span>
+              <input type="range" id="mapBuildOpacity" class="map-range" min="20" max="100" value="90" />
+            </label>
+            <label class="fld">
+              <span>Colour by</span>
+              <select id="mapColorMode" class="sel">
+                <option value="category">Building category</option>
+                <option value="paint">Paint swatch</option>
+              </select>
+            </label>
+            <label class="check"><input type="checkbox" id="mapMarkClock" /> Mark overclocked / somerslooped</label>
+            <div class="chip-toolbar" style="margin-top:6px">
+              <button id="mapAllCat" class="btn mini ghost">All</button>
+              <button id="mapNoCat" class="btn mini ghost">None</button>
+            </div>
+            <div id="mapCatFilter" class="reslist"><small class="hint">Load a save to list building types.</small></div>
           </section>
         </div>
 
@@ -271,7 +294,7 @@
           </div>
           <div class="map-canvas-wrap" id="mapWrap">
             <canvas id="mapCanvas"></canvas>
-            <div id="mapEmpty" class="map-empty">Load a save (left panel) to plot resource nodes on the map.</div>
+            <div id="mapEmpty" class="map-empty">Load a save (left panel) to plot resource nodes and your factory on the map.</div>
             <div id="mapTip" class="map-tip" hidden></div>
           </div>
         </div>

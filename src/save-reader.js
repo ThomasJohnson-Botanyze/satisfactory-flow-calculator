@@ -21,6 +21,9 @@ let RECIPES = null;
 let ITEMS = null;
 try { const D = require('./data.json'); RECIPES = D.recipes; ITEMS = D.items; } catch (e) { RECIPES = null; ITEMS = null; }
 
+// Pure, dependency-free building extraction (operates on a parsed save).
+const { extractBuildings, summarize } = require('./factory-extract');
+
 function defaultSaveRoot() {
   const localAppData =
     process.env.LOCALAPPDATA ||
@@ -225,6 +228,36 @@ function readResourceNodes(savFile) {
   return { ok: true, saveName: p.saveName, nodes, counts };
 }
 
+// Read + parse a .sav and return its placed buildings for the factory overlay.
+// { ok, saveName, buildings:[{className,kind,x,y,z,yaw,sx,sy,overclock,boost,swatch,path?}],
+//   counts:{total,byKind,byClass}, error }
+function readBuildings(savFile) {
+  const p = parseSaveFile(savFile);
+  if (!p.ok) return { ok: false, error: p.error };
+  const buildings = extractBuildings(p.save);
+  return { ok: true, saveName: p.saveName, buildings, counts: summarize(buildings) };
+}
+
+// Read a save ONCE and return everything the map view needs — resource nodes and
+// placed buildings — so a single parse feeds both overlays.
+// { ok, saveName, nodes, nodeCounts, buildings, buildingCounts, error }
+function readMap(savFile) {
+  const p = parseSaveFile(savFile);
+  if (!p.ok) return { ok: false, error: p.error };
+  const nodes = extractResourceNodes(p.save);
+  const nodeCounts = {};
+  for (const n of nodes) nodeCounts[n.kind] = (nodeCounts[n.kind] || 0) + 1;
+  const buildings = extractBuildings(p.save);
+  return {
+    ok: true,
+    saveName: p.saveName,
+    nodes,
+    nodeCounts,
+    buildings,
+    buildingCounts: summarize(buildings),
+  };
+}
+
 module.exports = {
   defaultSaveRoot,
   listSaves,
@@ -234,6 +267,9 @@ module.exports = {
   readUnlockedAlternates,
   extractResourceNodes,
   readResourceNodes,
+  extractBuildings,
+  readBuildings,
+  readMap,
 };
 
 // CLI harness: `node src/save-reader.js [path-to-save-or-root]`
