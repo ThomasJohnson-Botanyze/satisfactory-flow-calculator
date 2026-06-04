@@ -756,6 +756,7 @@ let mapV = { s: 1, ox: 0, oy: 0, ready: false };  // view transform: image px ->
 let mapFitS = 1;                   // scale at which the whole map fits (zoom clamp reference)
 let mapDrag = null;
 let mapRAF = 0;
+let mapCw = 0, mapCh = 0;          // last canvas CSS size, for reframing on window resize
 
 // ---------- factory buildings overlay (Cartograph-style) ----------
 // Buildings are drawn as vectors every frame (not baked to an offscreen) so that
@@ -795,12 +796,28 @@ function buildingColor(b) {
   if (mapColorMode === 'paint') return SWATCH_COLORS[b.swatch] || '#8a8f98';
   return b._catColor || BMETA.buildingMeta(b.className).color;
 }
-// Annotate raw building records with stable render fields (category/footprint/
-// color) once at load, so the per-frame draw loop does no metadata lookups.
+// Annotate raw building records with stable render fields once at load, so the
+// per-frame draw loop does no metadata lookups AND no coordinate projection.
+// Image-space coords depend only on world position + the fixed map bounds (not on
+// zoom/pan, which are a canvas transform), so they're constant and precomputable:
+// projecting all of them once here instead of every frame is the big win on saves
+// with 100k+ buildings. Paths also get an image-space bbox for viewport culling.
 function annotateBuildings(list) {
   for (const b of list) {
     const m = BMETA.buildingMeta(b.className);
     b._cat = m.category; b._w = m.w; b._d = m.d; b._catColor = m.color;
+    b._ix = worldToImgX(b.x); b._iy = worldToImgY(b.y); // image-space anchor
+    if (b.path && b.path.length) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      const ip = new Array(b.path.length);
+      for (let i = 0; i < b.path.length; i++) {
+        const px = worldToImgX(b.path[i].x), py = worldToImgY(b.path[i].y);
+        ip[i] = { x: px, y: py };
+        if (px < x0) x0 = px; if (px > x1) x1 = px;
+        if (py < y0) y0 = py; if (py > y1) y1 = py;
+      }
+      b._ipath = ip; b._bx0 = x0; b._by0 = y0; b._bx1 = x1; b._by1 = y1;
+    }
   }
   return list;
 }
@@ -840,7 +857,18 @@ function resizeMapCanvas() {
   const cw = wrap.clientWidth || 1, ch = wrap.clientHeight || 1;
   cv.width = Math.round(cw * dpr); cv.height = Math.round(ch * dpr);
   cv.style.width = cw + 'px'; cv.style.height = ch + 'px';
+  mapCw = cw; mapCh = ch;
   return { cw, ch, dpr };
+}
+// On window resize the canvas changes size but the view transform doesn't, so the
+// map drifts off-centre. Keep the image-space point that was at the canvas centre
+// fixed at the new centre (uses the PREVIOUS canvas size still held in mapCw/mapCh).
+function reframeMapForResize() {
+  if (!mapV.ready || !mapCw || !mapCh) return;
+  const wrap = $('mapWrap'); if (!wrap) return;
+  const nw = wrap.clientWidth || mapCw, nh = wrap.clientHeight || mapCh;
+  const cx = (mapCw / 2 - mapV.ox) / mapV.s, cy = (mapCh / 2 - mapV.oy) / mapV.s;
+  mapV.ox = nw / 2 - cx * mapV.s; mapV.oy = nh / 2 - cy * mapV.s;
 }
 function fitMapView() {
   const wrap = $('mapWrap'); if (!wrap) return;
@@ -874,7 +902,7 @@ function visibleImgRect(cw, ch, mar) {
 }
 // Draw one footprint (rotated rect) + an optional overclock/somersloop ring.
 function drawFootprint(ctx, b, s, minHalf) {
-  const ix = worldToImgX(b.x), iy = worldToImgY(b.y);
+  const ix = b._ix, iy = b._iy; // precomputed image-space anchor (see annotateBuildings)
   const hw = Math.max(minHalf, (b._w * IMG_PX_PER_CM * (b.sx || 1)) / 2);
   const hd = Math.max(minHalf, (b._d * IMG_PX_PER_CM * (b.sy || 1)) / 2);
   ctx.save();
@@ -901,10 +929,7 @@ function drawFootprint(ctx, b, s, minHalf) {
 function drawBuildings(ctx, s, cw, ch) {
   if (!mapBuildShow || !mapBuildings.length) return;
   const vr = visibleImgRect(cw, ch, 200 / s);
-  const inView = (b) => {
-    const ix = worldToImgX(b.x), iy = worldToImgY(b.y);
-    return ix >= vr.x0 && ix <= vr.x1 && iy >= vr.y0 && iy <= vr.y1;
-  };
+  const inView = (b) => (b._ix >= vr.x0 && b._ix <= vr.x1 && b._iy >= vr.y0 && b._iy <= vr.y1);
   const minHalf = (MACHINE_MIN_PX / 2) / s;
   ctx.save();
   ctx.globalAlpha = mapBuildOpacity;
@@ -919,14 +944,15 @@ function drawBuildings(ctx, s, cw, ch) {
 
   // Pass 1: paths (belts / pipes / wires) — over the floors, under the machines.
   for (const b of mapBuildings) {
-    if (b.kind === 'machine' || !b.path) continue;
+    if (b.kind === 'machine' || !b._ipath) continue;
     if (!catVisible(b._cat)) continue;
-    const ax = worldToImgX(b.x), ay = worldToImgY(b.y);
-    if (ax < vr.x0 || ax > vr.x1 || ay < vr.y0 || ay > vr.y1) continue; // cull by anchor point
+    // Cull by the path's bounding box, not its anchor — a long belt whose origin is
+    // off-screen can still cross the viewport, so anchor-culling made it vanish.
+    if (b._bx1 < vr.x0 || b._bx0 > vr.x1 || b._by1 < vr.y0 || b._by0 > vr.y1) continue;
     ctx.beginPath();
-    for (let i = 0; i < b.path.length; i++) {
-      const px = worldToImgX(b.path[i].x), py = worldToImgY(b.path[i].y);
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    for (let i = 0; i < b._ipath.length; i++) {
+      const p = b._ipath[i];
+      if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
     }
     ctx.strokeStyle = buildingColor(b);
     ctx.lineWidth = (PATH_W[b.kind] || 1.2) / s;
@@ -1085,7 +1111,7 @@ function pickMachineAt(sx, sy) {
   let best = null, bestD = Infinity;
   for (const b of mapBuildings) {
     if (b.kind !== 'machine' || !catVisible(b._cat)) continue;
-    const px = worldToImgX(b.x) * s + mapV.ox, py = worldToImgY(b.y) * s + mapV.oy;
+    const px = b._ix * s + mapV.ox, py = b._iy * s + mapV.oy;
     const dx = px - sx, dy = py - sy;
     const reach = Math.max(6, Math.max(b._w, b._d) * IMG_PX_PER_CM * s * 0.6);
     const d = dx * dx + dy * dy;
@@ -1150,7 +1176,7 @@ function wireMap() {
   cv.addEventListener('pointercancel', up);
   cv.addEventListener('pointerleave', () => { $('mapTip').hidden = true; });
   window.addEventListener('resize', () => {
-    if (state.mode === 'map') scheduleMapDraw();
+    if (state.mode === 'map') { reframeMapForResize(); scheduleMapDraw(); }
     if (state.view === 'flow' && $('flowView') && !$('flowView').hidden) applyFlowTransform();
   });
 }
