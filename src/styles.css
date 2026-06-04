@@ -466,3 +466,74 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .alt-row { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text); cursor: pointer; padding: 2px 0; }
 .alt-row:hover { color: var(--accent); }
 .alt-row input { accent-color: var(--accent); flex: none; }
+
+/* ---------- support button + modal ---------- */
+.btn.support {
+  background: transparent;
+  color: var(--accent-2);
+  border: 1px solid var(--accent-2);
+}
+.btn.support:hover { background: var(--accent-2); color: #1a0a00; filter: none; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 11, 14, 0.66);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+  padding: 20px;
+}
+.modal {
+  position: relative;
+  width: min(440px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px 24px 18px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.modal h2 { margin: 0 0 10px; font-size: 18px; }
+.modal-lead { margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.modal-x {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px;
+}
+.modal-x:hover { color: var(--text); }
+.modal-foot { margin: 16px 0 0; text-align: center; color: var(--muted); font-size: 12px; }
+
+.support-cards { display: flex; flex-direction: column; gap: 10px; }
+.support-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  color: var(--text);
+  cursor: pointer;
+}
+.support-card:hover { border-color: var(--accent); }
+.support-ic {
+  font-size: 22px;
+  color: var(--accent);
+  width: 28px;
+  text-align: center;
+  flex: none;
+}
+.support-txt { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+.support-txt b { font-size: 14px; }
+.support-txt small { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.support-go { color: var(--muted); font-size: 18px; flex: none; }
+.support-card:hover .support-go { color: var(--accent); }

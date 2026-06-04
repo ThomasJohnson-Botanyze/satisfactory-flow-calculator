@@ -16,6 +16,7 @@
         </div>
       </div>
       <div class="topbar-actions">
+        <button id="btnSupport" class="btn support" title="Support development — Patreon &amp; Ko-fi">♥ Support</button>
         <button id="btnReset" class="btn ghost" title="Reset planner recipe choices to standard">Reset recipes</button>
         <button id="btnClear" class="btn ghost" title="Clear saved plan">Clear plan</button>
       </div>
@@ -221,6 +222,34 @@
         </div>
       </section>
     </main>
+
+    <!-- ============ SUPPORT MODAL ============ -->
+    <div id="supportModal" class="modal-backdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="supportTitle">
+        <button id="supportClose" class="modal-x" title="Close">✕</button>
+        <h2 id="supportTitle">Support the Calculator</h2>
+        <p class="modal-lead">One person builds this — free to use, and updated for new Satisfactory versions before anyone else. If it saved you planning time, chip in. It keeps the updates coming.</p>
+        <div class="support-cards">
+          <button class="support-card" data-url="patreon">
+            <span class="support-ic">★</span>
+            <span class="support-txt">
+              <b>Patreon</b>
+              <small>Monthly support. Patrons get new-version updates day one, plus the desktop app.</small>
+            </span>
+            <span class="support-go">→</span>
+          </button>
+          <button class="support-card" data-url="kofi">
+            <span class="support-ic">☕</span>
+            <span class="support-txt">
+              <b>Ko-fi</b>
+              <small>One-time tip. No account needed.</small>
+            </span>
+            <span class="support-go">→</span>
+          </button>
+        </div>
+        <p class="modal-foot">Thanks for keeping community tools alive ♥</p>
+      </div>
+    </div>
 
     <datalist id="itemList"></datalist>
     <script src="renderer.js"></script>

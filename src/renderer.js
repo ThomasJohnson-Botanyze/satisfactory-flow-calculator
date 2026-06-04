@@ -3,6 +3,16 @@ const DATA = require('./data.json');
 const LP = require('./solver-lp');
 const SAVE = require('./save-reader');
 
+// ---------- support links — REPLACE with your real handles ----------
+const SUPPORT_LINKS = {
+  patreon: 'https://www.patreon.com/satisfactoryflow',
+  kofi: 'https://ko-fi.com/satisfactoryflow',
+};
+// shell.openExternal in Electron; window.open fallback if ever bundled for web
+let _shell = null;
+try { ({ shell: _shell } = require('electron')); } catch (_) { /* non-Electron host */ }
+const openExternal = (url) => { if (_shell && _shell.openExternal) _shell.openExternal(url); else window.open(url, '_blank', 'noopener'); };
+
 // ---------- indexes ----------
 const ITEMS = DATA.items;
 const RECIPES = DATA.recipes;
@@ -899,6 +909,17 @@ function init() {
   $('planDup').addEventListener('click', () => duplicatePlan(activeId));
   $('btnReset').addEventListener('click', () => { state.picks = {}; save(); solveAndRender(); });
   $('btnClear').addEventListener('click', () => { const p = activePlan(); p.state = defaultState(); state = p.state; save(); applyStateToControls(); });
+
+  // support modal
+  const supportModal = $('supportModal');
+  const closeSupport = () => { supportModal.hidden = true; };
+  $('btnSupport').addEventListener('click', () => { supportModal.hidden = false; });
+  $('supportClose').addEventListener('click', closeSupport);
+  supportModal.addEventListener('click', (e) => { if (e.target === supportModal) closeSupport(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !supportModal.hidden) closeSupport(); });
+  supportModal.querySelectorAll('[data-url]').forEach((el) =>
+    el.addEventListener('click', () => { const u = SUPPORT_LINKS[el.dataset.url]; if (u) openExternal(u); closeSupport(); })
+  );
 
   renderPlanBar();
   applyStateToControls();
