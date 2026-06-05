@@ -45,6 +45,14 @@ for (const g in GENERATORS) {
   }
 }
 
+// Unpackage recipes (Packaged X -> X + container) merely reverse a packaging step. When
+// the optimizer builds from raw resources they are never useful on their own — running one
+// only makes sense to consume a Packaged X you already have, otherwise it just pairs with
+// the matching package recipe to spin a pointless, machine-wasting Water<->Packaged Water
+// (or fuel) cycle instead of using a real producer (e.g. Empty Canister from Plastic). So
+// they're dropped from the pool unless their packaged input is supplied as a free input.
+const UNPACKAGE = new Set(Object.keys(RECIPES).filter((rc) => /unpackage/i.test(rc) || /^Unpackage/i.test(RECIPES[rc].name || '')));
+
 // Per-recipe base rates (per machine / min), cost-multiplier applied later.
 const RC_INFO = {};
 for (const rc in RECIPES) {
@@ -85,7 +93,11 @@ function recipePool(allowAlternates, unlockedAlts) {
 }
 
 function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, sinkByproducts = false }) {
-  const pool = recipePool(allowAlternates, unlockedAlts);
+  // Keep an unpackage recipe only when its packaged input is actually supplied; otherwise
+  // it can only form a degenerate package<->unpackage loop (see UNPACKAGE note above).
+  const pool = recipePool(allowAlternates, unlockedAlts).filter(
+    (rc) => !UNPACKAGE.has(rc) || RECIPES[rc].ingredients.some((g) => inputs[g.item] != null)
+  );
   const inPlay = new Set();
   for (const rc of pool) for (const it of itemsOf(RC_INFO[rc])) inPlay.add(it);
 

@@ -79,6 +79,18 @@ check('alts + sink: no by-product surplus at all', loop.feasible && !loop.output
 check('generators data present', !!(DATA.generators && DATA.generators.Build_GeneratorFuel_C));
 check('Fuel Generator burns 20 Fuel/min', near(DATA.generators.Build_GeneratorFuel_C.fuels[Fuel], 20, 0.01));
 
+// Package <-> Unpackage cycle: building from raw, the optimizer must never run an
+// unpackage recipe — it would only pair with its package recipe to spin a pointless
+// Water <-> Packaged Water loop instead of using a real Empty Canister recipe.
+const PkgFuel = cls('Packaged Fuel'); // Desc_Fuel_C (legacy name — the *packaged* item)
+const cyc = LP.optimize({ outputs: { [PkgFuel]: 60 }, allowedInputs: allRaw, objective: 'machines', allowAlternates: true, sinkByproducts: true });
+check('packaged-fuel plan feasible', cyc.feasible === true);
+check('no unpackage recipe used when building from raw', !cyc.recipes.some((s) => /unpackage/i.test(s.rc)));
+check('Empty Canister comes from a real producer (not an unpackage loop)', cyc.recipes.some((s) => DATA.recipes[s.rc].products.some((p) => p.item === cls('Empty Canister'))));
+// ...but unpackaging IS allowed when the packaged item is supplied as a free input.
+const supplied = LP.optimize({ outputs: { [cls('Fuel')]: 60 }, allowedInputs: Object.assign({ [PkgFuel]: Infinity }, allRaw), objective: 'machines', allowAlternates: true });
+check('unpackage allowed when its packaged input is supplied', supplied.feasible && supplied.recipes.some((s) => /unpackage/i.test(s.rc)));
+
 // ---- factory-extract ----
 console.log('\n### FACTORY-EXTRACT');
 check('quatToYaw identity = 0', near(FE.quatToYaw({ x: 0, y: 0, z: 0, w: 1 }), 0));
