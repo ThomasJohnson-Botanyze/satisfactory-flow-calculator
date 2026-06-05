@@ -1247,7 +1247,10 @@ function loadMapFromSave() {
     // save is so a stale overlay (e.g. buildings you removed in-game after the last
     // save) is obvious — reload after saving in-game to refresh it.
     const age = relAge(res.savedAt);
-    st.textContent = `${res.saveName}: ${nc.node || 0} nodes · ${nc.geyser || 0} geysers · ${nc.frackingCore || 0} wells · ${bt} buildings · ${ct} collectables` + (age ? ` · saved ${age}` : '');
+    const orphans = res.orphansHidden || 0;
+    st.textContent = `${res.saveName}: ${nc.node || 0} nodes · ${nc.geyser || 0} geysers · ${nc.frackingCore || 0} wells · ${bt} buildings · ${ct} collectables`
+      + (orphans ? ` · ${orphans} dismantled hidden` : '')
+      + (age ? ` · saved ${age}` : '');
     $('mapEmpty').hidden = true;
     ensureMapImg(); fitMapView(); drawMap();
   }, 20);

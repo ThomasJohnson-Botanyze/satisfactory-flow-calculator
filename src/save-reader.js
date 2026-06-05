@@ -265,6 +265,8 @@ function readMap(savFile) {
     nodeCounts,
     buildings,
     buildingCounts: summarize(buildings),
+    orphansHidden: buildings.orphansHidden || 0, // dismantled lightweight buildables skipped
+
     collectables,
     collectableCounts: summarizeCollectables(collectables),
   };

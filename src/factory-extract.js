@@ -140,7 +140,9 @@ function extractBuildings(save) {
       out.push(rec);
     }
   }
-  extractLightweight(save, out);
+  const lwStats = { orphans: 0 };
+  extractLightweight(save, out, lwStats);
+  out.orphansHidden = lwStats.orphans; // dismantled lightweight buildables skipped (see extractLightweight)
   return out;
 }
 
@@ -151,7 +153,7 @@ function extractBuildings(save) {
 // Shape: subsystem.specialProperties.buildables[] = one bucket per class
 // { typeReference:{pathName}, instances:[{transform, usedSwatchSlot, ...}] }.
 const LIGHTWEIGHT_TYPE = '/Script/FactoryGame.FGLightweightBuildableSubsystem';
-function extractLightweight(save, out) {
+function extractLightweight(save, out, stats) {
   const levels = (save && save.levels) || {};
   for (const lvlName in levels) {
     const objs = (levels[lvlName] && levels[lvlName].objects) || [];
@@ -169,6 +171,15 @@ function extractLightweight(save, out) {
           const it = insts[k];
           const tr = it && it.transform && it.transform.translation;
           if (!tr) continue;
+          // Dismantled lightweight buildables (foundations, walls, ramps, roads…) are NOT
+          // deleted from this instance array — the game orphans them in place with
+          // builtBy.playerInfoTableIndex === -1, and they accumulate across a playthrough.
+          // Live, player-placed instances keep a real (>=0) player index. Ground truth: 28
+          // foundations placed-and-dismantled within one save cycle all serialized as -1.
+          // Skip orphans so the overlay reflects what's actually in the world, not removed
+          // buildings. (An instance with no builtBy at all is kept — only an explicit -1 is
+          // treated as orphaned, so older saves / synthetic test data aren't affected.)
+          if (it.builtBy && it.builtBy.playerInfoTableIndex === -1) { if (stats) stats.orphans++; continue; }
           const scale = (it.transform && it.transform.scale3d) || { x: 1, y: 1, z: 1 };
           // Lightweight buildables are structural — always drawn as a footprint
           // (no splines/wires), so kind is 'machine' regardless of name.

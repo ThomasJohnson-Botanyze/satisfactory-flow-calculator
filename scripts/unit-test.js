@@ -103,6 +103,26 @@ check('lightweight record is a machine footprint', lw[0].kind === 'machine' && l
 check('lightweight class + swatch parsed', lw[0].className === 'Build_Foundation_8x4_01_C' && lw[0].swatch === 'SwatchDesc_Slot3_C');
 check('extractBuildings includes lightweight pass', FE.extractBuildings(lwSave).length === 2);
 
+// Dismantled lightweight buildables linger in the instance array as orphans with
+// builtBy.playerInfoTableIndex === -1. They must be skipped so removed buildings
+// don't show on the overlay; live (>=0) and builtBy-less instances are kept.
+const orphanSave = { levels: { Persistent: { objects: [
+  { typePath: '/Script/FactoryGame.FGLightweightBuildableSubsystem',
+    specialProperties: { buildables: [
+      { typeReference: { pathName: '/Game/X/Build_Foundation_8x4_01.Build_Foundation_8x4_01_C' },
+        instances: [
+          { transform: { translation: { x: 1, y: 2, z: 0 } }, builtBy: { playerInfoTableIndex: 0 } },   // live
+          { transform: { translation: { x: 3, y: 4, z: 0 } }, builtBy: { playerInfoTableIndex: -1 } },  // dismantled orphan
+          { transform: { translation: { x: 5, y: 6, z: 0 } } },                                          // no builtBy -> keep
+        ] } ] } } ] } } };
+const olw = [];
+const ostats = { orphans: 0 };
+FE.extractLightweight(orphanSave, olw, ostats);
+check('orphaned (-1) lightweight instance skipped', olw.length === 2);
+check('orphan skip counted in stats', ostats.orphans === 1);
+const ob = FE.extractBuildings(orphanSave);
+check('extractBuildings drops orphans + reports orphansHidden', ob.length === 2 && ob.orphansHidden === 1);
+
 // ---- collectables (uncollected pickups) ----
 const collSave = { levels: { Persistent: { objects: [
   { typePath: '/Game/FactoryGame/Resource/Environment/Crystal/BP_Crystal.BP_Crystal_C', transform: { translation: { x: 1, y: 2, z: 3 } } },
