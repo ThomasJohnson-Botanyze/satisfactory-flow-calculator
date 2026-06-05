@@ -1,6 +1,6 @@
 {
   "name": "satisfactory-flow-calculator",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Desktop production-flow planner for Satisfactory with alternate recipes and game-mode cost sliders",
   "main": "src/main.js",
   "author": "tjjr",
