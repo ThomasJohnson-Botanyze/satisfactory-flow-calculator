@@ -300,6 +300,11 @@ const machineRcs = (flow7 ? flow7.nodes : []).filter((n) => n.kind === 'machine'
 check('no Unpackage recipe auto-selected as a producer', !machineRcs.some((rc) => /unpackage/i.test(rc)));
 check('no Turbofuel<->Packaged Turbofuel cycle (package + unpackage both present)',
   !(machineRcs.includes('Recipe_PackagedTurboFuel_C') && machineRcs.includes('Recipe_UnpackageTurboFuel_C')));
+// Layout spreads the chain across columns by depth instead of stacking everything in
+// column 0 — the regression that made complex factories pile up sky-high. Turbofuel's
+// chain (raw -> Compacted Coal / Fuel -> Turbofuel -> output) is at least 4 deep.
+const cols7 = new Set((flow7 ? flow7.nodes : []).map((n) => Math.round(n.x)));
+check('flow layout spreads across multiple columns (not a single tall stack)', cols7.size >= 4);
 
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

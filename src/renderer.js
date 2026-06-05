@@ -629,32 +629,39 @@ function buildFlow(res, targets) {
 
 function layoutFlow(flow) {
   const { nodes, byId } = flow;
+  // Column = longest path from a source, with cycles broken: a back-edge into a node
+  // still on the current DFS path is ignored. Plain Kahn's layering dumped every node
+  // caught in a recycle loop into column 0; once by-product edges made those loops common
+  // (e.g. HOR <-> recycled plastic) the whole chart collapsed into a couple of absurdly
+  // tall columns. Longest-path layering gives every node a real column, spreading the
+  // graph wide instead of stacking it sky-high.
   const col = {};
-  const indeg = {};
-  nodes.forEach((n) => (indeg[n.id] = n.ins.length));
-  const q = nodes.filter((n) => indeg[n.id] === 0);
-  q.forEach((n) => (col[n.id] = 0));
-  let qi = 0;
-  while (qi < q.length) {
-    const n = q[qi++];
-    n.outs.forEach((e) => {
-      const d = byId[e.dst];
-      col[d.id] = Math.max(col[d.id] || 0, (col[n.id] || 0) + 1);
-      if (--indeg[d.id] === 0) q.push(d);
-    });
-  }
-  nodes.forEach((n) => { if (col[n.id] == null) col[n.id] = 0; });
+  const mark = {}; // 1 = on current DFS path, 2 = finalized
+  const depthOf = (id) => {
+    if (mark[id] === 2) return col[id];
+    if (mark[id] === 1) return 0; // back-edge — break the cycle here
+    mark[id] = 1;
+    let d = 0;
+    for (const e of byId[id].ins) if (byId[e.src]) d = Math.max(d, depthOf(e.src) + 1);
+    mark[id] = 2;
+    return (col[id] = d);
+  };
+  nodes.forEach((n) => depthOf(n.id));
   const cols = {};
   nodes.forEach((n) => (cols[col[n.id]] = cols[col[n.id]] || []).push(n));
   // Wider columns so the per-minute edge labels fit between nodes; taller rows reduce label overlap.
   const COLW = 300, ROWH = 96, NW = 168, NH = 52, PADX = 28, PADY = 28;
   const saved = state.flowPos || {};
+  // Vertically centre each column against the tallest so the graph reads as a balanced
+  // flow left-to-right rather than top-left-anchored ragged columns.
+  const maxLen = Math.max(1, ...Object.values(cols).map((a) => a.length));
   Object.keys(cols).map(Number).sort((a, b) => a - b).forEach((c) => {
+    const off = ((maxLen - cols[c].length) / 2) * ROWH;
     cols[c].forEach((n, i) => {
       n.w = NW; n.h = NH;
       const sp = saved[n.id];
       if (sp && isFinite(sp.x) && isFinite(sp.y)) { n.x = sp.x; n.y = sp.y; }
-      else { n.x = PADX + c * COLW; n.y = PADY + i * ROWH; }
+      else { n.x = PADX + c * COLW; n.y = PADY + off + i * ROWH; }
     });
   });
   // size canvas to actual node extents (covers nodes dragged outside the grid)
