@@ -238,12 +238,19 @@ function mergeState(s) {
 const save = () => {
   try {
     const globals = syncGlobals(); // keep world-level settings identical across plans
-    localStorage.setItem(PLANS_KEY, JSON.stringify({ plans: plans.map((p) => ({ id: p.id, name: p.name, state: p.state })), activeId, globals }));
+    const payload = JSON.stringify({ plans: plans.map((p) => ({ id: p.id, name: p.name, state: p.state })), activeId, globals });
+    if (api && api.savePlans) api.savePlans(payload); // durable userData/plans.json (survives reinstalls)
+    localStorage.setItem(PLANS_KEY, payload);          // fallback + back-compat for older builds
   } catch (e) {}
 };
 function load() {
+  let fromFile = false;
   try {
-    const raw = JSON.parse(localStorage.getItem(PLANS_KEY));
+    // Prefer the durable userData file; fall back to localStorage (older builds, or the
+    // first run after upgrade — that case is migrated forward by the save() call below).
+    const f = (api && api.loadPlans) ? api.loadPlans() : null;
+    const raw = JSON.parse(f || localStorage.getItem(PLANS_KEY));
+    fromFile = !!f;
     if (raw && Array.isArray(raw.plans) && raw.plans.length) {
       plans = raw.plans.map((p) => ({ id: p.id || newId(), name: p.name || 'Factory', state: mergeState(p.state) }));
       activeId = plans.some((p) => p.id === raw.activeId) ? raw.activeId : plans[0].id;
@@ -252,6 +259,7 @@ function load() {
       // active plan's values (first run after upgrade) and propagate to the rest.
       if (raw.globals) for (const p of plans) applyGlobals(p.state, raw.globals);
       else syncGlobals();
+      if (!fromFile) save(); // seed the durable file from a localStorage-only (pre-upgrade) store
       return;
     }
   } catch (e) {}
@@ -1206,6 +1214,15 @@ function buildPurityLegend() {
   });
 }
 
+// Human "x ago" for a save-file mtime (ms epoch). '' when unknown.
+function relAge(ms) {
+  if (!ms) return '';
+  const s = (Date.now() - ms) / 1000;
+  if (s < 90) return 'just now';
+  const m = s / 60; if (m < 90) return Math.round(m) + 'm ago';
+  const h = m / 60; if (h < 36) return Math.round(h) + 'h ago';
+  return Math.round(h / 24) + 'd ago';
+}
 function loadMapFromSave() {
   const sel = $('mapSaveSelect'), st = $('mapStatus');
   if (!sel || !sel.value) { if (st) st.textContent = 'No save selected.'; return; }
@@ -1226,7 +1243,11 @@ function loadMapFromSave() {
     const nc = res.nodeCounts || {};
     const bt = (res.buildingCounts && res.buildingCounts.total) || 0;
     const ct = mapCollectables.length;
-    st.textContent = `${res.saveName}: ${nc.node || 0} nodes · ${nc.geyser || 0} geysers · ${nc.frackingCore || 0} wells · ${bt} buildings · ${ct} collectables`;
+    // The overlay is a snapshot of the save file, not the live game. Show how old that
+    // save is so a stale overlay (e.g. buildings you removed in-game after the last
+    // save) is obvious — reload after saving in-game to refresh it.
+    const age = relAge(res.savedAt);
+    st.textContent = `${res.saveName}: ${nc.node || 0} nodes · ${nc.geyser || 0} geysers · ${nc.frackingCore || 0} wells · ${bt} buildings · ${ct} collectables` + (age ? ` · saved ${age}` : '');
     $('mapEmpty').hidden = true;
     ensureMapImg(); fitMapView(); drawMap();
   }, 20);

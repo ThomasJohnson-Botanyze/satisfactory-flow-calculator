@@ -251,9 +251,16 @@ function readMap(savFile) {
   for (const n of nodes) nodeCounts[n.kind] = (nodeCounts[n.kind] || 0) + 1;
   const buildings = extractBuildings(p.save);
   const collectables = extractCollectables(p.save);
+  // The overlay can only ever reflect the last SAVE on disk, never the live world.
+  // Surface the file's mtime so the UI can show how stale the overlay is — that's the
+  // usual cause of "I removed it in-game but it's still on the map" (the change hasn't
+  // been saved, or a newer autosave hasn't been picked/reloaded yet).
+  let savedAt = null;
+  try { savedAt = fs.statSync(savFile).mtimeMs; } catch (_) {}
   return {
     ok: true,
     saveName: p.saveName,
+    savedAt,
     nodes,
     nodeCounts,
     buildings,

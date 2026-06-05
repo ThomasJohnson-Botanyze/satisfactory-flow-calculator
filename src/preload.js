@@ -15,6 +15,10 @@ contextBridge.exposeInMainWorld('api', {
   listSaves: (root) => SAVE.listSaves(root),
   readUnlockedAlternates: (file) => SAVE.readUnlockedAlternates(file),
   readMap: (file) => SAVE.readMap(file),
+  // Durable plan storage in userData (see main.js). loadPlans is synchronous so the
+  // renderer can read it during its boot load(); savePlans is fire-and-forget.
+  loadPlans: () => { try { return ipcRenderer.sendSync('plans:load'); } catch (_) { return null; } },
+  savePlans: (json) => { try { ipcRenderer.send('plans:save', json); } catch (_) {} },
   // Open external (http/https) links in the OS browser; ignore anything else so a
   // crafted string can't drive shell.openExternal to a file:/custom-scheme handler.
   openExternal: (url) => { if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url); },

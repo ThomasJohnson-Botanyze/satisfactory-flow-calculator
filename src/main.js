@@ -1,5 +1,32 @@
-const { app, BrowserWindow, Menu, shell } = require('electron');
+const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
+
+// ---------- durable plan storage ----------
+// Plans used to live only in the renderer's localStorage. On file:// pages Chromium
+// can reset that store on repackage/relaunch (the Local Storage leveldb gets a fresh
+// MANIFEST), which silently wiped saved factories across app updates. We now persist
+// to a plain JSON file in userData — outside the app bundle, untouched by reinstalls —
+// with localStorage kept only as a fallback/migration source in the renderer.
+function plansPath() {
+  return path.join(app.getPath('userData'), 'plans.json');
+}
+// Synchronous load (renderer calls this once at boot via sendSync); returns the raw
+// JSON string or null when the file is absent/unreadable.
+ipcMain.on('plans:load', (e) => {
+  try { e.returnValue = fs.readFileSync(plansPath(), 'utf8'); }
+  catch (_) { e.returnValue = null; }
+});
+// Asynchronous, fire-and-forget save (renderer calls on every change). Write to a
+// temp file then rename, so a crash mid-write can never leave a truncated plans.json.
+ipcMain.on('plans:save', (_e, json) => {
+  if (typeof json !== 'string') return;
+  try {
+    const p = plansPath();
+    const tmp = p + '.tmp';
+    fs.writeFile(tmp, json, (err) => { if (!err) fs.rename(tmp, p, () => {}); });
+  } catch (_) { /* best-effort; localStorage still holds a copy */ }
+});
 
 // GitHub repo polled for the latest published release (update notifier).
 const UPDATE_REPO = 'ThomasJohnson-Botanyze/satisfactory-flow-calculator';
