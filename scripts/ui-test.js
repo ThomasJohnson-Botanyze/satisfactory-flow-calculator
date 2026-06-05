@@ -229,5 +229,43 @@ click5(d5.querySelector('#plannerExtra .row .row-rm'));
 check('removing extra reverts to single-target rows', rows5() === baseRows5);
 check('Iron Rod gone after removing extra', !itemTexts5().some((t) => /Iron Rod/.test(t)));
 
+// Optimizer by-product edges: a recipe that eats another recipe's *by-product*
+// (Petroleum Coke consumes the Heavy Oil Residue that standard Plastic emits) must
+// render with a real input edge — not as an orphan machine node while the by-product
+// floats up as a phantom output. Regression guard for the by-product producer fix.
+console.log('\n### OPTIMIZER BY-PRODUCT EDGES');
+const cls6 = (name) => Object.keys(DATA.items).find((k) => DATA.items[k].name === name);
+const primStd6 = (item) => Object.keys(DATA.recipes).find((rc) => !DATA.recipes[rc].alternate && DATA.recipes[rc].products[0].item === item);
+const dom6 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom6.window; global.document = dom6.window.document; global.localStorage = dom6.window.localStorage;
+global.location = dom6.window.location; global.Event = dom6.window.Event;
+if (!dom6.window.SVGElement.prototype.setPointerCapture) dom6.window.SVGElement.prototype.setPointerCapture = () => {};
+dom6.window.localStorage.clear();
+delete require.cache[require.resolve('../src/renderer.js')];
+require('../src/renderer.js');
+dom6.window.dispatchEvent(new dom6.window.Event('DOMContentLoaded'));
+const d6 = dom6.window.document;
+const fire6 = (n, t) => n.dispatchEvent(new dom6.window.Event(t, { bubbles: true }));
+const setVal6 = (n, v, t = 'input') => { n.value = v; fire6(n, t); };
+const click6 = (n) => n.dispatchEvent(new dom6.window.Event('click', { bubbles: true }));
+click6([...d6.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+const alts6 = d6.getElementById('optAlts'); if (alts6.checked) { alts6.checked = false; fire6(alts6, 'change'); } // off → HOR only via Plastic by-product
+const row0 = d6.querySelector('#optOutputs .row');
+setVal6(row0.querySelector('.row-item'), 'Plastic'); setVal6(row0.querySelector('.row-rate'), '120');
+click6(d6.getElementById('optAddOutput'));
+const row1 = [...d6.querySelectorAll('#optOutputs .row')][1];
+setVal6(row1.querySelector('.row-item'), 'Petroleum Coke'); setVal6(row1.querySelector('.row-rate'), '60');
+click6(d6.getElementById('viewFlow'));
+const flow6 = dom6.window.__lastFlow;
+check('optimizer flow built', !!flow6 && flow6.nodes.length > 0);
+const cokeNode = flow6 && flow6.nodes.find((n) => n.id === 'mac|' + primStd6(cls6('Petroleum Coke')));
+check('Petroleum Coke node present', !!cokeNode);
+check('Petroleum Coke fed from the Heavy Oil Residue by-product (not orphaned)', !!cokeNode && cokeNode.ins.length > 0);
+const orphans6 = (flow6 ? flow6.nodes : []).filter((n) => {
+  const r = n.kind === 'machine' && DATA.recipes[n.id.slice(4)];
+  return r && r.ingredients.length > 0 && n.ins.length === 0;
+});
+check('no orphan machine nodes (every recipe with inputs has an edge)', orphans6.length === 0);
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

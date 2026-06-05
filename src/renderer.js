@@ -549,8 +549,23 @@ function buildFlow(res, targets) {
     addNode(s._nid, 'machine', title, `${fmt(s.machines)}× ${s.buildingName}${oc}`);
   });
   res.raw.forEach((r) => addNode('raw|' + r.item, 'raw', itemName(r.item), fmt(r.rate) + '/min'));
+  // Index every step under *each* item it produces — primary product AND by-products.
+  // Keying only by the primary (the old behaviour) made by-products invisible as
+  // sources: a recipe eating another recipe's by-product (e.g. Petroleum Coke from the
+  // Heavy Oil Residue that Plastic/Rubber emit) found no producer, fell back to a
+  // raw|<item> node that doesn't exist for a non-raw item, so addEdge silently dropped
+  // it — the consumer rendered with no input while the by-product floated up as a
+  // phantom output. `rate` is this step's output of `item`, scaled off the primary
+  // rate so it stays correct even when the Planner clock-rescales machine counts.
   const producers = {};
-  res.recipes.forEach((s) => { (producers[s.item] = producers[s.item] || []).push(s); });
+  res.recipes.forEach((s) => {
+    const info = LP.RC_INFO[s.rc];
+    if (!info) return;
+    const base = info.out[s.item] || info.primaryRate || 1;
+    for (const item in info.out) {
+      (producers[item] = producers[item] || []).push({ step: s, rate: s.rate * (info.out[item] / base) });
+    }
+  });
   const addEdge = (srcId, dstId, item, rate) => {
     if (!byId[srcId] || !byId[dstId]) return;
     const e = { src: srcId, dst: dstId, label: `${itemName(item)} ${fmt(rate)}/min` };
@@ -561,10 +576,10 @@ function buildFlow(res, targets) {
     const prod = r.products.find((p) => p.item === s.item) || r.products[0];
     r.ingredients.forEach((ing) => {
       const total = (s.rate / prod.amount) * ing.amount * state.recipeCost;
-      const provs = producers[ing.item];
-      if (provs && provs.length) {
+      const provs = (producers[ing.item] || []).filter((p) => p.step !== s); // no self-edge on by-product loops
+      if (provs.length) {
         const tot = provs.reduce((a, p) => a + p.rate, 0) || 1;
-        provs.forEach((p) => addEdge(p._nid, s._nid, ing.item, total * (p.rate / tot)));
+        provs.forEach((p) => addEdge(p.step._nid, s._nid, ing.item, total * (p.rate / tot)));
       } else addEdge('raw|' + ing.item, s._nid, ing.item, total);
     });
   });
@@ -574,7 +589,7 @@ function buildFlow(res, targets) {
     const oid = 'out|' + item;
     addNode(oid, 'out', itemName(item), fmt(outs[item]) + '/min');
     const provs = producers[item];
-    if (provs && provs.length) { const tot = provs.reduce((a, p) => a + p.rate, 0) || 1; provs.forEach((p) => addEdge(p._nid, oid, item, outs[item] * (p.rate / tot))); }
+    if (provs && provs.length) { const tot = provs.reduce((a, p) => a + p.rate, 0) || 1; provs.forEach((p) => addEdge(p.step._nid, oid, item, outs[item] * (p.rate / tot))); }
   }
   return { nodes, byId, edges };
 }
@@ -785,6 +800,7 @@ function renderFlowView() {
   if (!lastResult) return;
   currentFlow = layoutFlow(buildFlow(lastResult, lastTargets));
   drawFlow(currentFlow);
+  if (typeof window !== 'undefined') window.__lastFlow = currentFlow; // test/debug hook: inspect node + edge wiring
   // Keep the saved zoom/pan across tab toggles; first render of a plan fits to window.
   if (state.flowView && isFinite(state.flowView.k)) applyFlowTransform();
   else {
