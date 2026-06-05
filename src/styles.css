@@ -461,6 +461,8 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .node.raw rect { fill: #2b313c; stroke: #5b6675; }
 .node.machine rect { fill: #3a2a12; stroke: var(--accent); }
 .node.out rect { fill: #15361f; stroke: var(--good); }
+.node.sink rect { fill: #3a1530; stroke: #c061a4; }
+.node.gen rect { fill: #1c2f3a; stroke: #4aa3c7; }
 .node .n-title { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
 .edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }

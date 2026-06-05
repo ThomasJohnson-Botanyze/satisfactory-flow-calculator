@@ -99,6 +99,8 @@
               <option value="machines">Fewest machines</option>
             </select>
             <label class="check"><input type="checkbox" id="optAlts" checked /> Consider alternate recipes</label>
+            <label class="check"><input type="checkbox" id="optSink" checked /> Sink / consume by-products</label>
+            <small class="hint">Routes surplus by-products to the Awesome Sink (solids) or a Fuel Generator (liquid fuels) so they can't back up the line. A fluid with no consumer is reported instead of silently piling up.</small>
           </section>
         </div>
 
@@ -261,7 +263,7 @@
 
           <div id="flowView" hidden>
             <div class="flow-head">
-              <span class="hint flow-hint">Drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output.</span>
+              <span class="hint flow-hint">Drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output · pink = sink · blue = generator.</span>
               <div class="flow-tools">
                 <button id="flowZoomOut" class="btn mini ghost" aria-label="Zoom out" title="Zoom out">−</button>
                 <span id="flowZoomPct" class="flow-zoom-pct">100%</span>
@@ -303,7 +305,7 @@
           <div id="byprodWrap" hidden>
             <h2 class="block-title" id="byprodTitle">By-products / surplus</h2>
             <div class="table-wrap">
-              <table id="byprodTable"><thead><tr><th>Item</th><th class="num">Rate / min</th></tr></thead><tbody></tbody></table>
+              <table id="byprodTable"><thead><tr><th>Item</th><th class="num">Rate / min</th><th>Destination</th></tr></thead><tbody></tbody></table>
             </div>
           </div>
           </div><!-- /tableView -->

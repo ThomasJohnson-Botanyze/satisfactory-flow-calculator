@@ -52,6 +52,33 @@ const ingotIn = interm.raw.find((r) => r.item === IronIngot);
 check('supplied intermediate consumed (~30 ingot for 20 plate)', !!ingotIn && near(ingotIn.rate, 30, 0.5));
 check('no ore pulled when ingot supplied', !interm.raw.some((r) => r.item === IronOre));
 
+// By-product disposal: standard Plastic emits Heavy Oil Residue (a fluid). With
+// sinking on, the optimizer must route that HOR somewhere — here HOR -> Petroleum Coke
+// (a solid) -> Awesome Sink — instead of letting it pile up and deadlock the line.
+const allRaw = Object.fromEntries(DATA.resources.map((r) => [r, Infinity]));
+const Plastic = cls('Plastic'), HOR = cls('Heavy Oil Residue'), Coke = cls('Petroleum Coke'), Fuel = cls('Fuel');
+const sinkOn = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, objective: 'machines', allowAlternates: false, sinkByproducts: true });
+check('sink on: feasible', sinkOn.feasible === true);
+check('sink on: Heavy Oil Residue fully consumed (net ~0)', near(sinkOn.net[HOR] || 0, 0, 1e-4));
+check('sink on: no fluid left as surplus', !sinkOn.outputs.some((o) => DATA.items[o.item] && DATA.items[o.item].liquid));
+check('sink on: Petroleum Coke routed to the Awesome Sink', (sinkOn.sunk || []).some((s) => s.item === Coke && s.rate > 0));
+check('sink on: sink points reported', (sinkOn.sunk || []).every((s) => s.points > 0));
+
+// Legacy behaviour (toggle off): the by-product is allowed to float as surplus.
+const sinkOff = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, objective: 'machines', allowAlternates: false, sinkByproducts: false });
+check('sink off: Heavy Oil Residue floats as surplus', sinkOff.outputs.some((o) => o.item === HOR && o.rate > 0));
+check('sink off: nothing sunk', (sinkOff.sunk || []).length === 0);
+
+// With alternates on, the solver can do better than sinking: close the loop by feeding
+// HOR back through Diluted Fuel / Recycled Plastic so only the desired output remains.
+const loop = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, objective: 'machines', allowAlternates: true, sinkByproducts: true });
+check('alts + sink: feasible', loop.feasible === true);
+check('alts + sink: no by-product surplus at all', loop.feasible && !loop.outputs.some((o) => o.item !== Plastic));
+
+// Generator data the disposal model relies on (Fuel-Powered Generator: 250 MW).
+check('generators data present', !!(DATA.generators && DATA.generators.Build_GeneratorFuel_C));
+check('Fuel Generator burns 20 Fuel/min', near(DATA.generators.Build_GeneratorFuel_C.fuels[Fuel], 20, 0.01));
+
 // ---- factory-extract ----
 console.log('\n### FACTORY-EXTRACT');
 check('quatToYaw identity = 0', near(FE.quatToYaw({ x: 0, y: 0, z: 0, w: 1 }), 0));

@@ -94,8 +94,39 @@ for (const c of groups.FGRecipe || []) {
 
 const resources = (groups.FGResourceDescriptor || []).map((c) => c.ClassName);
 
-const out = { items, buildings, recipes, resources };
+// ---- generators: the Fuel-Powered Generator, for by-product disposal -----------
+// It burns the liquid/gas fuels (Fuel, Turbofuel, Liquid Biofuel, Rocket Fuel,
+// Ionized Fuel) that would otherwise dead-end and back up the pipes. Solid-fuel
+// burners (Coal, Biomass) are omitted: their fuels are solids the Awesome Sink
+// already disposes, and biomass is never a factory by-product. Burn rate
+// (units/min @100%) = 60·MW / E, where E is the fuel's energy; the Docs store fluid
+// energy per mL, so the app's m³ unit multiplies that back up (E·1000 for fluids).
+const energyOf = {};
+for (const gname in groups) {
+  for (const c of groups[gname]) {
+    const cn = c.ClassName || '';
+    if (/^Desc_/.test(cn) && c.mEnergyValue !== undefined && energyOf[cn] === undefined) {
+      const e = Number(c.mEnergyValue) || 0;
+      energyOf[cn] = isLiquid[cn] ? e * 1000 : e; // fluids: per-mL -> per-m³
+    }
+  }
+}
+const generators = {};
+for (const c of groups.FGBuildableGeneratorFuel || []) {
+  if (c.ClassName !== 'Build_GeneratorFuel_C') continue; // liquid/gas fuels only
+  const power = Number(c.mPowerProduction) || 0;
+  const fuelClasses = (c.mDefaultFuelClasses || '').match(/Desc_[A-Za-z0-9_]+_C/g) || [];
+  const fuels = {};
+  for (const f of fuelClasses) {
+    if (!isLiquid[f]) continue; // any solid fuel goes to the sink, not a generator
+    const e = energyOf[f];
+    if (e > 0) fuels[f] = (60 * power) / e; // units/min consumed at 100 % clock
+  }
+  generators[c.ClassName] = { className: c.ClassName, name: c.mDisplayName || c.ClassName, power, fuels };
+}
+
+const out = { items, buildings, recipes, resources, generators };
 const outPath = path.join(__dirname, '..', 'src', 'data.json');
 fs.writeFileSync(outPath, JSON.stringify(out));
 console.log(`Wrote ${outPath}`);
-console.log(`  items ${Object.keys(items).length}, buildings ${Object.keys(buildings).length}, recipes ${Object.keys(recipes).length} (${Object.values(recipes).filter(r=>r.alternate).length} alt), resources ${resources.length}`);
+console.log(`  items ${Object.keys(items).length}, buildings ${Object.keys(buildings).length}, recipes ${Object.keys(recipes).length} (${Object.values(recipes).filter(r=>r.alternate).length} alt), resources ${resources.length}, generators ${Object.keys(generators).length}`);

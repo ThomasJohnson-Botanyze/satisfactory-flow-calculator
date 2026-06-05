@@ -205,6 +205,7 @@ const defaultState = () => ({
     extraInputs: [],
     objective: 'raw',
     alts: true,
+    sink: true, // route surplus by-products to the Awesome Sink / Fuel Generator
   },
   max: { supply: [{ item: resList[0] ? resList[0].c : '', amount: 120 }], product: '', alts: true },
 });
@@ -508,14 +509,22 @@ function renderTables(res) {
   });
   if (!Object.keys(bld).length) btb.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
 
-  const sur = res.surplus || [];
-  $('byprodWrap').hidden = sur.length === 0;
+  // By-product disposal: what was sunk (Awesome Sink) or burned (Fuel Generator), plus
+  // any genuine surplus left floating when sinking is off — each with its destination.
+  const disp = [];
+  (res.sunk || []).forEach((s) => disp.push({ item: s.item, rate: s.rate, dest: `Awesome Sink · ${fmt(s.points, 0)} pts/min` }));
+  (res.burned || []).forEach((b) => disp.push({ item: b.item, rate: b.rate, dest: `${b.genName} · ${fmt(b.mw, 0)} MW` }));
+  (res.surplus || []).forEach((s) => disp.push({ item: s.item, rate: s.rate, dest: 'surplus (unconsumed)' }));
+  const disposed = (res.sunk && res.sunk.length) || (res.burned && res.burned.length);
+  $('byprodTitle').textContent = disposed ? 'By-product disposal' : 'By-products / surplus';
+  $('byprodWrap').hidden = disp.length === 0;
   const ytb = $('byprodTable').querySelector('tbody');
   ytb.innerHTML = '';
-  sur.slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((s) => {
+  disp.sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((s) => {
     const tr = el('tr');
     const td = el('td'); td.appendChild(itemCell(s.item)); tr.appendChild(td);
     tr.appendChild(el('td', 'num', fmt(s.rate)));
+    tr.appendChild(el('td', null, s.dest));
     ytb.appendChild(tr);
   });
 
@@ -591,6 +600,17 @@ function buildFlow(res, targets) {
     const provs = producers[item];
     if (provs && provs.length) { const tot = provs.reduce((a, p) => a + p.rate, 0) || 1; provs.forEach((p) => addEdge(p.step._nid, oid, item, outs[item] * (p.rate / tot))); }
   }
+  // Disposal terminals: solids routed to the Awesome Sink, liquid fuels burned in a
+  // Fuel Generator. One node per disposed item, fed by whatever produced it (a producer
+  // can split between a real consumer and disposal, so these coexist with normal edges).
+  const drawDisposal = (list, prefix, kind, title, sub) => (list || []).forEach((d) => {
+    const id = prefix + d.item;
+    addNode(id, kind, title(d), sub(d));
+    const provs = producers[d.item];
+    if (provs && provs.length) { const tot = provs.reduce((a, p) => a + p.rate, 0) || 1; provs.forEach((p) => addEdge(p.step._nid, id, d.item, d.rate * (p.rate / tot))); }
+  });
+  drawDisposal(res.sunk, 'sink|', 'sink', () => 'Awesome Sink', (d) => `${itemName(d.item)} · ${fmt(d.points, 0)} pts/min`);
+  drawDisposal(res.burned, 'gen|', 'gen', (d) => d.genName || 'Fuel Generator', (d) => `${itemName(d.item)} · ${fmt(d.mw, 0)} MW`);
   return { nodes, byId, edges };
 }
 
@@ -1400,14 +1420,18 @@ function buildCsv(res) {
   L.push('Raw resources');
   L.push(csvRow(['Resource', 'Rate/min']));
   (res.raw || []).slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((r) => L.push(csvRow([itemName(r.item), fmt(r.rate)])));
-  const sur = res.surplus || [];
-  if (sur.length) {
+  const disp = [];
+  (res.sunk || []).forEach((s) => disp.push([itemName(s.item), fmt(s.rate), `Awesome Sink (${fmt(s.points, 0)} pts/min)`]));
+  (res.burned || []).forEach((b) => disp.push([itemName(b.item), fmt(b.rate), `${b.genName} (${fmt(b.mw, 0)} MW)`]));
+  (res.surplus || []).forEach((s) => disp.push([itemName(s.item), fmt(s.rate), 'surplus (unconsumed)']));
+  if (disp.length) {
     L.push('');
-    L.push('By-products / surplus');
-    L.push(csvRow(['Item', 'Rate/min']));
-    sur.slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((s) => L.push(csvRow([itemName(s.item), fmt(s.rate)])));
+    L.push((res.sunk && res.sunk.length) || (res.burned && res.burned.length) ? 'By-product disposal' : 'By-products / surplus');
+    L.push(csvRow(['Item', 'Rate/min', 'Destination']));
+    disp.sort((a, b) => a[0].localeCompare(b[0])).forEach((r) => L.push(csvRow(r)));
   }
   L.push('');
+  if ((res.burned || []).length) L.push(csvRow(['Power recovered from generators MW', fmt(res.recoveredPower, 1)]));
   L.push(csvRow(['Total power MW', fmt(res.totalPower, 1)]));
   L.push(csvRow(['Production machines', res.totalMachines]));
   return L.join('\r\n');
@@ -1497,8 +1521,15 @@ function renderOptimize() {
   for (const x of state.opt.extraInputs || []) { const c = anyNameToClass(x.name); if (c) allowedInputs[c] = x.cap === '' || x.cap == null ? Infinity : Number(x.cap); }
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
-  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet() });
-  if (!res.feasible) return showEmpty('No feasible recipe set: those outputs cannot be made from the allowed inputs. Enable more resources or alternate recipes.');
+  const sink = state.opt.sink !== false;
+  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), sinkByproducts: sink });
+  if (!res.feasible) {
+    if (res.backup && res.backup.length) {
+      const names = res.backup.map(itemName).join(', ');
+      return showEmpty(`By-product would back up: ${names}. It’s a fluid with no recipe consuming it, so it can’t be sunk and would stall the line. Enable an alternate recipe that consumes it, or untick “Sink / consume by-products”.`);
+    }
+    return showEmpty('No feasible recipe set: those outputs cannot be made from the allowed inputs. Enable more resources or alternate recipes.');
+  }
   res.surplus = res.outputs.filter((o) => !outputs[o.item]);
   present(res, outputs);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
@@ -1508,6 +1539,9 @@ function renderOptimize() {
   ex.appendChild(el('div', 'extras-title', '✓ Optimized recipe selection'));
   const alts = res.recipes.filter((x) => RECIPES[x.rc].alternate).length;
   ex.appendChild(el('div', 'extras-line', `Minimized ${state.opt.objective} = ${fmt(res.objectiveValue)} ${labels[state.opt.objective]} · ${alts} alternate recipe(s) chosen`));
+  const sunkPts = (res.sunk || []).reduce((a, s) => a + s.points, 0);
+  if ((res.sunk || []).length) ex.appendChild(el('div', 'extras-line', `By-products sunk: ${res.sunk.map((s) => itemName(s.item)).join(', ')} — ${fmt(sunkPts, 0)} AWESOME Sink points/min`));
+  if ((res.burned || []).length) ex.appendChild(el('div', 'extras-line', `By-products burned: ${res.burned.map((b) => itemName(b.item)).join(', ')} — ${fmt(res.recoveredPower, 0)} MW recovered from generators`));
   $('modeExtras').appendChild(ex);
 }
 
@@ -1875,6 +1909,7 @@ function applyStateToControls() {
   syncSliderLabels();
   $('optObjective').value = state.opt.objective;
   $('optAlts').checked = state.opt.alts;
+  $('optSink').checked = state.opt.sink !== false; // default on, incl. plans saved before this option existed
   $('maxProduct').value = state.max.product ? itemName(state.max.product) : '';
   $('maxAlts').checked = state.max.alts;
   setMode(state.mode);
@@ -1943,6 +1978,7 @@ function init() {
   $('optAddOutput').addEventListener('click', () => { state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); });
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });
   $('optAlts').addEventListener('change', (e) => { state.opt.alts = e.target.checked; save(); solveAndRender(); });
+  $('optSink').addEventListener('change', (e) => { state.opt.sink = e.target.checked; save(); solveAndRender(); });
   $('optAllInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = true)); save(); buildOptInputs(); solveAndRender(); });
   $('optNoInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = false)); save(); buildOptInputs(); solveAndRender(); });
   $('optAddInput').addEventListener('click', () => { (state.opt.extraInputs || (state.opt.extraInputs = [])).push({ name: '', cap: '' }); save(); buildOptExtraInputs(); });

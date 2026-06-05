@@ -250,11 +250,9 @@ const setVal6 = (n, v, t = 'input') => { n.value = v; fire6(n, t); };
 const click6 = (n) => n.dispatchEvent(new dom6.window.Event('click', { bubbles: true }));
 click6([...d6.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
 const alts6 = d6.getElementById('optAlts'); if (alts6.checked) { alts6.checked = false; fire6(alts6, 'change'); } // off → HOR only via Plastic by-product
+setVal6(d6.getElementById('optObjective'), 'machines', 'change'); // sink (0 machines) beats burning, so HOR -> Coke -> Sink deterministically
 const row0 = d6.querySelector('#optOutputs .row');
 setVal6(row0.querySelector('.row-item'), 'Plastic'); setVal6(row0.querySelector('.row-rate'), '120');
-click6(d6.getElementById('optAddOutput'));
-const row1 = [...d6.querySelectorAll('#optOutputs .row')][1];
-setVal6(row1.querySelector('.row-item'), 'Petroleum Coke'); setVal6(row1.querySelector('.row-rate'), '60');
 click6(d6.getElementById('viewFlow'));
 const flow6 = dom6.window.__lastFlow;
 check('optimizer flow built', !!flow6 && flow6.nodes.length > 0);
@@ -266,6 +264,13 @@ const orphans6 = (flow6 ? flow6.nodes : []).filter((n) => {
   return r && r.ingredients.length > 0 && n.ins.length === 0;
 });
 check('no orphan machine nodes (every recipe with inputs has an edge)', orphans6.length === 0);
+// By-product sinking (on by default): the surplus Heavy Oil Residue is turned into extra
+// Petroleum Coke and routed to the Awesome Sink, drawn as a fed sink node — and crucially
+// no fluid is left floating as a green output (which in-game would back up and stall).
+check('by-product sink toggle present and on by default', !!d6.getElementById('optSink') && d6.getElementById('optSink').checked === true);
+const sinkNodes6 = (flow6 ? flow6.nodes : []).filter((n) => n.kind === 'sink');
+check('flow shows a fed Awesome Sink node for the disposed by-product', sinkNodes6.length > 0 && sinkNodes6.every((n) => n.ins.length > 0));
+check('no fluid by-product floats as a green output node', !(flow6 ? flow6.nodes : []).some((n) => n.kind === 'out' && DATA.items[n.id.slice(4)] && DATA.items[n.id.slice(4)].liquid));
 
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);
