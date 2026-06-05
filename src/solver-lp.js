@@ -21,6 +21,14 @@ const RES = new Set(DATA.resources);
 const ITEMS = DATA.items || {};
 const GENERATORS = DATA.generators || {};
 const BIG = 1e7;
+// Negligible per-activity cost folded into the optimizer objective so the solver never
+// spins a zero-cost cycle. Reversible recipe pairs (package <-> unpackage a fluid) cancel
+// to net zero and are FREE under the raw/power objectives, so a degenerate optimum can
+// leave them recirculating forever. This is far smaller than any real objective gap, so
+// it never changes the chosen plan — it only makes pointless recirculation strictly worse
+// than not running it. The true objective value is recomputed for display, not read off
+// the regularized score.
+const EPS_ACTIVITY = 1e-6;
 
 // By-product disposal metadata. The Awesome Sink only accepts SOLIDS on belts, so a
 // fluid's sink-point value is moot — only solids can be sunk. Liquid/gas fuels instead
@@ -119,8 +127,14 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
     else constraints[it] = { min: 0 };
   }
 
+  // Minimization carries the chosen objective plus the tiny activity tie-break in one key
+  // (`_score`), so a free package<->unpackage cycle can never spin. Max-throughput keeps a
+  // pure `_out` objective (cycles there are bounded by supply and add no output anyway).
+  const objKey = '_' + objective;
+  if (!maxItem) for (const k in variables) variables[k]._score = (variables[k][objKey] || 0) + EPS_ACTIVITY;
+
   return {
-    model: { optimize: maxItem ? '_out' : '_' + objective, opType: maxItem ? 'max' : 'min', constraints, variables },
+    model: { optimize: maxItem ? '_out' : '_score', opType: maxItem ? 'max' : 'min', constraints, variables },
     pool, disposal,
   };
 }
@@ -130,6 +144,7 @@ function summarize(res, pool, recipeCost, powerMult, disposal) {
   const net = {};
   let totalPower = 0;
   let totalMachines = 0;
+  let fracMachines = 0; // un-rounded machine-equivalents, for reporting the true objective
   for (const rc of pool) {
     const m = res[rc];
     if (!m || m < 1e-6) continue;
@@ -137,6 +152,7 @@ function summarize(res, pool, recipeCost, powerMult, disposal) {
     const power = m * info.power * powerMult;
     totalPower += power;
     totalMachines += Math.ceil(m - 1e-9);
+    fracMachines += m;
     for (const it of itemsOf(info)) net[it] = (net[it] || 0) + coefOf(info, it, recipeCost) * m;
     recipes.push({ rc, item: info.primary, machines: m, building: info.building, buildingName: info.buildingName, rate: info.primaryRate * m, power });
   }
@@ -159,17 +175,19 @@ function summarize(res, pool, recipeCost, powerMult, disposal) {
       const mw = v * g.power;
       recoveredPower += mw;
       totalMachines += Math.ceil(v - 1e-9);
+      fracMachines += v;
       burned.push({ item: g.fuel, rate: v * g.burn, machines: v, gen: g.gen, genName: g.genName, mw });
     }
   }
   const raw = [];
   const outputs = [];
+  let rawTotal = 0;
   for (const it in net) {
     const v = net[it];
     if (v > 1e-6 && !RES.has(it)) outputs.push({ item: it, rate: v });
-    else if (v < -1e-6) raw.push({ item: it, rate: -v });
+    else if (v < -1e-6) { raw.push({ item: it, rate: -v }); rawTotal += -v; }
   }
-  return { recipes, raw, outputs, net, totalPower, totalMachines, sunk, burned, recoveredPower };
+  return { recipes, raw, outputs, net, totalPower, totalMachines, fracMachines, rawTotal, sunk, burned, recoveredPower };
 }
 
 function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, sinkByproducts = false }) {
@@ -196,7 +214,9 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   const sum = summarize(res, pool, recipeCost, powerMult, disposal);
   sum.feasible = true;
   sum.objective = objective;
-  sum.objectiveValue = res.result;
+  // Report the true objective, not the regularized score (res.result carries the tiny
+  // EPS_ACTIVITY tie-break added in buildModel).
+  sum.objectiveValue = objective === 'raw' ? sum.rawTotal : objective === 'power' ? sum.totalPower : sum.fracMachines;
   return sum;
 }
 

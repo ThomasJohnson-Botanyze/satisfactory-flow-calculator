@@ -272,5 +272,34 @@ const sinkNodes6 = (flow6 ? flow6.nodes : []).filter((n) => n.kind === 'sink');
 check('flow shows a fed Awesome Sink node for the disposed by-product', sinkNodes6.length > 0 && sinkNodes6.every((n) => n.ins.length > 0));
 check('no fluid by-product floats as a green output node', !(flow6 ? flow6.nodes : []).some((n) => n.kind === 'out' && DATA.items[n.id.slice(4)] && DATA.items[n.id.slice(4)].liquid));
 
+// Package <-> Unpackage loop: the planner used to auto-pick "Unpackage Turbofuel" as the
+// default way to PRODUCE Turbofuel (it's the only non-unpackage standard primary recipe),
+// closing a Turbofuel <-> Packaged Turbofuel loop the LP can't source — which surfaced as
+// an "infinite loop between the fuel and packaged fuel recipes". Default selection now
+// skips unpackage recipes and prefers a primary producer, so the chain resolves cleanly.
+console.log('\n### PACKAGE/UNPACKAGE LOOP');
+const dom7 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom7.window; global.document = dom7.window.document; global.localStorage = dom7.window.localStorage;
+global.location = dom7.window.location; global.Event = dom7.window.Event;
+if (!dom7.window.SVGElement.prototype.setPointerCapture) dom7.window.SVGElement.prototype.setPointerCapture = () => {};
+dom7.window.localStorage.clear();
+delete require.cache[require.resolve('../src/renderer.js')];
+require('../src/renderer.js');
+dom7.window.dispatchEvent(new dom7.window.Event('DOMContentLoaded'));
+const d7 = dom7.window.document;
+const fire7 = (n, t) => n.dispatchEvent(new dom7.window.Event(t, { bubbles: true }));
+const setVal7 = (n, v, t = 'input') => { n.value = v; fire7(n, t); };
+const click7 = (n) => n.dispatchEvent(new dom7.window.Event('click', { bubbles: true }));
+click7([...d7.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
+setVal7(d7.getElementById('targetItem'), 'Turbofuel'); setVal7(d7.getElementById('targetRate'), '60');
+const rows7 = d7.querySelectorAll('#prodTable tbody tr').length;
+check('planner makes Turbofuel feasible (not the no-plan empty state)', rows7 > 0 && d7.getElementById('empty').hidden === true);
+click7(d7.getElementById('viewFlow'));
+const flow7 = dom7.window.__lastFlow;
+const machineRcs = (flow7 ? flow7.nodes : []).filter((n) => n.kind === 'machine').map((n) => n.id.slice(4));
+check('no Unpackage recipe auto-selected as a producer', !machineRcs.some((rc) => /unpackage/i.test(rc)));
+check('no Turbofuel<->Packaged Turbofuel cycle (package + unpackage both present)',
+  !(machineRcs.includes('Recipe_PackagedTurboFuel_C') && machineRcs.includes('Recipe_UnpackageTurboFuel_C')));
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

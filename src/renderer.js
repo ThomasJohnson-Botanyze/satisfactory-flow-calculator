@@ -106,20 +106,33 @@ for (const rc in RECIPES) {
     if (idx === 0) (recipesByPrimary[p.item] = recipesByPrimary[p.item] || []).push(rc);
   });
 }
+// Unpackaging a fluid (Packaged Turbofuel -> Turbofuel + Canister) is never the real way
+// to PRODUCE that fluid — it just reverses packaging. Auto-picking it as a default closes
+// a package<->unpackage loop the planner can't source (Turbofuel/Rocket Fuel go infeasible,
+// Heavy Oil Residue spins), which reads as an "infinite loop between the fuel and packaged
+// fuel recipes". So unpackage recipes are excluded from default selection; the user can
+// still choose one explicitly from the recipe dropdown.
+const isUnpackageRecipe = (rc) => /unpackage/i.test(rc) || /^Unpackage/i.test((RECIPES[rc] && RECIPES[rc].name) || '');
 function defaultRecipeClass(item) {
-  // Prefer a standard recipe whose PRIMARY product is this item.
-  const std = (recipesByPrimary[item] || []).filter((rc) => !RECIPES[rc].alternate)[0];
-  if (std) return std;
-  // No standard primary recipe: the item is only ever a by-product (e.g. Dissolved
-  // Silica) or only made by an alternate (Compacted Coal, Polymer Resin). Fall back
-  // to any recipe that produces it so the planner BUILDS it instead of listing it as
-  // an unobtainable raw input. Prefer a standard recipe; otherwise an alternate that
-  // is currently usable (unlocked by the save AND not manually vetoed) — never
-  // auto-select a locked alternate. If none is usable, leave it as raw (null).
-  const producers = recipesByProduct[item] || [];
-  const stdAny = producers.filter((rc) => !RECIPES[rc].alternate)[0];
+  const usable = (rc) => !isUnpackageRecipe(rc);
+  // 1) A standard recipe whose PRIMARY product is this item — the normal case.
+  const stdPrim = (recipesByPrimary[item] || []).find((rc) => !RECIPES[rc].alternate && usable(rc));
+  if (stdPrim) return stdPrim;
+  // 2) An unlocked alternate whose PRIMARY product is this item. Prefer making the item
+  //    on purpose over pulling it out of some unrelated recipe as a by-product: a
+  //    by-product recipe drags in a whole foreign chain and can even close a loop
+  //    (Turbofuel's only non-unpackage producers are alternates, and Compacted Coal is a
+  //    by-product of Rocket Fuel which itself needs Turbofuel — picking by-product
+  //    recipes there makes Turbofuel <-> Compacted Coal spin).
+  const altPrim = (recipesByPrimary[item] || []).find((rc) => usable(rc) && altEnabled(rc));
+  if (altPrim) return altPrim;
+  // 3) Item is only ever a by-product (e.g. Dissolved Silica): fall back to any recipe
+  //    that produces it so the planner BUILDS it instead of listing it as an unobtainable
+  //    raw input. Prefer standard; otherwise an unlocked alternate; else leave raw (null).
+  const producers = (recipesByProduct[item] || []).filter(usable);
+  const stdAny = producers.find((rc) => !RECIPES[rc].alternate);
   if (stdAny) return stdAny;
-  return producers.filter((rc) => altEnabled(rc))[0] || null;
+  return producers.find((rc) => altEnabled(rc)) || null;
 }
 // Is recipe rc usable given the unlocked-from-save filter? Standard recipes are
 // always available; alternates only when no save is loaded (state.unlockedAlts
