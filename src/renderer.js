@@ -1125,13 +1125,24 @@ function layoutFlow(flow) {
 const EDGE_LABEL_TS = [0.5, 0.4, 0.6, 0.45, 0.55, 0.35, 0.65];
 function edgePath(e, byId) {
   const s = byId[e.src], d = byId[e.dst];
-  const sx = s.x + s.w, sy = s.y + s.h / 2, dx = d.x, dy = d.y + d.h / 2;
+  // Smart side selection: attach to the side of each box that faces its partner, by the
+  // boxes' relative position. Target to the right -> exit source-right, enter target-left
+  // (the usual left-to-right flow). Target to the left -> exit source-left, enter target-
+  // right (back-edges / recycle loops, or after a node is dragged). The bezier handle
+  // offset flips sign to match, so the curve bows outward instead of looping back across
+  // the boxes.
+  const goRight = (d.x + d.w / 2) >= (s.x + s.w / 2);
+  const sx = goRight ? s.x + s.w : s.x;
+  const dx = goRight ? d.x : d.x + d.w;
+  const ho = goRight ? 50 : -50; // horizontal control-handle direction
+  const sy = s.y + s.h / 2, dy = d.y + d.h / 2;
+  const c1 = sx + ho, c2 = dx - ho;
   // Place the label at parameter t along the cubic bezier (control points carry the
-  // ±50 horizontal handles). Default mid-curve; drawFlow staggers t to de-clutter.
+  // horizontal handles). Default mid-curve; drawFlow staggers t to de-clutter.
   const t = (e && e._lt != null) ? e._lt : 0.5, mt = 1 - t;
-  const lx = mt * mt * mt * sx + 3 * mt * mt * t * (sx + 50) + 3 * mt * t * t * (dx - 50) + t * t * t * dx;
+  const lx = mt * mt * mt * sx + 3 * mt * mt * t * c1 + 3 * mt * t * t * c2 + t * t * t * dx;
   const ly = mt * mt * mt * sy + 3 * mt * mt * t * sy + 3 * mt * t * t * dy + t * t * t * dy;
-  return { d: `M ${sx} ${sy} C ${sx + 50} ${sy} ${dx - 50} ${dy} ${dx} ${dy}`, lx, ly: ly - 5 };
+  return { d: `M ${sx} ${sy} C ${c1} ${sy} ${c2} ${dy} ${dx} ${dy}`, lx, ly: ly - 5 };
 }
 
 function drawFlow(flow) {
