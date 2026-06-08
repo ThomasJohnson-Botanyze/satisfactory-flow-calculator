@@ -376,6 +376,9 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 }
 .extras-title { font-weight: 700; color: var(--accent); margin-bottom: 6px; }
 .extras-line { color: var(--muted); font-size: 13px; }
+/* warn variant — sole-producer guard (a disabled recipe/building left an item unbuildable) */
+.warn-card { border-left-color: #ffb454; }
+.warn-card .extras-title { color: #ffb454; }
 
 .util-table { width: 100%; margin-top: 8px; }
 .util-table th { background: transparent; padding: 4px 8px; }
@@ -498,6 +501,16 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .alt-row { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text); cursor: pointer; padding: 2px 0; }
 .alt-row:hover { color: var(--accent); }
 .alt-row input { accent-color: var(--accent); flex: none; }
+
+/* collapsible recipe/building veto sections (F1/F4) */
+#bldDisable > summary, #stdDisable > summary {
+  display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none;
+}
+#bldDisable > summary::-webkit-details-marker, #stdDisable > summary::-webkit-details-marker { display: none; }
+#bldDisable > summary::before, #stdDisable > summary::before { content: '▸'; color: var(--muted); font-size: 11px; }
+#bldDisable[open] > summary::before, #stdDisable[open] > summary::before { content: '▾'; }
+.inline-h2 { display: inline; margin: 0 !important; flex: 1; }
+#bldDisable > summary + .hint, #stdDisable > summary + .hint { display: block; margin-top: 8px; }
 
 /* ---------- support button + modal ---------- */
 .btn.support {

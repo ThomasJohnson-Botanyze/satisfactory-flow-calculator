@@ -221,6 +221,35 @@
           <div id="altList" class="alt-list"></div>
         </section>
 
+        <!-- ============ SHARED: BUILDINGS (F4 — turn off a machine type) ============ -->
+        <section class="ctl-group calc-only">
+          <details id="bldDisable">
+            <summary><h2 class="inline-h2">Buildings <small class="badge">machine veto</small></h2><span id="bldCount" class="alt-count"></span></summary>
+            <small class="hint">Untick a building to forbid every recipe it makes (e.g. turn off the Converter) — across Planner, Optimizer & Max.</small>
+            <div class="chip-toolbar">
+              <button id="bldAllOn" class="btn mini ghost" title="Enable every building">Enable all</button>
+              <button id="bldAllOff" class="btn mini ghost" title="Disable every building">Disable all</button>
+            </div>
+            <div id="bldList" class="alt-list"></div>
+          </details>
+        </section>
+
+        <!-- ============ SHARED: STANDARD RECIPES (F1 — veto a base recipe) ============ -->
+        <section class="ctl-group calc-only">
+          <details id="stdDisable">
+            <summary><h2 class="inline-h2">Standard recipes <small class="badge">manual veto</small></h2><span id="stdCount" class="alt-count"></span></summary>
+            <small class="hint">Untick a base recipe to forbid it — e.g. force an item to come only from the alternate you picked.</small>
+            <div class="alt-manage-head">
+              <input id="stdSearch" class="alt-search" placeholder="filter recipes…" autocomplete="off" />
+            </div>
+            <div class="chip-toolbar">
+              <button id="stdAllOn" class="btn mini ghost" title="Enable every standard recipe in the list">Enable all</button>
+              <button id="stdAllOff" class="btn mini ghost" title="Exclude every standard recipe in the list">Disable all</button>
+            </div>
+            <div id="stdList" class="alt-list"></div>
+          </details>
+        </section>
+
         <!-- ============ SHARED: COST MULTIPLIER (game settings) ============ -->
         <section class="ctl-group calc-only">
           <h2>Cost Multiplier <small class="badge">Advanced Game Settings</small></h2>

@@ -99,13 +99,20 @@ const GAME = {
 
 const recipesByProduct = {};
 const recipesByPrimary = {};
+const recipesByBuilding = {};
 for (const rc in RECIPES) {
   const r = RECIPES[rc];
   r.products.forEach((p, idx) => {
     (recipesByProduct[p.item] = recipesByProduct[p.item] || []).push(rc);
     if (idx === 0) (recipesByPrimary[p.item] = recipesByPrimary[p.item] || []).push(rc);
   });
+  (recipesByBuilding[r.building] = recipesByBuilding[r.building] || []).push(rc);
 }
+// Buildings that actually craft recipes, with display name + recipe count — the universe
+// for the F4 "turn off a building" checkboxes. Sorted by name for a stable list.
+const buildingList = Object.keys(recipesByBuilding)
+  .map((b) => ({ b, name: (BUILDINGS[b] && BUILDINGS[b].name) || b, count: recipesByBuilding[b].length }))
+  .sort((a, c) => a.name.localeCompare(c.name));
 // Unpackaging a fluid (Packaged Turbofuel -> Turbofuel + Canister) is never the real way
 // to PRODUCE that fluid — it just reverses packaging. Auto-picking it as a default closes
 // a package<->unpackage loop the planner can't source (Turbofuel/Rocket Fuel go infeasible,
@@ -114,7 +121,9 @@ for (const rc in RECIPES) {
 // still choose one explicitly from the recipe dropdown.
 const isUnpackageRecipe = (rc) => /unpackage/i.test(rc) || /^Unpackage/i.test((RECIPES[rc] && RECIPES[rc].name) || '');
 function defaultRecipeClass(item) {
-  const usable = (rc) => !isUnpackageRecipe(rc);
+  // Skip unpackage recipes (loop bait) and any recipe the user has blocked outright —
+  // a blocked standard recipe falls through to an enabled alternate, else to raw (null).
+  const usable = (rc) => !isUnpackageRecipe(rc) && !recipeBlocked(rc);
   // 1) A standard recipe whose PRIMARY product is this item — the normal case.
   const stdPrim = (recipesByPrimary[item] || []).find((rc) => !RECIPES[rc].alternate && usable(rc));
   if (stdPrim) return stdPrim;
@@ -144,19 +153,53 @@ function altUnlocked(rc) {
   return state.unlockedAlts.includes(rc);
 }
 const ALT_CLASSES = Object.keys(RECIPES).filter((rc) => RECIPES[rc].alternate);
-// Effective gate = unlocked by the save AND not manually excluded by the user.
+// Standard (non-alternate) recipes the user can veto (F1). Unpackage recipes are omitted —
+// they're never auto-selected anyway and would only clutter the list.
+const STD_CLASSES = Object.keys(RECIPES).filter((rc) => !RECIPES[rc].alternate && !isUnpackageRecipe(rc));
+// Recipes blocked outright by the user (F1) plus every recipe of a disabled building
+// (F4, expanded here so the building toggle is a thin layer over the recipe blocklist).
+// A blocked recipe is unavailable to planner/optimizer/max alike. Recomputed per call so
+// it always reflects the active plan's state; cheap (a couple of array scans).
+function blockedRecipeSet() {
+  const set = new Set(state.disabledRecipes || []);
+  for (const b of state.disabledBuildings || []) for (const rc of recipesByBuilding[b] || []) set.add(rc);
+  return set;
+}
+// True when recipe rc is forbidden outright (standalone veto or its building is off).
+const recipeBlocked = (rc) => blockedRecipeSet().has(rc);
+// Effective gate = not blocked AND (for alternates) unlocked by the save AND not vetoed.
 function altEnabled(rc) {
+  if (recipeBlocked(rc)) return false;
   const r = RECIPES[rc];
   if (!r || !r.alternate) return true;
   if ((state.disabledAlts || []).includes(rc)) return false;
   return altUnlocked(rc);
 }
 // Set of alternates the solver may use, or null when there is no restriction at all.
+// (The standard/building blocklist is passed to the solver separately via blockedRecipeSet.)
 function effectiveAltSet() {
   const disabled = state.disabledAlts || [];
   if (!state.unlockedAlts && !disabled.length) return null;
   const base = state.unlockedAlts || ALT_CLASSES;
   return new Set(base.filter((rc) => !disabled.includes(rc)));
+}
+// Sole-producer guard for F1/F4: given item classNames, return those non-raw items that
+// HAD a producer in the game data but now have none enabled because the user blocked
+// every one (standalone recipe veto or a disabled building). These would otherwise turn
+// into a phantom raw input / infeasible plan with no obvious cause — name them so the UI
+// can explain it. Items that are simply raw resources, or were always producerless, are
+// not reported (that's not a blocking-induced problem).
+function blockedOrphans(itemClasses) {
+  const blocked = blockedRecipeSet();
+  const out = [];
+  for (const it of itemClasses) {
+    if (RESOURCES.has(it)) continue;
+    const producers = recipesByProduct[it] || [];
+    if (!producers.length) continue; // never producible — not a blocking issue
+    const anyEnabled = producers.some((rc) => !blocked.has(rc) && altEnabled(rc));
+    if (!anyEnabled) out.push(it);
+  }
+  return out;
 }
 const targetable = Object.keys(recipesByPrimary).map((c) => ({ c, n: itemName(c) })).sort((a, b) => a.n.localeCompare(b.n));
 const resList = [...RESOURCES].map((c) => ({ c, n: itemName(c) })).sort((a, b) => a.n.localeCompare(b.n));
@@ -210,6 +253,13 @@ const defaultState = () => ({
   // Alternate recipe classNames the user has manually excluded from this plan's
   // calculations (independent of unlock status — vetoes even unlocked/optimal ones).
   disabledAlts: [],
+  // Recipe classNames blocked outright — covers STANDARD recipes too (the alternate
+  // veto above can't reach those), so "never use the base recipe for X" is possible.
+  // Back-compat default = [] so plans saved before this feature load unchanged.
+  disabledRecipes: [],
+  // Building classNames whose every recipe is excluded in one action (e.g. turn off the
+  // Converter). A thin layer over disabledRecipes, keyed by building. Default = [].
+  disabledBuildings: [],
   opt: {
     outputs: [{ name: '', rate: 60 }],
     inputs: Object.fromEntries(resList.map((r) => [r.c, { on: true, cap: '' }])),
@@ -1512,6 +1562,22 @@ function showEmpty(msg) {
   $('emptyMsg').textContent = msg;
   $('sumPower').textContent = '—'; $('sumMachines').textContent = '—'; $('sumRaw').textContent = '—';
 }
+// Human message for the F1/F4 sole-producer guard. `verb` is 'build' (a target can't be
+// made) or 'import' (an intermediate quietly fell back to a free input).
+function blockedWarn(items, verb) {
+  const names = items.map(itemName).join(', ');
+  return verb === 'build'
+    ? `Can’t make ${names}: every recipe for it is disabled (recipe veto or a turned-off building). Re-enable a recipe/building for it, or enable an alternate that produces it.`
+    : `Heads up: ${names} has no enabled recipe (all blocked), so it’s being treated as a supplied input rather than built. Re-enable a recipe/building if you meant to produce it.`;
+}
+// A non-blocking warning card for the results area (re-uses the extras-card styling with a
+// warn modifier). Used to surface blocked-orphan intermediates without hiding the plan.
+function warnCard(msg) {
+  const c = el('div', 'extras-card warn-card');
+  c.appendChild(el('div', 'extras-title', '⚠ Disabled recipe / building'));
+  c.appendChild(el('div', 'extras-line', msg));
+  return c;
+}
 function showOutput() { $('empty').hidden = true; $('output').hidden = false; applyView(); }
 
 function renderPlanner() {
@@ -1521,9 +1587,17 @@ function renderPlanner() {
     const hasItem = !!state.targetItem || (state.extraTargets || []).some((o) => nameToClass(o.name));
     return showEmpty(hasItem ? 'Set a rate above 0 for a desired output.' : 'Pick a target item to build a production flow.');
   }
+  // Sole-producer guard: a target whose every recipe is blocked (recipe veto or disabled
+  // building) can't be built at all — say so plainly instead of silently listing it raw.
+  const deadTargets = blockedOrphans(Object.keys(targets));
+  if (deadTargets.length) return showEmpty(blockedWarn(deadTargets, 'build'));
   const res = computePlanner(targets);
   if (!res.feasible) return showEmpty('No feasible plan: the selected recipes can’t balance — a recycle loop that consumes more than it makes. Switch one alternate to break it.');
   present(res, res.targets);
+  // Intermediates whose producers were all blocked silently became free "raw" inputs —
+  // flag them so a removed building doesn't quietly turn a part into an imported item.
+  const orphanRaw = blockedOrphans(res.raw.map((r) => r.item));
+  if (orphanRaw.length) $('modeExtras').appendChild(warnCard(blockedWarn(orphanRaw, 'import')));
   $('sumRaw').textContent = fmt(res.raw.length, 0);
 }
 
@@ -1542,12 +1616,14 @@ function renderOptimize() {
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
   const sink = state.opt.sink !== false;
-  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), sinkByproducts: sink });
+  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink });
   if (!res.feasible) {
     if (res.backup && res.backup.length) {
       const names = res.backup.map(itemName).join(', ');
       return showEmpty(`By-product would back up: ${names}. It’s a fluid with no recipe consuming it, so it can’t be sunk and would stall the line. Enable an alternate recipe that consumes it, or untick “Sink / consume by-products”.`);
     }
+    const dead = blockedOrphans(Object.keys(outputs));
+    if (dead.length) return showEmpty(blockedWarn(dead, 'build'));
     return showEmpty('No feasible recipe set: those outputs cannot be made from the allowed inputs. Enable more resources or alternate recipes.');
   }
   res.surplus = res.outputs.filter((o) => !outputs[o.item]);
@@ -1573,8 +1649,11 @@ function renderMax() {
   let n = 0;
   for (const s of state.max.supply) if (s.item && s.amount > 0) { supply[s.item] = (supply[s.item] || 0) + Number(s.amount); n++; }
   if (!n) return showEmpty('Add at least one available input with an amount.');
-  const res = LP.maxThroughput({ product, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet() });
-  if (!res.feasible) return showEmpty(`Cannot produce ${itemName(product)} from the given inputs.`);
+  const res = LP.maxThroughput({ product, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet() });
+  if (!res.feasible) {
+    if (blockedOrphans([product]).length) return showEmpty(blockedWarn([product], 'build'));
+    return showEmpty(`Cannot produce ${itemName(product)} from the given inputs.`);
+  }
   res.surplus = res.outputs.filter((o) => o.item !== product);
   present(res, { [product]: res.maxOutput });
 
@@ -1794,6 +1873,86 @@ function setAllAlts(on) {
   renderSaveStatus();
   solveAndRender();
 }
+
+// ---------- F1: standard-recipe veto + F4: building veto ----------
+let stdSearch = '';
+// Per-recipe enable/disable list for STANDARD recipes (mirrors the alternate list, minus
+// the save-unlock concept — standard recipes are always "unlocked", only manually vetoed).
+function renderStdList() {
+  const list = $('stdList');
+  if (!list) return;
+  const disabled = state.disabledRecipes || [];
+  const universe = STD_CLASSES
+    .map((rc) => ({ rc, name: RECIPES[rc] ? RECIPES[rc].name : rc }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const cnt = $('stdCount');
+  if (cnt) cnt.textContent = `${universe.filter((u) => !disabled.includes(u.rc)).length}/${universe.length} on`;
+  const q = stdSearch.trim().toLowerCase();
+  const shown = q ? universe.filter((u) => u.name.toLowerCase().includes(q)) : universe;
+  list.innerHTML = '';
+  for (const u of shown) {
+    const row = el('label', 'alt-row');
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = !disabled.includes(u.rc);
+    cb.addEventListener('change', () => {
+      const arr = state.disabledRecipes || (state.disabledRecipes = []);
+      const i = arr.indexOf(u.rc);
+      if (cb.checked) { if (i >= 0) arr.splice(i, 1); }
+      else if (i < 0) arr.push(u.rc);
+      save();
+      renderStdList();
+      solveAndRender();
+    });
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(' ' + u.name));
+    list.appendChild(row);
+  }
+  if (!shown.length) list.appendChild(el('div', 'hint', q ? 'No matches.' : 'No recipes.'));
+}
+function setAllStd(on) {
+  const arr = state.disabledRecipes || (state.disabledRecipes = []);
+  if (on) state.disabledRecipes = arr.filter((rc) => !STD_CLASSES.includes(rc));
+  else { const s = new Set(arr); STD_CLASSES.forEach((rc) => s.add(rc)); state.disabledRecipes = [...s]; }
+  save();
+  renderStdList();
+  solveAndRender();
+}
+// Building on/off checkboxes (F4). Disabling a building drops ALL its recipes from the
+// allowed set in one action — implemented by adding the building to state.disabledBuildings,
+// which blockedRecipeSet() expands into recipe classNames for the solver/planner.
+function renderBldList() {
+  const list = $('bldList');
+  if (!list) return;
+  const off = state.disabledBuildings || [];
+  const cnt = $('bldCount');
+  if (cnt) cnt.textContent = `${buildingList.length - off.filter((b) => recipesByBuilding[b]).length}/${buildingList.length} on`;
+  list.innerHTML = '';
+  for (const b of buildingList) {
+    const row = el('label', 'alt-row');
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = !off.includes(b.b);
+    cb.addEventListener('change', () => {
+      const arr = state.disabledBuildings || (state.disabledBuildings = []);
+      const i = arr.indexOf(b.b);
+      if (cb.checked) { if (i >= 0) arr.splice(i, 1); }
+      else if (i < 0) arr.push(b.b);
+      save();
+      renderBldList();
+      solveAndRender();
+    });
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(` ${b.name} (${b.count})`));
+    list.appendChild(row);
+  }
+}
+function setAllBld(on) {
+  state.disabledBuildings = on ? [] : buildingList.map((b) => b.b);
+  save();
+  renderBldList();
+  solveAndRender();
+}
 function loadFromSelectedSave() {
   const sel = $('saveSelect');
   const st = $('saveStatus');
@@ -1921,6 +2080,8 @@ function applyStateToControls() {
   buildGameSelect('mPower', GAME.power, state.powerMult);
   buildGameSelect('mSpace', GAME.space, state.spaceMult);
   renderSaveStatus();
+  renderStdList();
+  renderBldList();
   $('targetItem').value = state.targetItem ? itemName(state.targetItem) : '';
   $('targetRate').value = state.targetRate;
   $('clock').value = Math.round(state.clock * 100);
@@ -1971,6 +2132,12 @@ function init() {
   $('altSearch').addEventListener('input', (e) => { altSearch = e.target.value; renderSaveStatus(); });
   $('altAllOn').addEventListener('click', () => setAllAlts(true));
   $('altAllOff').addEventListener('click', () => setAllAlts(false));
+  // F1 standard-recipe veto + F4 building veto (shared across all three modes).
+  $('stdSearch').addEventListener('input', (e) => { stdSearch = e.target.value; renderStdList(); });
+  $('stdAllOn').addEventListener('click', () => setAllStd(true));
+  $('stdAllOff').addEventListener('click', () => setAllStd(false));
+  $('bldAllOn').addEventListener('click', () => setAllBld(true));
+  $('bldAllOff').addEventListener('click', () => setAllBld(false));
 
   // resource map
   wireMap();

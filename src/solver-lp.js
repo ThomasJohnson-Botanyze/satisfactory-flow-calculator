@@ -84,18 +84,23 @@ const rawRateOf = (info, cost) => {
 
 // unlockedAlts: optional Set of unlocked alternate recipe classNames (from a save
 // file). null/undefined = no restriction (every alternate allowed, original behavior).
-function recipePool(allowAlternates, unlockedAlts) {
+// blockedRecipes: optional Set of recipe classNames the user has forbidden outright —
+// applies to EVERY recipe (standard or alternate) and to whole buildings (the renderer
+// expands a disabled building into all its recipe classNames before calling). A blocked
+// recipe is simply absent from the pool, so the optimizer/max can never use it.
+function recipePool(allowAlternates, unlockedAlts, blockedRecipes) {
   return Object.keys(RECIPES).filter((rc) => {
+    if (blockedRecipes && blockedRecipes.has(rc)) return false;
     if (!RECIPES[rc].alternate) return true;
     if (!allowAlternates) return false;
     return !unlockedAlts || unlockedAlts.has(rc);
   });
 }
 
-function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, sinkByproducts = false }) {
+function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false }) {
   // Keep an unpackage recipe only when its packaged input is actually supplied; otherwise
   // it can only form a degenerate package<->unpackage loop (see UNPACKAGE note above).
-  const pool = recipePool(allowAlternates, unlockedAlts).filter(
+  const pool = recipePool(allowAlternates, unlockedAlts, blockedRecipes).filter(
     (rc) => !UNPACKAGE.has(rc) || RECIPES[rc].ingredients.some((g) => inputs[g.item] != null)
   );
   const inPlay = new Set();
@@ -202,10 +207,10 @@ function summarize(res, pool, recipeCost, powerMult, disposal) {
   return { recipes, raw, outputs, net, totalPower, totalMachines, fracMachines, rawTotal, sunk, burned, recoveredPower };
 }
 
-function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, sinkByproducts = false }) {
+function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false }) {
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
-  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, sinkByproducts });
+  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts });
   const res = solver.Solve(model);
   if (!res.feasible) {
     // Tell "can't make the outputs at all" apart from "a by-product would back up": if
@@ -213,7 +218,7 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
     // surplus by-product that can't be sunk (a fluid with no consumer) — name it so the
     // UI can point the user at a recipe that consumes it.
     if (sinkByproducts) {
-      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, sinkByproducts: false });
+      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts: false });
       const rres = solver.Solve(relaxed.model);
       if (rres.feasible) {
         const rsum = summarize(rres, relaxed.pool, recipeCost, powerMult, relaxed.disposal);
@@ -232,8 +237,8 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   return sum;
 }
 
-function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null }) {
-  const { model, pool } = buildModel({ inputs: supply, maxItem: product, allowAlternates, recipeCost, powerMult, unlockedAlts });
+function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null }) {
+  const { model, pool } = buildModel({ inputs: supply, maxItem: product, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes });
   const res = solver.Solve(model);
   if (!res.feasible || !(res.result > 1e-6)) return { feasible: false };
   const sum = summarize(res, pool, recipeCost, powerMult);
