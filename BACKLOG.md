@@ -197,3 +197,56 @@ Still open (1):
 - **Problem:** Only `test:ui`; no single `test` entry. Easy to forget to run things.
 - **Fix:** Add `"test"` that runs the UI test plus the new unit tests (T1).
 - **Acceptance:** `npm test` runs the whole suite and exits non-zero on any failure.
+
+---
+
+## Feature requests
+
+Enhancements, not defects — captured from user backlog dump (2026-06-08). `F#` = user's
+list order, for traceability. These are net-new capability, so severity here reads as
+**impact / effort**, not "bug badness."
+
+**Suggested build order:** F1 + F4 together (shared recipe/machine exclusion mechanism,
+small, high daily value) → F5 (extends existing extra-outputs) → F6 (UI declutter) →
+F2 (theming) → F3 (Projects — biggest, do last / its own milestone).
+
+### [F1] Disable standard (non-alternate) recipes to force a specific one 🟠
+- **Where:** veto today is alternates-only — list [src/index.html:199-220](src/index.html:199), `effectiveAltSet` [src/renderer.js:155](src/renderer.js:155); planner producer pick `chosenRecipeClass` [src/renderer.js:319](src/renderer.js:319); LP gets `unlockedAlts` [src/renderer.js:1545](src/renderer.js:1545).
+- **Problem:** You can untick *alternate* recipes, but there's no way to forbid a **standard** recipe. So you can't say "never use the base recipe for X — only the alternate I picked." The optimizer keeps the standard one available.
+- **Fix:** Generalize the alternate veto into a per-recipe **blocklist** covering standard recipes too. Add standard recipes to the manual veto list (or a parallel "standard recipes" disclosure), persist the disabled set in state, and have both `chosenRecipeClass` and the LP's allowed-recipe set honor it. Guard against disabling the *only* producer of a needed item (warn / block).
+- **Acceptance:** Disabling a standard recipe makes the optimizer route around it (or report infeasible if it was the sole producer and no alternate is enabled).
+- **Note:** Same exclusion plumbing as [F4]; build them together.
+
+### [F2] Profile settings — tweak colors / theme 🟡
+- **Where:** CSS custom properties `:root` [src/styles.css:1-12](src/styles.css:1) (`--bg`, `--panel`, `--accent`, …); map palettes (collectables/categories) e.g. [src/renderer.js:882](src/renderer.js:882); flow node colors [src/renderer.js:1470](src/renderer.js:1470).
+- **Problem:** No user-facing color/theme customization. Palette is hard-coded in CSS vars + a few JS color maps.
+- **Fix:** A "Profile / Appearance" settings panel that overrides the `:root` CSS variables (write to `document.documentElement.style` + persist to the durable settings store, same mechanism as plans). Optional: a couple of presets (dark default, high-contrast, light). For JS-drawn colors (map/flow), read from the same vars instead of literals so they follow the theme.
+- **Acceptance:** Changing accent/background in settings updates the UI live and survives restart.
+- **Note:** Natural home is the Settings menu from [F6]. Centralize color literals onto CSS vars first so one knob recolors everything.
+
+### [F3] Link plans into a "Project" — chain one tab's output into another's input 🟠
+- **Where:** plan tabs `#planTabs` [src/index.html:27](src/index.html:27); per-plan state model [src/renderer.js:190-220](src/renderer.js:190); plans persisted to `userData/plans.json` (see memory: plans-persistence-durable); extra inputs `state.opt.extraInputs` [src/renderer.js:1541](src/renderer.js:1541); outputs feed `LP.optimize` [src/renderer.js:1545](src/renderer.js:1545).
+- **Problem:** Plans/tabs are independent. For a multi-factory layout (e.g. one tab makes Fused Modular Frames, another consumes them for Nuclear Pasta) you manually copy the output rate into the next tab's input. No auto-link, no rollup.
+- **Fix:** Introduce a **Project** container grouping several plans. Let a plan's input reference another plan's output ("supplied by: <plan>") so its rate auto-tracks upstream changes. Recompute downstream when upstream solves; detect/break cycles. Optional Project-level rollup (total raw inputs, total power across all member plans).
+- **Acceptance:** Editing the producing plan's rate updates the consuming plan automatically; a Project view shows combined raw/power totals.
+- **Note:** Largest item — its own milestone. Needs a project data model above the current flat plans array, plus migration of existing saved plans into a default project.
+
+### [F4] Turn off specific machines/buildings (e.g. Converter) 🟠
+- **Where:** recipes carry their building (`s.building` [src/renderer.js:510](src/renderer.js:510), `s.buildingName` [src/renderer.js:571](src/renderer.js:571)); same allowed-recipe set as [F1] feeds the LP [src/renderer.js:1545](src/renderer.js:1545).
+- **Problem:** To stop the optimizer using the **Converter** (e.g. it makes iron from anything), you must hunt down and disable every conversion recipe by hand. No single "don't use this machine" switch.
+- **Fix:** A building/machine exclusion list. Map each recipe to its producing building, and when a building is disabled, drop all its recipes from the allowed set (reuse [F1]'s blocklist, keyed by building). Surface as checkboxes of building types in/near the recipe controls. Same single-producer guard as F1.
+- **Acceptance:** Unchecking "Converter" excludes every Converter recipe in one action; plans re-solve without it.
+- **Note:** Thin layer over [F1] — implement F1's recipe blocklist first, then F4 = "disable all recipes for building B."
+
+### [F5] Route an output to the Dimensional Depot / Storage 🟡
+- **Where:** extra outputs `buildPlannerExtra` [src/renderer.js:1636](src/renderer.js:1636) / add handler [src/renderer.js:1957](src/renderer.js:1957); outputs map built for the LP [src/renderer.js:1545](src/renderer.js:1545); by-product destinations already tracked + shown ("Destination" col) [src/index.html:308](src/index.html:308), disposal lines [src/renderer.js:525](src/renderer.js:525).
+- **Problem:** Every output is treated as a line product. No way to mark "also send 1/min Modular Frame + 1/min HMF to the Depot/storage" as a tagged building-supply pull.
+- **Fix:** Add a per-output **destination** tag (`line` default, or `depot`/`storage`). Depot-tagged outputs add to demand exactly like a normal output but render in their own "To Depot / Storage" group in the tables (and a distinct flow terminal, mirroring the existing Awesome-Sink/Fuel-Generator disposal terminals). Pure presentation + grouping on top of the existing extra-output rows.
+- **Acceptance:** Adding a depot-tagged output for an item increases its required production and lists it under "To Depot," separate from primary line outputs.
+
+### [F6] Declutter main screen — drop default Planner tab, move Game Settings into a Settings menu 🟡
+- **Where:** tab nav [src/index.html:32-36](src/index.html:32) (Planner tab [src/index.html:33](src/index.html:33), default `active`); planner panel [src/index.html:42-71](src/index.html:42); game-settings UI on the main screen — Machine tuning (clock/Somersloop) [src/index.html:58-70](src/index.html:58), Cost Multiplier / Advanced Game Settings [src/index.html:226](src/index.html:226), value lists [src/renderer.js:93](src/renderer.js:93).
+- **Problem:** Everyone uses Recipe Optimizer + Max Throughput; the original **Planner** tab is dead weight and shouldn't be the landing tab. Game-settings knobs (cost multiplier, amplification, etc.) clutter the main workspace.
+- **Fix:** Default to the Optimizer tab; either remove the Planner tab or demote it (keep the planner engine for now to avoid breaking saved plans — just hide/de-emphasize the tab). Move game-settings controls into a dedicated **Settings** menu/drawer (alongside [F2] appearance), out of the main panel.
+- **Acceptance:** App opens on Optimizer; main screen has no game-settings clutter; those controls live in a Settings menu and still drive results.
+- **Note:** Saved plans reference planner state — if fully removing the Planner tab, migrate/keep that data path so existing plans don't break (see memory: plans-persistence-durable, packager-prune-blank-app).
