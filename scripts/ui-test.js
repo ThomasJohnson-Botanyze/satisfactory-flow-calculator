@@ -372,78 +372,78 @@ check('flow layout spreads across multiple columns (not a single tall stack)', c
 // landing tab and the theme prefs key start clean.
 console.log('\n### SETTINGS DRAWER + APPEARANCE THEME');
 const THEME_KEY = 'satisfactory-app-prefs-v1';
-const dom8 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
-global.window = dom8.window; global.document = dom8.window.document; global.localStorage = dom8.window.localStorage;
-global.location = dom8.window.location; global.Event = dom8.window.Event;
-if (!dom8.window.SVGElement.prototype.setPointerCapture) dom8.window.SVGElement.prototype.setPointerCapture = () => {};
-dom8.window.localStorage.clear();
+const dom10 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom10.window; global.document = dom10.window.document; global.localStorage = dom10.window.localStorage;
+global.location = dom10.window.location; global.Event = dom10.window.Event;
+if (!dom10.window.SVGElement.prototype.setPointerCapture) dom10.window.SVGElement.prototype.setPointerCapture = () => {};
+dom10.window.localStorage.clear();
 delete require.cache[require.resolve('../src/renderer.js')];
 require('../src/renderer.js');
-dom8.window.dispatchEvent(new dom8.window.Event('DOMContentLoaded'));
-const d8 = dom8.window.document;
-const fire8 = (n, t) => n.dispatchEvent(new dom8.window.Event(t, { bubbles: true }));
-const click8 = (n) => n.dispatchEvent(new dom8.window.Event('click', { bubbles: true }));
-const activeTab8 = () => { const a = d8.querySelector('.tab.active'); return a ? a.dataset.mode : '(none)'; };
+dom10.window.dispatchEvent(new dom10.window.Event('DOMContentLoaded'));
+const d10 = dom10.window.document;
+const fire10 = (n, t) => n.dispatchEvent(new dom10.window.Event(t, { bubbles: true }));
+const click10 = (n) => n.dispatchEvent(new dom10.window.Event('click', { bubbles: true }));
+const activeTab10 = () => { const a = d10.querySelector('.tab.active'); return a ? a.dataset.mode : '(none)'; };
 
 // F6: default landing tab is the Recipe Optimizer (Planner demoted but still present).
-check('default landing tab is Recipe Optimizer', activeTab8() === 'optimize');
-check('optimizer panel visible by default', !d8.querySelector('.mode-panel[data-mode="optimize"]').hidden);
-check('planner panel hidden by default', d8.querySelector('.mode-panel[data-mode="planner"]').hidden === true);
-check('planner tab still present (saved-plan engine intact)', !!d8.querySelector('.tab[data-mode="planner"]'));
-check('planner tab is demoted (secondary class)', d8.querySelector('.tab[data-mode="planner"]').classList.contains('tab-secondary'));
+check('default landing tab is Recipe Optimizer', activeTab10() === 'optimize');
+check('optimizer panel visible by default', !d10.querySelector('.mode-panel[data-mode="optimize"]').hidden);
+check('planner panel hidden by default', d10.querySelector('.mode-panel[data-mode="planner"]').hidden === true);
+check('planner tab still present (saved-plan engine intact)', !!d10.querySelector('.tab[data-mode="planner"]'));
+check('planner tab is demoted (secondary class)', d10.querySelector('.tab[data-mode="planner"]').classList.contains('tab-secondary'));
 
 // F6: game-settings controls moved off the main screen into the drawer.
-const drawer8 = d8.getElementById('settingsDrawer');
-check('settings drawer exists and starts closed', !!drawer8 && drawer8.hidden === true);
-check('machine tuning + cost multipliers live inside the drawer', drawer8.contains(d8.getElementById('clock')) && drawer8.contains(d8.getElementById('mRecipe')));
-click8(d8.getElementById('btnSettings'));
-check('gear button opens the drawer', drawer8.hidden === false && d8.getElementById('settingsBackdrop').hidden === false);
+const drawer10 = d10.getElementById('settingsDrawer');
+check('settings drawer exists and starts closed', !!drawer10 && drawer10.hidden === true);
+check('machine tuning + cost multipliers live inside the drawer', drawer10.contains(d10.getElementById('clock')) && drawer10.contains(d10.getElementById('mRecipe')));
+click10(d10.getElementById('btnSettings'));
+check('gear button opens the drawer', drawer10.hidden === false && d10.getElementById('settingsBackdrop').hidden === false);
 // relocated controls still functional: power multiplier still drives the summary
-const dom8optProd = () => d8.querySelectorAll('#prodTable tbody tr').length;
-click8([...d8.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
-const optRow8 = d8.querySelector('#optOutputs .row');
-optRow8.querySelector('.row-item').value = 'Iron Plate'; fire8(optRow8.querySelector('.row-item'), 'input');
-check('optimizer solves with relocated machine-tuning still wired', dom8optProd() > 0);
-const mPower8 = d8.getElementById('mPower'); mPower8.value = '5'; fire8(mPower8, 'change');
-check('relocated power multiplier still recomputes', d8.getElementById('sumPower').textContent !== '—');
-mPower8.value = '1'; fire8(mPower8, 'change');
+const dom10optProd = () => d10.querySelectorAll('#prodTable tbody tr').length;
+click10([...d10.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+const optRow10 = d10.querySelector('#optOutputs .row');
+optRow10.querySelector('.row-item').value = 'Iron Plate'; fire10(optRow10.querySelector('.row-item'), 'input');
+check('optimizer solves with relocated machine-tuning still wired', dom10optProd() > 0);
+const mPower10 = d10.getElementById('mPower'); mPower10.value = '5'; fire10(mPower10, 'change');
+check('relocated power multiplier still recomputes', d10.getElementById('sumPower').textContent !== '—');
+mPower10.value = '1'; fire10(mPower10, 'change');
 // close paths
-click8(d8.getElementById('settingsClose'));
-check('close button hides the drawer', drawer8.hidden === true);
-click8(d8.getElementById('btnSettings'));
-click8(d8.getElementById('settingsBackdrop'));
-check('backdrop click hides the drawer', drawer8.hidden === true);
+click10(d10.getElementById('settingsClose'));
+check('close button hides the drawer', drawer10.hidden === true);
+click10(d10.getElementById('btnSettings'));
+click10(d10.getElementById('settingsBackdrop'));
+check('backdrop click hides the drawer', drawer10.hidden === true);
 
 // F2: appearance theme override applies live + persists to its own key (not the plan store).
-click8(d8.getElementById('btnSettings'));
-const colorInputs8 = [...d8.querySelectorAll('#themeColors input[type="color"]')];
-check('appearance exposes one colour input per themeable var', colorInputs8.length === 10);
-const accentInput8 = colorInputs8.find((i) => i.title === '--accent');
-check('accent colour input present', !!accentInput8);
-accentInput8.value = '#00ff00'; fire8(accentInput8, 'input');
-check('override applies live to :root', d8.documentElement.style.getPropertyValue('--accent').trim() === '#00ff00');
-const themeStored8 = JSON.parse(dom8.window.localStorage.getItem(THEME_KEY));
-check('theme override persisted to its own prefs key', !!themeStored8 && themeStored8.custom['--accent'] === '#00ff00');
-const plansStore8 = JSON.parse(dom8.window.localStorage.getItem('satisfactory-factory-plans-v1') || 'null');
-check('theme NOT written into the plan store (no blank-app risk)', !plansStore8 || !JSON.stringify(plansStore8).includes('--accent'));
+click10(d10.getElementById('btnSettings'));
+const colorInputs10 = [...d10.querySelectorAll('#themeColors input[type="color"]')];
+check('appearance exposes one colour input per themeable var', colorInputs10.length === 10);
+const accentInput10 = colorInputs10.find((i) => i.title === '--accent');
+check('accent colour input present', !!accentInput10);
+accentInput10.value = '#00ff00'; fire10(accentInput10, 'input');
+check('override applies live to :root', d10.documentElement.style.getPropertyValue('--accent').trim() === '#00ff00');
+const themeStored10 = JSON.parse(dom10.window.localStorage.getItem(THEME_KEY));
+check('theme override persisted to its own prefs key', !!themeStored10 && themeStored10.custom['--accent'] === '#00ff00');
+const plansStore10 = JSON.parse(dom10.window.localStorage.getItem('satisfactory-factory-plans-v1') || 'null');
+check('theme NOT written into the plan store (no blank-app risk)', !plansStore10 || !JSON.stringify(plansStore10).includes('--accent'));
 // preset switch wipes custom + applies the preset palette
-const preset8 = d8.getElementById('themePreset'); preset8.value = 'contrast'; fire8(preset8, 'change');
-check('high-contrast preset applies a different accent', d8.documentElement.style.getPropertyValue('--accent').trim() && d8.documentElement.style.getPropertyValue('--accent').trim() !== '#00ff00');
-check('preset selection persisted', JSON.parse(dom8.window.localStorage.getItem(THEME_KEY)).preset === 'contrast');
+const preset10 = d10.getElementById('themePreset'); preset10.value = 'contrast'; fire10(preset10, 'change');
+check('high-contrast preset applies a different accent', d10.documentElement.style.getPropertyValue('--accent').trim() && d10.documentElement.style.getPropertyValue('--accent').trim() !== '#00ff00');
+check('preset selection persisted', JSON.parse(dom10.window.localStorage.getItem(THEME_KEY)).preset === 'contrast');
 // reset to default clears overrides
-click8(d8.getElementById('themeReset'));
-check('reset clears the inline accent override', d8.documentElement.style.getPropertyValue('--accent') === '');
-check('reset persists the dark default', JSON.parse(dom8.window.localStorage.getItem(THEME_KEY)).preset === 'dark');
+click10(d10.getElementById('themeReset'));
+check('reset clears the inline accent override', d10.documentElement.style.getPropertyValue('--accent') === '');
+check('reset persists the dark default', JSON.parse(dom10.window.localStorage.getItem(THEME_KEY)).preset === 'dark');
 
 // F2: theme persists across a reload (new DOM, same localStorage).
 console.log('\n### THEME RELOAD PERSISTENCE');
-const themeDump8 = (() => { dom8.window.localStorage.setItem(THEME_KEY, JSON.stringify({ preset: 'dark', custom: { '--accent': '#abcdef' } })); return dom8.window.localStorage.getItem(THEME_KEY); })();
+const themeDump10 = (() => { dom10.window.localStorage.setItem(THEME_KEY, JSON.stringify({ preset: 'dark', custom: { '--accent': '#abcdef' } })); return dom10.window.localStorage.getItem(THEME_KEY); })();
 const dom9 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
 global.window = dom9.window; global.document = dom9.window.document; global.localStorage = dom9.window.localStorage;
 global.location = dom9.window.location; global.Event = dom9.window.Event;
 if (!dom9.window.SVGElement.prototype.setPointerCapture) dom9.window.SVGElement.prototype.setPointerCapture = () => {};
 dom9.window.localStorage.clear();
-dom9.window.localStorage.setItem(THEME_KEY, themeDump8);
+dom9.window.localStorage.setItem(THEME_KEY, themeDump10);
 delete require.cache[require.resolve('../src/renderer.js')];
 require('../src/renderer.js');
 dom9.window.dispatchEvent(new dom9.window.Event('DOMContentLoaded'));
