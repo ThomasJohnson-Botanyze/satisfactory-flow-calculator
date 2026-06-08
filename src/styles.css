@@ -227,7 +227,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-.layout { height: calc(100% - 64px - 43px - 45px); }
+.layout { height: calc(100% - 64px - 43px - 45px - 43px); }
 
 /* factory plan bar */
 .plan-bar {
@@ -307,6 +307,28 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 }
 .plan-add:hover { color: var(--accent); border-color: var(--accent); }
 .plan-add.ghost-add { color: var(--muted); }
+
+/* project bar (groups several factory plans) */
+.project-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: #16191f;
+  border-bottom: 1px solid var(--line);
+  min-height: 42px;
+}
+.project-select {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 5px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  max-width: 260px;
+}
+.project-select:focus { outline: none; border-color: var(--accent); }
 
 /* small buttons / selects / checks */
 .btn.mini { padding: 5px 10px; font-size: 12px; }

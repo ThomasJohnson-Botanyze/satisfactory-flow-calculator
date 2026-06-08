@@ -214,13 +214,21 @@ const defaultState = () => ({
     outputs: [{ name: '', rate: 60 }],
     inputs: Object.fromEntries(resList.map((r) => [r.c, { on: true, cap: '' }])),
     // Extra non-resource inputs the optimizer may consume freely (e.g. a supplied
-    // intermediate). Each { name, cap }; blank cap = unlimited.
+    // intermediate). Each { name, cap }; blank cap = unlimited. A row may also carry
+    // an optional { fromPlanId, fromItem } link (Project feature): when set, its cap is
+    // driven by the source plan's recorded net output of fromItem, not the manual cap.
     extraInputs: [],
     objective: 'raw',
     alts: true,
     sink: true, // route surplus by-products to the Awesome Sink / Fuel Generator
   },
+  // Max-supply rows are { item, amount }, optionally + { fromPlanId, fromItem } so the
+  // amount tracks an upstream plan's output (same Project link as opt.extraInputs).
   max: { supply: [{ item: resList[0] ? resList[0].c : '', amount: 120 }], product: '', alts: true },
+  // Net outputs of this plan's last solve (itemClass -> rate/min), recorded so a
+  // downstream plan can link an input to it. Per-plan + persisted so links resolve on
+  // load before any re-solve. Empty by default (no outputs known yet).
+  netOutputs: {},
 });
 let state = defaultState();
 
@@ -229,6 +237,18 @@ let plans = [];
 let activeId = null;
 const newId = () => 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const activePlan = () => plans.find((p) => p.id === activeId);
+
+// ---------- projects (group several plans/factories; one plan's output can feed
+// another plan's input) ----------
+// A project is just { id, name }; plans belong to a project via plan.projectId. The
+// active project filters which plans the plan-bar shows. There is always at least one
+// project and at least one plan (load() guarantees this), so the UI never hits zero.
+let projects = [];
+let activeProjectId = null;
+const newProjId = () => 'prj' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const activeProject = () => projects.find((p) => p.id === activeProjectId);
+const plansInProject = (pid) => plans.filter((p) => p.projectId === pid);
+const activeProjectPlans = () => plansInProject(activeProjectId);
 
 const LS_KEY = 'satisfactory-flow-plan-v3'; // legacy single-plan store (migration source)
 const PLANS_KEY = 'satisfactory-factory-plans-v1'; // multi-plan store
@@ -252,11 +272,35 @@ function mergeState(s) {
 const save = () => {
   try {
     const globals = syncGlobals(); // keep world-level settings identical across plans
-    const payload = JSON.stringify({ plans: plans.map((p) => ({ id: p.id, name: p.name, state: p.state })), activeId, globals });
+    const payload = JSON.stringify({
+      projects: projects.map((p) => ({ id: p.id, name: p.name })),
+      activeProjectId,
+      plans: plans.map((p) => ({ id: p.id, name: p.name, projectId: p.projectId, state: p.state })),
+      activeId,
+      globals,
+    });
     if (api && api.savePlans) api.savePlans(payload); // durable userData/plans.json (survives reinstalls)
     localStorage.setItem(PLANS_KEY, payload);          // fallback + back-compat for older builds
   } catch (e) {}
 };
+// Project back-compat seam. Given whatever `projects`/`activeProjectId` a payload
+// carried (possibly none — the pre-F3 format), guarantee: at least one project exists,
+// activeProjectId points at a real project, and EVERY plan has a projectId pointing at
+// a real project. Orphan plans (no/stale projectId) are adopted into the default
+// project. Net effect: an old plans.json (no `projects`) opens with all its factories
+// intact inside one "Project 1". `loaded` is the raw payload's project list (or null).
+function ensureProjects(loaded, loadedActive) {
+  projects = (Array.isArray(loaded) ? loaded : [])
+    .filter((p) => p && p.id)
+    .map((p) => ({ id: p.id, name: p.name || 'Project' }));
+  if (!projects.length) projects = [{ id: newProjId(), name: 'Project 1' }];
+  const ids = new Set(projects.map((p) => p.id));
+  activeProjectId = ids.has(loadedActive) ? loadedActive : projects[0].id;
+  // Adopt any plan whose projectId is missing or dangling into the active project, so
+  // no plan is ever stranded (and so renderPlanBar always shows the old factories).
+  for (const p of plans) if (!p.projectId || !ids.has(p.projectId)) p.projectId = activeProjectId;
+}
+
 function load() {
   let fromFile = false;
   try {
@@ -266,44 +310,63 @@ function load() {
     const raw = JSON.parse(f || localStorage.getItem(PLANS_KEY));
     fromFile = !!f;
     if (raw && Array.isArray(raw.plans) && raw.plans.length) {
-      plans = raw.plans.map((p) => ({ id: p.id || newId(), name: p.name || 'Factory', state: mergeState(p.state) }));
+      // Keep each plan's saved projectId if present; ensureProjects() reconciles it
+      // against the project list (and synthesizes a default project for pre-F3 saves).
+      plans = raw.plans.map((p) => ({ id: p.id || newId(), name: p.name || 'Factory', projectId: p.projectId || null, state: mergeState(p.state) }));
       activeId = plans.some((p) => p.id === raw.activeId) ? raw.activeId : plans[0].id;
       state = activePlan().state;
+      ensureProjects(raw.projects, raw.activeProjectId);
       // Shared settings carry across plans: use the saved snapshot, else adopt the
       // active plan's values (first run after upgrade) and propagate to the rest.
       if (raw.globals) for (const p of plans) applyGlobals(p.state, raw.globals);
       else syncGlobals();
-      if (!fromFile) save(); // seed the durable file from a localStorage-only (pre-upgrade) store
+      if (!fromFile || !Array.isArray(raw.projects)) save(); // seed the durable file / persist the synthesized project
       return;
     }
   } catch (e) {}
   // migrate legacy single plan, else start with one blank plan
   let legacy = null;
   try { const s = JSON.parse(localStorage.getItem(LS_KEY)); if (s && typeof s === 'object') legacy = mergeState(s); } catch (e) {}
-  plans = [{ id: newId(), name: 'Factory 1', state: legacy || defaultState() }];
+  plans = [{ id: newId(), name: 'Factory 1', projectId: null, state: legacy || defaultState() }];
   activeId = plans[0].id;
   state = plans[0].state;
+  ensureProjects(null, null); // fresh start / legacy single-plan -> one default project
 }
 
 function newPlan(name) {
-  const p = { id: newId(), name: name || `Factory ${plans.length + 1}`, state: defaultState() };
+  // Number within the active project (Factory N), not globally — each project counts
+  // its own factories so a fresh project starts at "Factory 1".
+  const n = activeProjectPlans().length + 1;
+  const p = { id: newId(), name: name || `Factory ${n}`, projectId: activeProjectId, state: defaultState() };
   applyGlobals(p.state, pickGlobals(state)); // inherit shared game-save + cost settings
   plans.push(p);
   switchPlan(p.id);
 }
 function duplicatePlan(id) {
   const src = plans.find((p) => p.id === id) || activePlan();
-  const p = { id: newId(), name: src.name + ' copy', state: mergeState(JSON.parse(JSON.stringify(src.state))) };
+  const p = { id: newId(), name: src.name + ' copy', projectId: src.projectId || activeProjectId, state: mergeState(JSON.parse(JSON.stringify(src.state))) };
   plans.push(p);
   switchPlan(p.id);
 }
 function deletePlan(id) {
   const idx = plans.findIndex((p) => p.id === id);
   if (idx < 0) return;
-  if (plans.length > 1 && typeof confirm === 'function' && !confirm(`Delete plan "${plans[idx].name}"?`)) return;
+  const victim = plans[idx];
+  // Never let a project end up with zero plans: deleting the last plan of a project
+  // would orphan the project tab. Block it (like the global last-plan guard below).
+  if (plansInProject(victim.projectId).length <= 1) {
+    if (typeof alert === 'function') alert('Each project needs at least one plan. Delete the project instead, or add another plan first.');
+    return;
+  }
+  if (plans.length > 1 && typeof confirm === 'function' && !confirm(`Delete plan "${victim.name}"?`)) return;
   plans.splice(idx, 1);
-  if (!plans.length) plans.push({ id: newId(), name: 'Factory 1', state: defaultState() });
-  if (id === activeId) activeId = plans[Math.max(0, idx - 1)].id;
+  if (!plans.length) plans.push({ id: newId(), name: 'Factory 1', projectId: activeProjectId, state: defaultState() });
+  // When the active plan was deleted, fall back to a sibling in the SAME project (the
+  // plan bar only shows that project's plans), else any remaining plan.
+  if (id === activeId) {
+    const sib = plansInProject(victim.projectId)[0] || plans[Math.max(0, idx - 1)] || plans[0];
+    activeId = sib.id;
+  }
   switchPlan(activeId);
 }
 function renamePlan(id, name) { const p = plans.find((x) => x.id === id); if (p && name) { p.name = name; save(); renderPlanBar(); } }
@@ -313,6 +376,147 @@ function switchPlan(id) {
   save();
   renderPlanBar();
   applyStateToControls();
+}
+
+// ---------- project ops ----------
+// Make a new project plus one blank starter plan (so it's never empty), then switch
+// to it. The starter plan inherits the world-level globals like any new plan.
+function newProject(name) {
+  const proj = { id: newProjId(), name: name || `Project ${projects.length + 1}` };
+  projects.push(proj);
+  const p = { id: newId(), name: 'Factory 1', projectId: proj.id, state: defaultState() };
+  applyGlobals(p.state, pickGlobals(state));
+  plans.push(p);
+  switchProject(proj.id);
+}
+function renameProject(id, name) {
+  const proj = projects.find((p) => p.id === id);
+  if (proj && name) { proj.name = name; save(); renderProjectBar(); }
+}
+function deleteProject(id) {
+  if (projects.length <= 1) { // never zero projects
+    if (typeof alert === 'function') alert('You need at least one project.');
+    return;
+  }
+  const proj = projects.find((p) => p.id === id);
+  if (!proj) return;
+  const kids = plansInProject(id);
+  const msg = `Delete project "${proj.name}" and its ${kids.length} plan${kids.length === 1 ? '' : 's'}? This cannot be undone.`;
+  if (typeof confirm === 'function' && !confirm(msg)) return;
+  projects = projects.filter((p) => p.id !== id);
+  plans = plans.filter((p) => p.projectId !== id);
+  // Links may point into the deleted project; strip any now-dangling source refs so a
+  // consumer row falls back to its manual cap instead of resolving against a ghost.
+  pruneDanglingLinks();
+  if (activeProjectId === id) {
+    activeProjectId = projects[0].id;
+    const first = activeProjectPlans()[0];
+    activeId = first ? first.id : (plans[0] && plans[0].id);
+  }
+  state = activePlan() ? activePlan().state : (plans[0] && plans[0].state);
+  save();
+  renderProjectBar();
+  renderPlanBar();
+  applyStateToControls();
+}
+// Activate a project and jump to one of its plans (the current active plan if it
+// belongs there, else the project's first plan).
+function switchProject(id) {
+  if (!projects.some((p) => p.id === id)) return;
+  activeProjectId = id;
+  const cur = activePlan();
+  const target = (cur && cur.projectId === id) ? cur : activeProjectPlans()[0];
+  activeId = target ? target.id : activeId;
+  state = activePlan() ? activePlan().state : state;
+  save();
+  renderProjectBar();
+  renderPlanBar();
+  applyStateToControls();
+}
+// Drop link refs (fromPlanId) that point at a plan that no longer exists, across every
+// plan's opt.extraInputs and max.supply rows. Keeps the row (manual cap) but unlinks it.
+function pruneDanglingLinks() {
+  const ids = new Set(plans.map((p) => p.id));
+  for (const pl of plans) {
+    for (const row of (pl.state.opt && pl.state.opt.extraInputs) || []) {
+      if (row.fromPlanId && !ids.has(row.fromPlanId)) { delete row.fromPlanId; delete row.fromItem; }
+    }
+    for (const row of (pl.state.max && pl.state.max.supply) || []) {
+      if (row.fromPlanId && !ids.has(row.fromPlanId)) { delete row.fromPlanId; delete row.fromItem; }
+    }
+  }
+}
+
+// ---------- linked inputs (Project feature: one plan feeds another) ----------
+// Record a plan's net outputs (itemClass -> rate/min) from its last solve so a
+// downstream plan can link an input to it. The desired-output targets ARE the net
+// outputs available downstream (what the plan is built to make available); surplus
+// by-products are added too. Stored on the plan + persisted so links resolve on load.
+function recordNetOutputs(planObj, targets, res) {
+  if (!planObj) return;
+  const net = {};
+  for (const c in (targets || {})) if (targets[c] > 0) net[c] = (net[c] || 0) + Number(targets[c]);
+  for (const s of (res && res.surplus) || []) if (s.rate > 0) net[s.item] = (net[s.item] || 0) + s.rate;
+  planObj.state.netOutputs = net;
+}
+// Every (item -> rate) a plan currently offers downstream, from its recorded outputs.
+const planNetOutputs = (planObj) => (planObj && planObj.state && planObj.state.netOutputs) || {};
+// All linked rows of a plan (both optimizer extra-inputs and max supply), normalized.
+function planLinkRows(planObj) {
+  const rows = [];
+  const st = planObj && planObj.state;
+  if (!st) return rows;
+  for (const r of (st.opt && st.opt.extraInputs) || []) if (r.fromPlanId) rows.push(r);
+  for (const r of (st.max && st.max.supply) || []) if (r.fromPlanId) rows.push(r);
+  return rows;
+}
+// Directed dependency edges consumer -> source from a plan's links. Used for cycle
+// detection: adding a link makes the consumer depend on the source.
+function dependsOn(planId) {
+  const pl = plans.find((p) => p.id === planId);
+  const out = new Set();
+  for (const r of planLinkRows(pl)) if (r.fromPlanId) out.add(r.fromPlanId);
+  return out;
+}
+// Would linking `consumerId` to take supply from `sourceId` create a cycle? A cycle
+// exists if `sourceId` already (transitively) depends on `consumerId` — i.e. you can
+// reach the consumer by following source's existing links. Self-links are cycles too.
+function linkWouldCycle(consumerId, sourceId) {
+  if (consumerId === sourceId) return true;
+  const seen = new Set();
+  const stack = [sourceId];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (cur === consumerId) return true;
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    for (const dep of dependsOn(cur)) stack.push(dep);
+  }
+  return false;
+}
+// Resolve a linked row's effective cap from its source plan's recorded net output of
+// the linked item. Returns a number (0 if the source makes none / is gone). A row
+// WITHOUT fromPlanId returns null so callers fall back to the manual cap (back-compat).
+function resolveLinkedCap(row) {
+  if (!row || !row.fromPlanId) return null;
+  const src = plans.find((p) => p.id === row.fromPlanId);
+  if (!src) return 0;
+  const item = row.fromItem;
+  return Number(planNetOutputs(src)[item] || 0);
+}
+// Plans whose links draw from `sourceId` (direct consumers) — recompute these when the
+// source re-solves so their linked caps track the fresh upstream numbers.
+function directConsumersOf(sourceId) {
+  return plans.filter((pl) => planLinkRows(pl).some((r) => r.fromPlanId === sourceId));
+}
+// After the active plan solves, refresh any plans that consume its output so their
+// linked caps stay in sync. We re-solve each dependent off-screen (compute only,
+// updating its recorded netOutputs) without disturbing the on-screen active plan.
+// Simple one-hop propagation: the active plan's direct consumers are recomputed.
+function propagateLinks(sourcePlanId) {
+  const consumers = directConsumersOf(sourcePlanId).filter((p) => p.id !== activeId);
+  for (const c of consumers) recomputePlanOutputs(c);
+  if (consumers.length) save();
 }
 
 // ---------- planner solver ----------
@@ -331,13 +535,7 @@ function effectiveClock(rc) {
 }
 // Desired outputs for the Planner: the primary target plus any extra rows.
 // Deliverables are scaled by the space-elevator multiplier, same as the optimizer.
-function plannerTargets() {
-  const t = {};
-  const add = (c, rate) => { if (c && rate > 0) t[c] = (t[c] || 0) + Number(rate) * (isDeliverable(c) ? state.spaceMult : 1); };
-  add(state.targetItem, state.targetRate);
-  for (const o of state.extraTargets || []) add(nameToClass(o.name), o.rate);
-  return t;
-}
+function plannerTargets() { return plannerTargetsFor(state); }
 function computePlanner(targets) {
   const tg = targets || plannerTargets();
   const items = Object.keys(tg);
@@ -1492,9 +1690,91 @@ function exportMapPng() {
   cv.toBlob((blob) => { if (blob) downloadBlob((mapNodes.length || mapBuildings.length ? safeName(state.saveName) + '-' : '') + 'map.png', blob); });
 }
 
+// ---------- pure per-mode compute (no DOM) ----------
+// These take an explicit `state` so a non-active plan can be solved headlessly (for
+// linked-input propagation), and are also the compute half of the render functions.
+// A linked input/supply row (fromPlanId set) draws its cap/amount from the source
+// plan's recorded net output instead of the manual value — back-compat: rows without
+// fromPlanId use their manual cap/amount exactly as before.
+function optAllowedInputs(st) {
+  const allowed = {};
+  for (const r of resList) { const cfg = st.opt.inputs[r.c]; if (cfg && cfg.on) allowed[r.c] = cfg.cap === '' || cfg.cap == null ? Infinity : Number(cfg.cap); }
+  for (const x of st.opt.extraInputs || []) {
+    const c = anyNameToClass(x.name) || (x.fromItem && ITEMS[x.fromItem] ? x.fromItem : '');
+    if (!c) continue;
+    const linked = resolveLinkedCap(x);
+    allowed[c] = linked != null ? linked : (x.cap === '' || x.cap == null ? Infinity : Number(x.cap));
+  }
+  return allowed;
+}
+function maxSupplyMap(st) {
+  const supply = {};
+  for (const s of st.max.supply) {
+    if (!s.item) continue;
+    const linked = resolveLinkedCap(s);
+    const amt = linked != null ? linked : Number(s.amount);
+    if (amt > 0) supply[s.item] = (supply[s.item] || 0) + amt;
+  }
+  return supply;
+}
+function plannerTargetsFor(st) {
+  const t = {};
+  const add = (c, rate) => { if (c && rate > 0) t[c] = (t[c] || 0) + Number(rate) * (isDeliverable(c) ? st.spaceMult : 1); };
+  add(st.targetItem, st.targetRate);
+  for (const o of st.extraTargets || []) add(nameToClass(o.name), o.rate);
+  return t;
+}
+// Compute (not render) a state's result for its current mode. Returns
+// { feasible, res, targets } or { feasible:false }. `res` carries .surplus set.
+function computeStateResult(st) {
+  const saved = state;
+  state = st; // computePlanner/effectiveAltSet read module `state`; swap then restore
+  try {
+    if (st.mode === 'optimize') {
+      const outputs = {};
+      for (const o of st.opt.outputs) { const c = nameToClass(o.name); if (c && o.rate > 0) outputs[c] = (outputs[c] || 0) + Number(o.rate) * (isDeliverable(c) ? st.spaceMult : 1); }
+      const allowedInputs = optAllowedInputs(st);
+      if (!Object.keys(outputs).length || !Object.keys(allowedInputs).length) return { feasible: false };
+      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), sinkByproducts: st.opt.sink !== false });
+      if (!res.feasible) return { feasible: false };
+      res.surplus = res.outputs.filter((o) => !outputs[o.item]);
+      return { feasible: true, res, targets: outputs };
+    }
+    if (st.mode === 'max') {
+      const product = st.max.product;
+      const supply = maxSupplyMap(st);
+      if (!product || !Object.keys(supply).length) return { feasible: false };
+      const res = LP.maxThroughput({ product, supply, allowAlternates: st.max.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet() });
+      if (!res.feasible) return { feasible: false };
+      res.surplus = res.outputs.filter((o) => o.item !== product);
+      return { feasible: true, res, targets: { [product]: res.maxOutput } };
+    }
+    // planner
+    const targets = plannerTargetsFor(st);
+    if (!Object.keys(targets).length) return { feasible: false };
+    const res = computePlanner(targets);
+    if (!res.feasible) return { feasible: false };
+    return { feasible: true, res, targets: res.targets };
+  } finally {
+    state = saved;
+  }
+}
+// Headlessly re-solve a non-active plan and refresh its recorded net outputs so links
+// off it stay current. Never touches the DOM or the on-screen active plan.
+function recomputePlanOutputs(planObj) {
+  if (!planObj) return;
+  const out = computeStateResult(planObj.state);
+  if (out.feasible) recordNetOutputs(planObj, out.targets, out.res);
+  else planObj.state.netOutputs = {}; // infeasible plan offers nothing downstream
+}
+
 // ---------- mode dispatch ----------
 function present(res, targets) {
   lastResult = res; lastTargets = targets;
+  // Record this plan's outputs so downstream plans can link to them, then push fresh
+  // numbers to any plan that consumes this one (one-hop reactive propagation).
+  const ap = activePlan();
+  if (ap) { recordNetOutputs(ap, targets, res); propagateLinks(ap.id); }
   showOutput(); // -> applyView(), which renders the flowchart when that view is active
   renderTables(res);
 }
@@ -1511,6 +1791,10 @@ function showEmpty(msg) {
   $('output').hidden = true;
   $('emptyMsg').textContent = msg;
   $('sumPower').textContent = '—'; $('sumMachines').textContent = '—'; $('sumRaw').textContent = '—';
+  // An empty/infeasible plan produces nothing downstream — clear its recorded outputs
+  // and let consumers re-resolve (their linked caps drop to 0).
+  const ap = activePlan();
+  if (ap && ap.state.netOutputs && Object.keys(ap.state.netOutputs).length) { ap.state.netOutputs = {}; propagateLinks(ap.id); }
 }
 function showOutput() { $('empty').hidden = true; $('output').hidden = false; applyView(); }
 
@@ -1536,9 +1820,7 @@ function renderOptimize() {
     if (c && o.rate > 0) { outputs[c] = (outputs[c] || 0) + Number(o.rate) * (isDeliverable(c) ? state.spaceMult : 1); n++; }
   }
   if (!n) return showEmpty('Add at least one desired output item to optimize.');
-  const allowedInputs = {};
-  for (const r of resList) { const cfg = state.opt.inputs[r.c]; if (cfg && cfg.on) allowedInputs[r.c] = cfg.cap === '' || cfg.cap == null ? Infinity : Number(cfg.cap); }
-  for (const x of state.opt.extraInputs || []) { const c = anyNameToClass(x.name); if (c) allowedInputs[c] = x.cap === '' || x.cap == null ? Infinity : Number(x.cap); }
+  const allowedInputs = optAllowedInputs(state); // honors linked-input caps (Project links)
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
   const sink = state.opt.sink !== false;
@@ -1569,10 +1851,8 @@ function renderMax() {
   $('sumExtraLabel').textContent = 'Inputs at 100%';
   const product = state.max.product;
   if (!product) return showEmpty('Choose a product to maximize.');
-  const supply = {};
-  let n = 0;
-  for (const s of state.max.supply) if (s.item && s.amount > 0) { supply[s.item] = (supply[s.item] || 0) + Number(s.amount); n++; }
-  if (!n) return showEmpty('Add at least one available input with an amount.');
+  const supply = maxSupplyMap(state); // honors linked-supply amounts (Project links)
+  if (!Object.keys(supply).length) return showEmpty('Add at least one available input with an amount.');
   const res = LP.maxThroughput({ product, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet() });
   if (!res.feasible) return showEmpty(`Cannot produce ${itemName(product)} from the given inputs.`);
   res.surplus = res.outputs.filter((o) => o.item !== product);
@@ -1611,6 +1891,53 @@ function buildItemList() {
   const il = $('inputList'); // resources + intermediates, for input/supply pickers
   if (il) { il.innerHTML = ''; for (const it of inputItems) { const o = el('option'); o.value = it.n; il.appendChild(o); } }
 }
+// Build the "link to another plan" <select> for a supply/extra-input row. Options:
+// "Manual" plus one entry per (source plan, item it outputs) pair in the active
+// project that wouldn't form a cycle. Value = "planId|itemClass". Choosing one sets
+// row.fromPlanId/fromItem (and the row's item to match); choosing Manual clears them.
+// `onChange` re-renders + re-solves. Returns the select element.
+function buildLinkSelect(row, setItem, onChange) {
+  const sel = el('select', 'row-link');
+  sel.title = 'Drive this input from another plan’s output';
+  const mk = (val, label, on) => { const o = el('option', null, label); o.value = val; if (on) o.selected = true; sel.appendChild(o); };
+  mk('', 'Manual', !row.fromPlanId);
+  let linkedStillValid = false;
+  for (const src of activeProjectPlans()) {
+    if (src.id === activeId) continue;                 // can't link to self
+    if (linkWouldCycle(activeId, src.id)) continue;     // would create a cycle
+    const outs = planNetOutputs(src);
+    for (const item in outs) {
+      if (!(outs[item] > 0)) continue;
+      const val = src.id + '|' + item;
+      const on = row.fromPlanId === src.id && row.fromItem === item;
+      if (on) linkedStillValid = true;
+      mk(val, `${src.name} → ${itemName(item)} (${fmt(outs[item])}/min)`, on);
+    }
+  }
+  // A previously-saved link whose source no longer offers that item: keep it visible
+  // (resolves to 0) so the user sees it and can re-point or clear it.
+  if (row.fromPlanId && !linkedStillValid) {
+    const src = plans.find((p) => p.id === row.fromPlanId);
+    mk(row.fromPlanId + '|' + row.fromItem, `${src ? src.name : 'missing plan'} → ${itemName(row.fromItem)} (0/min)`, true);
+  }
+  sel.addEventListener('change', () => {
+    const v = sel.value;
+    if (!v) { delete row.fromPlanId; delete row.fromItem; }
+    else {
+      const [pid, item] = v.split('|');
+      // Guard again at apply time in case state shifted since render.
+      if (linkWouldCycle(activeId, pid)) { if (typeof alert === 'function') alert('That link would create a cycle between plans. Pick a different source.'); renderActiveRows(); return; }
+      row.fromPlanId = pid; row.fromItem = item;
+      if (setItem) setItem(item); // make the row's item match what it's fed
+    }
+    save();
+    onChange();
+  });
+  return sel;
+}
+// Re-render whichever per-plan row UIs depend on link state, then re-solve.
+function renderActiveRows() { buildOptExtraInputs(); buildMaxSupply(); solveAndRender(); }
+
 // Optimizer "other inputs": extra non-resource items the optimizer may consume freely.
 function buildOptExtraInputs() {
   const box = $('optExtraInputs');
@@ -1618,13 +1945,17 @@ function buildOptExtraInputs() {
   box.innerHTML = '';
   (state.opt.extraInputs || (state.opt.extraInputs = [])).forEach((x, i) => {
     const row = el('div', 'row');
-    const name = el('input', 'row-item'); name.setAttribute('list', 'inputList'); name.placeholder = 'item…'; name.value = x.name; name.autocomplete = 'off';
-    const cap = el('input', 'row-rate'); cap.type = 'number'; cap.min = '0'; cap.step = 'any'; cap.placeholder = '∞'; cap.value = x.cap;
+    const linked = !!x.fromPlanId;
+    const name = el('input', 'row-item'); name.setAttribute('list', 'inputList'); name.placeholder = 'item…';
+    name.value = linked && x.fromItem ? itemName(x.fromItem) : x.name; name.autocomplete = 'off'; name.disabled = linked;
+    const cap = el('input', 'row-rate'); cap.type = 'number'; cap.min = '0'; cap.step = 'any'; cap.placeholder = '∞';
+    cap.value = linked ? fmt(resolveLinkedCap(x) || 0) : x.cap; cap.disabled = linked; // linked cap is driven by the source plan
+    const link = buildLinkSelect(x, (item) => { x.name = itemName(item); }, renderActiveRows);
     const rm = el('button', 'row-rm', '×'); rm.setAttribute('aria-label', 'Remove'); rm.title = 'Remove';
     name.addEventListener('input', () => { x.name = name.value; save(); solveAndRender(); });
     cap.addEventListener('input', () => { x.cap = cap.value; save(); solveAndRender(); });
     rm.addEventListener('click', () => { state.opt.extraInputs.splice(i, 1); save(); buildOptExtraInputs(); solveAndRender(); });
-    row.append(name, cap, rm);
+    row.append(name, cap, link, rm);
     box.appendChild(row);
   });
 }
@@ -1688,13 +2019,17 @@ function buildMaxSupply() {
   box.innerHTML = '';
   state.max.supply.forEach((s, i) => {
     const row = el('div', 'row');
-    const name = el('input', 'row-item'); name.setAttribute('list', 'inputList'); name.placeholder = 'item…'; name.value = s.item ? itemName(s.item) : ''; name.autocomplete = 'off';
-    const amt = el('input', 'row-rate'); amt.type = 'number'; amt.min = '0'; amt.step = 'any'; amt.value = s.amount;
+    const linked = !!s.fromPlanId;
+    const name = el('input', 'row-item'); name.setAttribute('list', 'inputList'); name.placeholder = 'item…';
+    name.value = linked && s.fromItem ? itemName(s.fromItem) : (s.item ? itemName(s.item) : ''); name.autocomplete = 'off'; name.disabled = linked;
+    const amt = el('input', 'row-rate'); amt.type = 'number'; amt.min = '0'; amt.step = 'any';
+    amt.value = linked ? fmt(resolveLinkedCap(s) || 0) : s.amount; amt.disabled = linked; // linked amount driven by the source plan
+    const link = buildLinkSelect(s, (item) => { s.item = item; }, renderActiveRows);
     const rm = el('button', 'row-rm', '×'); rm.setAttribute('aria-label', 'Remove'); rm.title = 'Remove';
     name.addEventListener('input', () => { s.item = anyNameToClass(name.value); save(); solveAndRender(); });
     amt.addEventListener('input', () => { s.amount = parseFloat(amt.value) || 0; save(); solveAndRender(); });
     rm.addEventListener('click', () => { state.max.supply.splice(i, 1); if (!state.max.supply.length) state.max.supply.push({ item: resList[0].c, amount: 120 }); save(); buildMaxSupply(); solveAndRender(); });
-    row.append(name, amt, rm);
+    row.append(name, amt, link, rm);
     box.appendChild(row);
   });
 }
@@ -1835,7 +2170,10 @@ function setMode(mode) {
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.mode === mode));
   document.querySelectorAll('.mode-panel').forEach((p) => { p.hidden = p.dataset.mode !== mode; });
   const isMap = mode === 'map';
-  document.querySelectorAll('.calc-only').forEach((e) => { e.style.display = isMap ? 'none' : ''; });
+  const isProject = mode === 'project';
+  // Map and Project Totals are not single-plan calculators, so the shared calc-only
+  // panels (alternates / cost / per-plan summary) don't apply to them.
+  document.querySelectorAll('.calc-only').forEach((e) => { e.style.display = (isMap || isProject) ? 'none' : ''; });
   $('btnReset').style.display = mode === 'planner' ? '' : 'none';
   // The alternate list auto-selects recipes only in Optimizer/Max. Planner builds
   // from the per-row dropdowns, so spell that out instead of letting users expect a
@@ -1845,6 +2183,7 @@ function setMode(mode) {
     ? 'Planner uses the recipe picked in each row below. This list filters those row dropdowns; it auto-selects recipes only in Recipe Optimizer & Max Throughput.'
     : 'Untick a recipe to stop the optimizer using it — even if unlocked or optimal.';
   $('mapView').hidden = !isMap;
+  if ($('projectView')) $('projectView').hidden = !isProject;
   save();
   if (isMap) {
     $('empty').hidden = true; $('output').hidden = true;
@@ -1852,15 +2191,34 @@ function setMode(mode) {
     // so reopening the app restores the last map without a manual "Load map" click.
     if (state.saveFile && !mapNodes.length && !mapBuildings.length) loadMapFromSave();
     else renderMap();
+  } else if (isProject) {
+    $('empty').hidden = true; $('output').hidden = true;
+    renderProjectTotals();
   } else solveAndRender();
 }
 
+// ---------- project bar ----------
+function renderProjectBar() {
+  const sel = $('projectSelect');
+  if (!sel) return;
+  sel.innerHTML = '';
+  projects.forEach((p) => {
+    const o = el('option', null, p.name);
+    o.value = p.id;
+    if (p.id === activeProjectId) o.selected = true;
+    sel.appendChild(o);
+  });
+  const del = $('projectDelete');
+  if (del) del.disabled = projects.length <= 1; // never zero projects
+}
+
 // ---------- plan bar ----------
+// Shows only the plans belonging to the active project.
 function renderPlanBar() {
   const box = $('planTabs');
   if (!box) return;
   box.innerHTML = '';
-  plans.forEach((p) => {
+  activeProjectPlans().forEach((p) => {
     const tab = el('div', 'plan-tab' + (p.id === activeId ? ' active' : ''));
     const lab = el('span', 'plan-name', p.name);
     lab.title = 'Click to open · double-click to rename';
@@ -1874,6 +2232,88 @@ function renderPlanBar() {
     tab.appendChild(x);
     box.appendChild(tab);
   });
+}
+
+// ---------- project rollup ----------
+// Sum raw inputs + power + machines across every plan in the active project. Each
+// plan is solved headlessly (compute-only). Linked inputs are netted out so a shared
+// intermediate produced by plan A and consumed by plan B isn't counted as a raw input.
+function computeProjectTotals() {
+  const rows = activeProjectPlans();
+  const rawTotals = {};      // itemClass -> summed raw rate across plans
+  let totalPower = 0, totalMachines = 0;
+  const perPlan = [];
+  // Items that one plan supplies to another within this project (linked sources):
+  // these are produced internally, so drop them from the project's raw totals.
+  const internalSupply = {};
+  for (const pl of rows) {
+    for (const r of planLinkRows(pl)) {
+      const inside = rows.some((s) => s.id === r.fromPlanId);
+      if (inside && r.fromItem) internalSupply[r.fromItem] = true;
+    }
+  }
+  for (const pl of rows) {
+    const out = computeStateResult(pl.state);
+    const info = { name: pl.name, mode: pl.state.mode, ok: out.feasible, power: 0, machines: 0 };
+    if (out.feasible) {
+      const res = out.res;
+      info.power = res.totalPower || 0;
+      info.machines = res.totalMachines || 0;
+      totalPower += info.power;
+      totalMachines += info.machines || 0;
+      for (const r of res.raw || []) {
+        if (internalSupply[r.item]) continue; // supplied by a sibling plan, not raw
+        rawTotals[r.item] = (rawTotals[r.item] || 0) + r.rate;
+      }
+    }
+    perPlan.push(info);
+  }
+  return { rawTotals, totalPower, totalMachines, perPlan, count: rows.length };
+}
+function renderProjectTotals() {
+  const t = computeProjectTotals();
+  const proj = activeProject();
+  if ($('projTitle')) $('projTitle').textContent = proj ? proj.name : '';
+  if ($('projPlanCount')) $('projPlanCount').textContent = fmt(t.count, 0);
+  if ($('projTotalPower')) $('projTotalPower').textContent = fmtPower(t.totalPower);
+  if ($('projTotalMachines')) $('projTotalMachines').textContent = fmt(t.totalMachines, 0);
+  if ($('projPowerBig')) $('projPowerBig').textContent = fmtPower(t.totalPower);
+  if ($('projMachinesBig')) $('projMachinesBig').textContent = fmt(t.totalMachines, 0);
+
+  const rtb = $('projRawTable') && $('projRawTable').querySelector('tbody');
+  if (rtb) {
+    rtb.innerHTML = '';
+    const raws = Object.keys(t.rawTotals).filter((c) => t.rawTotals[c] > 1e-4)
+      .map((c) => ({ item: c, rate: t.rawTotals[c] }))
+      .sort((a, b) => itemName(a.item).localeCompare(itemName(b.item)));
+    raws.forEach((r) => {
+      const tr = el('tr');
+      const td = el('td'); td.appendChild(itemCell(r.item)); tr.appendChild(td);
+      tr.appendChild(el('td', 'num', fmt(r.rate)));
+      rtb.appendChild(tr);
+    });
+    if (!raws.length) rtb.innerHTML = '<tr><td colspan="2" style="color:var(--muted)">No raw inputs yet — set a target in a plan.</td></tr>';
+  }
+  const ptb = $('projPlansTable') && $('projPlansTable').querySelector('tbody');
+  if (ptb) {
+    ptb.innerHTML = '';
+    const MODE_LABEL = { planner: 'Planner', optimize: 'Optimizer', max: 'Max Throughput', map: 'Map', project: 'Project' };
+    t.perPlan.forEach((p) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', null, p.name));
+      tr.appendChild(el('td', null, MODE_LABEL[p.mode] || p.mode));
+      tr.appendChild(el('td', 'num', p.ok ? fmtPower(p.power) : '—'));
+      tr.appendChild(el('td', 'num', p.ok ? fmt(p.machines, 0) : '—'));
+      tr.appendChild(el('td', null, p.ok ? 'solved' : 'no output'));
+      ptb.appendChild(tr);
+    });
+  }
+  if ($('projNote')) {
+    const linked = activeProjectPlans().reduce((a, pl) => a + planLinkRows(pl).length, 0);
+    $('projNote').textContent = linked
+      ? `${linked} linked input${linked === 1 ? '' : 's'} across this project — linked items are netted out of the raw totals above.`
+      : 'Tip: link a plan input to another plan’s output (in the Optimizer’s extra-inputs or Max-supply rows) to chain factories.';
+  }
 }
 function startRename(tab, lab, p) {
   const inp = el('input', 'plan-rename');
@@ -1912,6 +2352,7 @@ function reflectPrimary(except) {
 }
 // Push the active plan's state into every control, then render.
 function applyStateToControls() {
+  renderProjectBar();
   buildPlannerExtra();
   buildOptOutputs();
   buildOptInputs();
@@ -2011,6 +2452,21 @@ function init() {
 
   $('planNew').addEventListener('click', () => newPlan());
   $('planDup').addEventListener('click', () => duplicatePlan(activeId));
+
+  // projects
+  $('projectSelect').addEventListener('change', (e) => switchProject(e.target.value));
+  $('projectNew').addEventListener('click', () => {
+    const name = (typeof prompt === 'function') ? prompt('New project name:', `Project ${projects.length + 1}`) : `Project ${projects.length + 1}`;
+    if (name === null) return; // cancelled
+    newProject((name || '').trim() || `Project ${projects.length + 1}`);
+  });
+  $('projectRename').addEventListener('click', () => {
+    const proj = activeProject(); if (!proj) return;
+    const name = (typeof prompt === 'function') ? prompt('Rename project:', proj.name) : proj.name;
+    if (name === null) return;
+    renameProject(proj.id, (name || '').trim() || proj.name);
+  });
+  $('projectDelete').addEventListener('click', () => deleteProject(activeProjectId));
   $('btnReset').addEventListener('click', () => { state.picks = {}; state.nodeClock = {}; save(); solveAndRender(); });
   $('btnClear').addEventListener('click', () => {
     // More destructive than "Reset recipes": wipes target, picks, extra outputs and
@@ -2030,7 +2486,29 @@ function init() {
     el.addEventListener('click', () => { const u = SUPPORT_LINKS[el.dataset.url]; if (u) openExternal(u); closeSupport(); })
   );
 
+  renderProjectBar();
   renderPlanBar();
+  // Seed every plan's recorded net outputs once on boot (headless solve) so links
+  // resolve to live numbers immediately, even for plans the user hasn't opened yet.
+  for (const p of plans) recomputePlanOutputs(p);
   applyStateToControls();
+}
+
+// Test/debug hook: expose live state + the project/link internals so the headless
+// jsdom test harness can assert on migration, cycle detection and linked caps without
+// a separate module system. Getters return the *current* module vars (which get
+// reassigned by load()/switchProject()). No effect in the real app.
+if (typeof window !== 'undefined') {
+  window.__app = {
+    get plans() { return plans; },
+    get activeId() { return activeId; },
+    get projects() { return projects; },
+    get activeProjectId() { return activeProjectId; },
+    get state() { return state; },
+    activePlan, activeProject, activeProjectPlans, plansInProject,
+    newProject, switchProject, deleteProject, newPlan,
+    linkWouldCycle, resolveLinkedCap, planNetOutputs, recomputePlanOutputs,
+    computeProjectTotals, ensureProjects,
+  };
 }
 window.addEventListener('DOMContentLoaded', init);

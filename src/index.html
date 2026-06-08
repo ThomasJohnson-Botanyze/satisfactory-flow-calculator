@@ -22,6 +22,14 @@
       </div>
     </header>
 
+    <nav class="project-bar">
+      <span class="plan-bar-label">Project</span>
+      <select id="projectSelect" class="project-select" title="Switch project"></select>
+      <button id="projectNew" class="plan-add" title="New project">＋ Project</button>
+      <button id="projectRename" class="plan-add ghost-add" title="Rename current project">✎ Rename</button>
+      <button id="projectDelete" class="plan-add ghost-add" title="Delete current project and its plans">🗑 Delete</button>
+    </nav>
+
     <nav class="plan-bar">
       <span class="plan-bar-label">Factory plans</span>
       <div id="planTabs" class="plan-tabs"></div>
@@ -33,6 +41,7 @@
       <button class="tab active" data-mode="planner">Planner</button>
       <button class="tab" data-mode="optimize">Recipe Optimizer</button>
       <button class="tab" data-mode="max">Max Throughput</button>
+      <button class="tab" data-mode="project">Project Totals</button>
       <button class="tab" data-mode="map">Resource Map</button>
     </nav>
 
@@ -119,6 +128,18 @@
               <input id="maxProduct" list="itemList" placeholder="Type an item…" autocomplete="off" />
             </label>
             <label class="check"><input type="checkbox" id="maxAlts" checked /> Consider alternate recipes</label>
+          </section>
+        </div>
+
+        <!-- ============ PROJECT TOTALS ============ -->
+        <div class="mode-panel" data-mode="project" hidden>
+          <section class="ctl-group">
+            <h2>Project totals</h2>
+            <p class="hint" style="margin-top:-6px">Summed raw inputs and total power across every plan in this project. Switch plans or projects in the bars above.</p>
+            <div class="stat"><span>Plans in project</span><b id="projPlanCount">—</b></div>
+            <div class="stat"><span>Total power</span><b id="projTotalPower">—</b></div>
+            <div class="stat"><span>Production machines</span><b id="projTotalMachines">—</b></div>
+            <small class="hint">Linked inputs (one plan fed by another) are netted out of the project's raw totals so a shared intermediate isn't double-counted.</small>
           </section>
         </div>
 
@@ -322,6 +343,23 @@
             <div id="mapEmpty" class="map-empty">Load a save (left panel) to plot resource nodes and your factory on the map.</div>
             <div id="mapTip" class="map-tip" hidden></div>
           </div>
+        </div>
+
+        <div id="projectView" hidden>
+          <h2 class="block-title">Project totals — <span id="projTitle"></span></h2>
+          <div class="two-col">
+            <div class="stat"><span>Total power</span><b id="projPowerBig">—</b></div>
+            <div class="stat"><span>Production machines</span><b id="projMachinesBig">—</b></div>
+          </div>
+          <h2 class="block-title">Raw resources (all plans)</h2>
+          <div class="table-wrap">
+            <table id="projRawTable"><thead><tr><th>Resource</th><th class="num">Rate / min</th></tr></thead><tbody></tbody></table>
+          </div>
+          <h2 class="block-title">Plans in this project</h2>
+          <div class="table-wrap">
+            <table id="projPlansTable"><thead><tr><th>Plan</th><th>Mode</th><th class="num">Power</th><th class="num">Machines</th><th>Status</th></tr></thead><tbody></tbody></table>
+          </div>
+          <small id="projNote" class="hint"></small>
         </div>
       </section>
     </main>

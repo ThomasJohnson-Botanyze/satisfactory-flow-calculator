@@ -193,5 +193,117 @@ check('foundation = foundation', BM.categoryOf('Build_Foundation_8x4_01_C') === 
 check('buildingMeta always returns a footprint+color', (() => { const m = BM.buildingMeta('Build_TotallyUnknownThing_C'); return m && m.w > 0 && m.d > 0 && /^#/.test(m.color); })());
 check('typePath form resolves via stem', BM.buildingMeta('/Game/X/Build_AssemblerMk1.Build_AssemblerMk1_C').category === 'production');
 
+// ---- projects: migration + linked inputs + cycle detection (F3) ----
+// These exercise renderer.js logic (load/migration, link resolution, cycle guard) via
+// the window.__app test hook. Booted in jsdom so the renderer's DOM wiring runs; we
+// then read the live module state through the hook's getters.
+console.log('\n### PROJECTS (migration / links / cycles)');
+const fs = require('fs');
+const path = require('path');
+const { JSDOM } = require('jsdom');
+const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.html'), 'utf8');
+// Boot a fresh renderer instance with the given pre-seeded localStorage payload (or
+// none). Returns the live window.__app hook. Each call gets its own JSDOM + module
+// instance (the require cache is busted so module-level state resets).
+function bootApp(seed) {
+  const dom = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+  global.window = dom.window; global.document = dom.window.document;
+  global.localStorage = dom.window.localStorage; global.location = dom.window.location;
+  global.Event = dom.window.Event;
+  dom.window.confirm = () => true; global.confirm = dom.window.confirm;
+  dom.window.alert = () => {}; global.alert = dom.window.alert;
+  if (!dom.window.SVGElement.prototype.setPointerCapture) dom.window.SVGElement.prototype.setPointerCapture = () => {};
+  dom.window.localStorage.clear();
+  if (seed != null) dom.window.localStorage.setItem('satisfactory-factory-plans-v1', seed);
+  delete require.cache[require.resolve('../src/renderer.js')];
+  require('../src/renderer.js');
+  dom.window.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
+  return dom.window.__app;
+}
+
+// 1) Migration: an OLD payload (plans + activeId, NO projects) opens with one default
+//    project that contains every plan, and each plan gets that project's id.
+const oldPayload = JSON.stringify({
+  plans: [
+    { id: 'pA', name: 'Alpha', state: { mode: 'planner', targetItem: IronPlate, targetRate: 10 } },
+    { id: 'pB', name: 'Beta', state: { mode: 'planner', targetItem: IronIngot, targetRate: 20 } },
+  ],
+  activeId: 'pB',
+});
+let app = bootApp(oldPayload);
+check('migration: one default project synthesized', app.projects.length === 1);
+check('migration: default project named "Project 1"', app.projects[0].name === 'Project 1');
+check('migration: activeProjectId points at the default project', app.activeProjectId === app.projects[0].id);
+check('migration: all old plans kept', app.plans.length === 2);
+check('migration: every plan adopted into the default project', app.plans.every((p) => p.projectId === app.projects[0].id));
+check('migration: activeId preserved', app.activeId === 'pB');
+
+// 2) A plan that lacks projectId but a project list exists -> adopted into active project.
+const orphanPayload = JSON.stringify({
+  projects: [{ id: 'prjX', name: 'Existing' }],
+  activeProjectId: 'prjX',
+  plans: [{ id: 'pC', name: 'Gamma', state: { mode: 'planner' } }], // no projectId
+  activeId: 'pC',
+});
+app = bootApp(orphanPayload);
+check('orphan plan adopted into the active project', app.plans[0].projectId === 'prjX');
+check('existing project preserved by name', app.projects.length === 1 && app.projects[0].name === 'Existing');
+
+// 3) Fresh start (no payload) still yields one project + one plan.
+app = bootApp(null);
+check('fresh start: one project', app.projects.length === 1);
+check('fresh start: one plan in it', app.activeProjectPlans().length === 1);
+check('fresh start: that plan belongs to the project', app.plans[0].projectId === app.activeProjectId);
+
+// 4) Linked cap resolves from a source plan's recorded net output. Plan A (active) is a
+//    planner making 10 Iron Plate; record its output, then create plan B that links an
+//    optimizer extra-input to A's Iron Plate and assert the resolved cap == A's output.
+app = bootApp(null);
+const planA = app.activePlan();
+planA.state.netOutputs = { [IronPlate]: 30 }; // pretend A solved to 30/min Iron Plate
+app.newPlan('B');                              // B is now active, in the same project
+const planB = app.activePlan();
+const linkedRow = { name: '', cap: '', fromPlanId: planA.id, fromItem: IronPlate };
+planB.state.opt.extraInputs.push(linkedRow);
+check('linked cap resolves to the source plan output (30)', app.resolveLinkedCap(linkedRow) === 30);
+check('an unlinked row resolves to null (falls back to manual cap)', app.resolveLinkedCap({ name: 'x', cap: '5' }) === null);
+// Source produces nothing of that item -> linked cap is 0 (not undefined/NaN).
+planA.state.netOutputs = {};
+check('linked cap is 0 when the source makes none of the item', app.resolveLinkedCap(linkedRow) === 0);
+
+// 5) Cycle detection. B already links to A (consumer B -> source A). Linking A to B
+//    would close the loop and must be refused; linking A to an unrelated plan is fine.
+app = bootApp(null);
+const a = app.activePlan();
+a.state.netOutputs = { [IronPlate]: 60 };
+app.newPlan('B'); const b = app.activePlan();
+b.state.netOutputs = { [IronIngot]: 60 };
+b.state.opt.extraInputs.push({ name: '', cap: '', fromPlanId: a.id, fromItem: IronPlate }); // B <- A
+check('self-link is a cycle', app.linkWouldCycle(a.id, a.id) === true);
+check('A -> B would create a cycle (B already pulls from A)', app.linkWouldCycle(a.id, b.id) === true);
+check('B -> A is fine (already the existing direction, no new cycle)', app.linkWouldCycle(b.id, a.id) === false);
+app.newPlan('C'); const c = app.activePlan();
+check('A -> C (unrelated) is not a cycle', app.linkWouldCycle(a.id, c.id) === false);
+
+// 6) Project rollup nets out an internally-supplied item. A makes Iron Plate from ore;
+//    B (max-throughput) is fed Iron Plate by A and makes Iron Rod. The project's raw
+//    totals should include Iron Ore (A's raw) but NOT Iron Plate (supplied by A).
+app = bootApp(null);
+const ra = app.activePlan();
+ra.state.mode = 'optimize';
+ra.state.opt.outputs = [{ name: 'Iron Plate', rate: 30 }];
+app.recomputePlanOutputs(ra);
+check('rollup setup: A records Iron Plate output', (app.planNetOutputs(ra)[IronPlate] || 0) > 0);
+app.newPlan('B'); const rb = app.activePlan();
+rb.state.mode = 'max';
+rb.state.max.product = cls('Iron Rod');
+rb.state.max.supply = [{ item: IronPlate, amount: 0, fromPlanId: ra.id, fromItem: IronPlate }];
+app.recomputePlanOutputs(rb);
+const totals = app.computeProjectTotals();
+check('rollup: total power summed across plans (> 0)', totals.totalPower > 0);
+check('rollup: counts both plans', totals.count === 2);
+check('rollup: raw includes Iron Ore (A pulls it)', (totals.rawTotals[IronOre] || 0) > 0);
+check('rollup: internally-supplied Iron Plate netted out of raw', !(totals.rawTotals[IronPlate] > 1e-4));
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);
