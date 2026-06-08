@@ -115,13 +115,15 @@ html, body {
 .slider input[type="range"] { width: 100%; accent-color: var(--accent); }
 .hint { display: block; color: var(--muted); font-size: 11px; margin-top: 4px; }
 
-.summary .stat {
+/* Stat line: label left, value right. Used in the main summary and the project
+   totals views — keep the selector unscoped so every .stat lines up the same. */
+.stat {
   display: flex;
   justify-content: space-between;
   padding: 8px 0;
   border-bottom: 1px dashed var(--line);
 }
-.summary .stat b { color: var(--accent); font-variant-numeric: tabular-nums; }
+.stat b { color: var(--accent); font-variant-numeric: tabular-nums; }
 .warn {
   margin-top: 12px;
   background: rgba(239, 83, 80, 0.12);
