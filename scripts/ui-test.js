@@ -66,7 +66,7 @@ setVal(D.getElementById('mPower'), '1', 'change');
 console.log('\n### PER-NODE OVERCLOCK');
 const mw = () => parseFloat(D.getElementById('sumPower').textContent);
 const clockInputs = () => [...D.querySelectorAll('#prodTable tbody .clock-input')];
-check('Clock column present', D.querySelectorAll('#prodTable thead th').length === 7);
+check('Clock + Sloops columns present', D.querySelectorAll('#prodTable thead th').length === 8);
 check('every step has a clock input', clockInputs().length === prodRows());
 const mwBefore = mw();
 setVal(clockInputs()[0], '250', 'change');
@@ -79,6 +79,27 @@ const ocStore2 = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'
 const ocPlan2 = ocStore2.plans.find((p) => p.id === ocStore2.activeId);
 check('typing the global value clears the override', Object.keys(ocPlan2.state.nodeClock || {}).length === 0);
 check('power restored after clearing override', mw() === mwBefore);
+
+// ---- per-node somersloop ----
+console.log('\n### PER-NODE SOMERSLOOP');
+const sloopInputs = () => [...D.querySelectorAll('#prodTable tbody .sloop-input')];
+check('every step has a sloop select', sloopInputs().length === prodRows());
+check('sloop options run 0..max slots', sloopInputs().every((sel) => sel.options.length >= 2));
+const slMwBefore = mw();
+const firstSloop = sloopInputs()[0];
+const maxOpt = firstSloop.options[firstSloop.options.length - 1].value; // fill all slots
+setVal(firstSloop, maxOpt, 'change');
+check('somerslooping one step raises total power', mw() > slMwBefore);
+check('Somersloops-used total reported', parseFloat(D.getElementById('sumSloops').textContent) > 0);
+const slStore = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'));
+const slPlan = slStore.plans.find((p) => p.id === slStore.activeId);
+check('per-node sloop persisted', slPlan.state.nodeSloop && Object.keys(slPlan.state.nodeSloop).length === 1);
+setVal(sloopInputs()[0], '0', 'change'); // back to none → override cleared
+const slStore2 = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'));
+const slPlan2 = slStore2.plans.find((p) => p.id === slStore2.activeId);
+check('setting 0 sloops clears the override', Object.keys(slPlan2.state.nodeSloop || {}).length === 0);
+check('power restored after clearing sloops', mw() === slMwBefore);
+check('Somersloops-used back to 0', parseFloat(D.getElementById('sumSloops').textContent) === 0);
 
 // ---- factory plans ----
 console.log('\n### FACTORY PLANS');

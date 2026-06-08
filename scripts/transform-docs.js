@@ -49,6 +49,10 @@ for (const gname in groups) {
     buildings[cn] = {
       className: cn, name: c.mDisplayName || cn,
       power, exponent: Number(c.mPowerConsumptionExponent) || 1.321929, speed: 1,
+      // Somersloop slots: 1 (Constructor/Smelter), 2 (Assembler/Foundry/Refinery/
+      // Packager), 4 (Manufacturer/Blender/Particle Accel/Converter/Quantum Encoder).
+      // Each installed shard adds 1/slots of output (full slots = 2×).
+      shardSlots: Number(c.mProductionShardSlotSize) || 1,
     };
     MANU.add(cn);
   }

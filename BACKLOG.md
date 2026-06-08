@@ -152,11 +152,9 @@ Built by parallel worktree agents, then integrated one-at-a-time with conflict r
 - **Fix:** Add `aria-label` to icon-only controls.
 - **Acceptance:** Each icon button exposes a label to assistive tech.
 
-### [U6] Somersloop slider allows up to 4× 🟡
-- **Where:** [src/index.html:67](src/index.html:67); applied in `computePlanner` [src/renderer.js:269](src/renderer.js:269).
-- **Problem:** In-game production amplification per building is generally capped at ~2×; allowing 4× overstates output and understates machine count.
-- **Fix:** Cap the slider at 200%, or clearly label it as an idealized approximation.
-- **Acceptance:** Slider max reflects the in-game amplification cap (or carries an explicit caveat).
+### [U6] Somersloop slider allows up to 4× ✅ RESOLVED
+- **Was:** a single global Somersloop slider multiplied *every* machine, and its range allowed unphysical amplification.
+- **Fixed:** removed the global slider entirely; Somersloops are now set **per production step** via a dropdown in the Production steps table (0..the building's shard slots — 1/2/4). Output ×(1+n/slots), power ×that², so it's hard-capped at the in-game 2× by construction. A "Somersloops used" stat + CSV column surface the scarce-resource cost. Slot counts come from `mProductionShardSlotSize` (data build) with a renderer fallback map. See `effectiveSloop`/`sloopCell` in [src/renderer.js](src/renderer.js).
 
 ### [U7] Dead `warnBox` element 🟡
 - **Where:** declared [src/index.html:229](src/index.html:229); only ever hidden [src/renderer.js:1107](src/renderer.js:1107).

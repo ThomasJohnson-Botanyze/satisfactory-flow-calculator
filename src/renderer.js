@@ -326,7 +326,6 @@ const defaultState = () => ({
   // Planner/Optimizer/Max tabs; these extras are Planner-local.
   extraTargets: [],
   clock: 1.0,
-  sloop: 1.0,
   recipeCost: 1,
   powerMult: 1,
   spaceMult: 1,
@@ -334,6 +333,11 @@ const defaultState = () => ({
   // Per-step overclock overrides, keyed by recipe className (rc -> clock fraction).
   // Absent = that step follows the global Overclock slider (state.clock).
   nodeClock: {},
+  // Per-step Somersloop counts, keyed by recipe className (rc -> shards installed
+  // per machine, 0..the building's slot count). Absent/0 = no amplification. There's
+  // no global slider: Somersloops are scarce (~hundred-ish per save), so you sloop
+  // individual steps (the final one, or a material hog), not the whole factory.
+  nodeSloop: {},
   flowPos: {}, // saved flowchart node positions for this plan (nodeId -> {x,y})
   flowView: null, // saved flowchart zoom/pan for this plan ({k, tx, ty}); null = fit on render
   // null = no save loaded → every alternate available (original behavior).
@@ -676,6 +680,33 @@ function effectiveClock(rc) {
   const o = state.nodeClock && state.nodeClock[rc];
   return o != null && isFinite(o) && o > 0 ? o : state.clock;
 }
+// Somersloop amplification is per machine: each building has a fixed number of shard
+// slots (1 Constructor/Smelter, 2 Assembler/Foundry/Refinery/Packager, 4 Manufacturer/
+// Blender/Particle Accel/Converter/Quantum Encoder). Installing n of max slots gives
+// output ×(1 + n/max) (full = 2×) and power ×that². data.json carries shardSlots when
+// rebuilt; this map is the fallback for data.json built before the field existed.
+const SLOOP_SLOTS_FALLBACK = {
+  Build_ConstructorMk1_C: 1, Build_SmelterMk1_C: 1,
+  Build_AssemblerMk1_C: 2, Build_FoundryMk1_C: 2, Build_OilRefinery_C: 2, Build_Packager_C: 2,
+  Build_ManufacturerMk1_C: 4, Build_Blender_C: 4, Build_HadronCollider_C: 4,
+  Build_Converter_C: 4, Build_QuantumEncoder_C: 4,
+};
+function maxSloopSlots(rc) {
+  const r = RECIPES[rc];
+  if (!r) return 1;
+  const b = BUILDINGS[r.building] || {};
+  return b.shardSlots || SLOOP_SLOTS_FALLBACK[r.building] || 1;
+}
+// Shards installed per machine for a step, clamped to [0, max slots].
+function sloopCountOf(rc) {
+  const n = state.nodeSloop && state.nodeSloop[rc];
+  return n ? Math.max(0, Math.min(maxSloopSlots(rc), Math.round(n))) : 0;
+}
+// Output multiplier from a step's installed shards: 1 + n/max  (1×..2×).
+function effectiveSloop(rc) {
+  const max = maxSloopSlots(rc);
+  return max ? 1 + sloopCountOf(rc) / max : 1;
+}
 // Desired outputs for the Planner: the primary target plus any extra rows.
 // Deliverables are scaled by the space-elevator multiplier, same as the optimizer.
 // Every output — whatever its destination — becomes production demand: a Depot /
@@ -735,19 +766,24 @@ function computePlanner(targets) {
 
   let totalPower = 0;
   let totalMachines = 0;
+  let totalSloops = 0; // physical Somersloops the plan consumes (scarce — surfaced as a stat)
   const recipes = sol.recipes.filter((s) => s.machines > 1e-9).map((s) => {
     const r = RECIPES[s.rc];
     const b = BUILDINGS[r.building] || { name: r.building, power: 0, exponent: 1.321929, speed: 1 };
     const item = chosenItemOf[s.rc] || s.item;
     const m100 = s.machines; // machine-equivalents at 100 % clock / 1× sloop
     const ck = effectiveClock(s.rc);
-    const machines = m100 / (ck * state.sloop);
-    const powerPer = b.power * Math.pow(ck, b.exponent) * Math.pow(state.sloop, 2) * state.powerMult;
+    const sl = effectiveSloop(s.rc); // 1×..2× from this step's installed Somersloops
+    const machines = m100 / (ck * sl);
+    const powerPer = b.power * Math.pow(ck, b.exponent) * Math.pow(sl, 2) * state.powerMult;
     const power = machines * powerPer;
     const rate = (LP.RC_INFO[s.rc].out[item] || 0) * m100; // gross /min of the row's item
+    const sloops = sloopCountOf(s.rc);
+    const nMachines = Math.ceil(machines - 1e-9);
     totalPower += power;
-    totalMachines += Math.ceil(machines - 1e-9);
-    return { item, rc: s.rc, machines, building: r.building, buildingName: b.name, rate, power, clock: ck, interactive: true };
+    totalMachines += nMachines;
+    totalSloops += sloops * nMachines; // shards/machine × physical machines in this step
+    return { item, rc: s.rc, machines, building: r.building, buildingName: b.name, rate, power, clock: ck, sloops, maxSloops: maxSloopSlots(s.rc), sloopMult: sl, interactive: true };
   });
   return {
     ok: true,
@@ -757,6 +793,7 @@ function computePlanner(targets) {
     surplus: (sol.outputs || []).filter((o) => tg[o.item] == null && o.rate > 1e-4),
     totalPower,
     totalMachines,
+    totalSloops,
     targets: tg,
   };
 }
@@ -832,6 +869,34 @@ function clockCell(s) {
   td.appendChild(document.createTextNode(' %'));
   return td;
 }
+// Per-step Somersloop editor (Planner rows): a dropdown of shards to install in each
+// machine of this step, 0..the building's slot count. Output ×(1 + n/max), power
+// ×that². The option labels show the resulting multiplier; the tooltip shows how many
+// physical sloops the step eats so the scarce-resource trade-off is visible.
+function sloopCell(s) {
+  const td = el('td', 'num');
+  if (!s.interactive) { td.textContent = '—'; return td; }
+  const max = s.maxSloops || 1;
+  const sel = el('select', 'sloop-input');
+  for (let n = 0; n <= max; n++) {
+    const o = el('option', null, n === 0 ? '—' : `${n} · ${fmt(1 + n / max, 2)}×`);
+    o.value = String(n);
+    sel.appendChild(o);
+  }
+  sel.value = String(s.sloops || 0);
+  const used = Math.ceil(s.machines - 1e-9) * (s.sloops || 0);
+  sel.title = `Somersloops per machine (max ${max}). Output ×(1+n/${max}), power ×that².` +
+    (used ? ` Uses ${used} sloop${used > 1 ? 's' : ''} across this step.` : '');
+  sel.addEventListener('change', () => {
+    const n = Math.max(0, Math.min(max, parseInt(sel.value, 10) || 0));
+    state.nodeSloop = state.nodeSloop || {};
+    if (n === 0) delete state.nodeSloop[s.rc]; else state.nodeSloop[s.rc] = n;
+    save();
+    solveAndRender();
+  });
+  td.appendChild(sel);
+  return td;
+}
 function renderTables(res) {
   const tb = $('prodTable').querySelector('tbody');
   tb.innerHTML = '';
@@ -847,6 +912,7 @@ function renderTables(res) {
     tdM.innerHTML = `<span class="mach-main">${fmt(Math.ceil(s.machines - 1e-9), 0)}×</span> <span class="mach-sub">(${fmt(s.machines)})</span>`;
     tr.appendChild(tdM);
     tr.appendChild(clockCell(s));
+    tr.appendChild(sloopCell(s));
     tr.appendChild(el('td', null, s.buildingName));
     tr.appendChild(el('td', 'num', fmtPower(s.power)));
     tb.appendChild(tr);
@@ -918,6 +984,7 @@ function renderTables(res) {
 
   $('sumPower').textContent = fmtPower(res.totalPower);
   $('sumMachines').textContent = fmt(res.totalMachines, 0);
+  if ($('sumSloops')) $('sumSloops').textContent = fmt(res.totalSloops || 0, 0);
 }
 
 // ---------- flowchart ----------
@@ -943,7 +1010,8 @@ function buildFlow(res, targets) {
     // e.g. "7.5× Assembler" = 7 machines at 100% + 1 at 50%. Append the clock only
     // when this step is overclocked away from the global slider.
     const oc = s.clock != null && Math.abs(s.clock - state.clock) > 1e-9 ? ` · ${Math.round(s.clock * 100)}%` : '';
-    addNode(s._nid, 'machine', title, `${fmt(s.machines)}× ${s.buildingName}${oc}`);
+    const sp = s.sloops ? ` · ${fmt(s.sloopMult, 2)}× sloop` : '';
+    addNode(s._nid, 'machine', title, `${fmt(s.machines)}× ${s.buildingName}${oc}${sp}`);
   });
   res.raw.forEach((r) => addNode('raw|' + r.item, 'raw', itemName(r.item), fmt(r.rate) + '/min'));
   // Index every step under *each* item it produces — primary product AND by-products.
@@ -1811,10 +1879,10 @@ const csvRow = (arr) => arr.map(csvCell).join(',');
 function buildCsv(res) {
   const L = [];
   L.push('Production steps');
-  L.push(csvRow(['Item', 'Recipe', 'Rate/min', 'Machines', 'Clock %', 'Building', 'Power MW']));
+  L.push(csvRow(['Item', 'Recipe', 'Rate/min', 'Machines', 'Clock %', 'Sloops/machine', 'Building', 'Power MW']));
   res.recipes.slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((s) => {
     const r = RECIPES[s.rc];
-    L.push(csvRow([itemName(s.item), r ? r.name : s.rc, fmt(s.rate), Math.ceil(s.machines - 1e-9), Math.round((s.clock || state.clock) * 100), s.buildingName, fmt(s.power, 1)]));
+    L.push(csvRow([itemName(s.item), r ? r.name : s.rc, fmt(s.rate), Math.ceil(s.machines - 1e-9), Math.round((s.clock || state.clock) * 100), s.sloops || 0, s.buildingName, fmt(s.power, 1)]));
   });
   L.push('');
   L.push('Raw resources');
@@ -1834,6 +1902,7 @@ function buildCsv(res) {
   if ((res.burned || []).length) L.push(csvRow(['Power recovered from generators MW', fmt(res.recoveredPower, 1)]));
   L.push(csvRow(['Total power MW', fmt(res.totalPower, 1)]));
   L.push(csvRow(['Production machines', res.totalMachines]));
+  L.push(csvRow(['Somersloops used', res.totalSloops || 0]));
   return L.join('\r\n');
 }
 function exportCsv() {
@@ -2654,7 +2723,6 @@ function startRename(tab, lab, p) {
 // ---------- wiring ----------
 function syncSliderLabels() {
   $('clockOut').textContent = Math.round(state.clock * 100) + '%';
-  $('sloopOut').textContent = fmt(state.sloop, 1) + '×';
 }
 // Carry the primary desired output (item + rate) across the Planner target,
 // the Optimizer's first output row, and the Max product. `except` is the mode
@@ -2693,7 +2761,6 @@ function applyStateToControls() {
   $('targetRate').value = state.targetRate;
   $('targetDest').value = normDest(state.targetDest);
   $('clock').value = Math.round(state.clock * 100);
-  $('sloop').value = Math.round(state.sloop * 100);
   $('rateUnit').textContent = state.targetItem && isFluid(state.targetItem) ? 'm³ / min' : '/ min';
   syncSliderLabels();
   $('optObjective').value = state.opt.objective;
@@ -2783,7 +2850,6 @@ function init() {
   $('targetDest').addEventListener('change', (e) => { state.targetDest = e.target.value; save(); solveAndRender(); });
   $('plannerAddOutput').addEventListener('click', () => { (state.extraTargets || (state.extraTargets = [])).push({ name: '', rate: 60, dest: 'line' }); save(); buildPlannerExtra(); });
   $('clock').addEventListener('input', (e) => { state.clock = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
-  $('sloop').addEventListener('input', (e) => { state.sloop = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
 
   $('mRecipe').addEventListener('change', (e) => { state.recipeCost = Number(e.target.value); save(); solveAndRender(); });
   $('mPower').addEventListener('change', (e) => { state.powerMult = Number(e.target.value); save(); solveAndRender(); });

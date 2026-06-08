@@ -272,6 +272,7 @@
           <div id="maxBanner" class="banner" hidden></div>
           <div class="stat"><span>Total power</span><b id="sumPower">—</b></div>
           <div class="stat"><span>Production machines</span><b id="sumMachines">—</b></div>
+          <div class="stat"><span>Somersloops used</span><b id="sumSloops">—</b></div>
           <div class="stat"><span id="sumExtraLabel">Raw resource types</span><b id="sumRaw">—</b></div>
         </section>
       </aside>
@@ -308,7 +309,7 @@
           <div class="table-wrap">
             <table id="prodTable">
               <thead>
-                <tr><th>Item</th><th>Recipe</th><th class="num">Rate</th><th class="num">Machines</th><th class="num">Clock</th><th>Building</th><th class="num">Power</th></tr>
+                <tr><th>Item</th><th>Recipe</th><th class="num">Rate</th><th class="num">Machines</th><th class="num">Clock</th><th class="num">Sloops</th><th>Building</th><th class="num">Power</th></tr>
               </thead>
               <tbody></tbody>
             </table>
@@ -405,11 +406,7 @@
             <input id="clock" type="range" min="1" max="250" step="1" value="100" />
             <small class="hint">Power per machine scales by clock^1.32</small>
           </div>
-          <div class="slider">
-            <div class="slider-head"><span>Somersloop amplification</span><output id="sloopOut">1.0×</output></div>
-            <input id="sloop" type="range" min="100" max="200" step="50" value="100" />
-            <small class="hint">Output ×amp, power ×amp² · in-game max is 2× (all slots filled)</small>
-          </div>
+          <small class="hint">Somersloops are set per step in the Production steps table (scarce — sloop the final or material-heavy steps, not everything). Output ×(1+n/slots), power ×that².</small>
         </section>
 
         <!-- Cost Multiplier (relocated from the controls sidebar) -->
