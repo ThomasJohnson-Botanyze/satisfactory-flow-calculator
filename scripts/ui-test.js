@@ -229,6 +229,68 @@ click5(d5.querySelector('#plannerExtra .row .row-rm'));
 check('removing extra reverts to single-target rows', rows5() === baseRows5);
 check('Iron Rod gone after removing extra', !itemTexts5().some((t) => /Iron Rod/.test(t)));
 
+// Planner Depot / Storage destination (F5): an output tagged for the Depot must still be
+// produced (its production rows appear), but be grouped under "To Depot / Storage" with
+// a distinct flow terminal — NOT shown as a primary line output. The primary stays a line
+// product. Iron Plate (line) + Iron Rod (depot), both off shared Iron Ingot.
+console.log('\n### PLANNER DEPOT / STORAGE OUTPUT');
+const dom8 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom8.window; global.document = dom8.window.document; global.localStorage = dom8.window.localStorage;
+global.location = dom8.window.location; global.Event = dom8.window.Event;
+if (!dom8.window.SVGElement.prototype.setPointerCapture) dom8.window.SVGElement.prototype.setPointerCapture = () => {};
+dom8.window.localStorage.clear();
+delete require.cache[require.resolve('../src/renderer.js')];
+require('../src/renderer.js');
+dom8.window.dispatchEvent(new dom8.window.Event('DOMContentLoaded'));
+const d8 = dom8.window.document;
+const fire8 = (n, t) => n.dispatchEvent(new dom8.window.Event(t, { bubbles: true }));
+const setVal8 = (n, v, t = 'input') => { n.value = v; fire8(n, t); };
+const click8 = (n) => n.dispatchEvent(new dom8.window.Event('click', { bubbles: true }));
+const itemTexts8 = () => [...d8.querySelectorAll('#prodTable tbody tr td:first-child')].map((td) => td.textContent);
+const depotRowTexts8 = () => [...d8.querySelectorAll('#depotTable tbody tr td:first-child')].map((td) => td.textContent);
+const ironRodRate = () => { // gross /min produced for Iron Rod across all its production rows
+  let r = 0;
+  [...d8.querySelectorAll('#prodTable tbody tr')].forEach((tr) => {
+    if (/Iron Rod/.test(tr.querySelector('td:first-child').textContent)) r += parseFloat(tr.querySelector('td:nth-child(3)').textContent) || 0;
+  });
+  return r;
+};
+click8([...d8.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
+setVal8(d8.getElementById('targetItem'), 'Iron Plate'); setVal8(d8.getElementById('targetRate'), '30');
+const baseRows8 = d8.querySelectorAll('#prodTable tbody tr').length;
+check('primary destination select present, default line', !!d8.getElementById('targetDest') && d8.getElementById('targetDest').value === 'line');
+check('depot group hidden with no depot/storage output', d8.getElementById('depotWrap').hidden === true);
+// add a depot-tagged extra output for Iron Rod at 30/min
+click8(d8.getElementById('plannerAddOutput'));
+const exRow8 = d8.querySelector('#plannerExtra .row');
+check('extra row has a destination select', !!exRow8.querySelector('.row-dest'));
+setVal8(exRow8.querySelector('.row-item'), 'Iron Rod'); setVal8(exRow8.querySelector('.row-rate'), '30');
+const rodRateLineDefault = ironRodRate();
+check('depot-tagged output is still produced (production rows appear)', rodRateLineDefault > 0 && d8.querySelectorAll('#prodTable tbody tr').length > baseRows8);
+// flip its destination to Depot
+setVal8(exRow8.querySelector('.row-dest'), 'depot', 'change');
+check('Depot output keeps the SAME required production (demand unchanged by destination)', Math.abs(ironRodRate() - rodRateLineDefault) < 1e-6);
+check('Iron Rod listed under To Depot / Storage', depotRowTexts8().some((t) => /Iron Rod/.test(t)));
+check('To Depot / Storage group now visible', d8.getElementById('depotWrap').hidden === false);
+check('destination column reads Dimensional Depot', [...d8.querySelectorAll('#depotTable tbody tr')].some((tr) => /Dimensional Depot/.test(tr.textContent)));
+// the persisted plan records the dest tag (back-compat: absent == line)
+const ps8 = JSON.parse(dom8.window.localStorage.getItem('satisfactory-factory-plans-v1'));
+const pp8 = ps8.plans.find((p) => p.id === ps8.activeId);
+check('extra output dest persisted as depot', pp8.state.extraTargets && pp8.state.extraTargets[0].dest === 'depot');
+// flow: Iron Rod becomes a distinct depot terminal, NOT a green line-output node
+click8(d8.getElementById('viewFlow'));
+const flow8 = dom8.window.__lastFlow;
+const ironRodCls8 = Object.keys(DATA.items).find((k) => DATA.items[k].name === 'Iron Rod');
+check('flow shows a fed depot terminal node', !!flow8 && flow8.nodes.some((n) => n.kind === 'depot' && n.ins.length > 0));
+check('only the line product (Iron Plate) is a green output node', flow8.nodes.filter((n) => n.kind === 'out').length === 1);
+check('Iron Rod is NOT a green line output (it routes to the depot)', !flow8.nodes.some((n) => n.id === 'out|' + ironRodCls8));
+check('depot terminal carries the Iron Rod item id', flow8.nodes.some((n) => n.id === 'depot|' + ironRodCls8));
+click8(d8.getElementById('viewTables'));
+// switching to Storage relabels the destination, stays in the same group
+setVal8(exRow8.querySelector('.row-dest'), 'storage', 'change');
+check('storage destination relabels to Storage', [...d8.querySelectorAll('#depotTable tbody tr')].some((tr) => /Storage/.test(tr.textContent)));
+check('storage output still excluded from line outputs', d8.getElementById('depotWrap').hidden === false);
+
 // Optimizer by-product edges: a recipe that eats another recipe's *by-product*
 // (Petroleum Coke consumes the Heavy Oil Residue that standard Plastic emits) must
 // render with a real input edge — not as an orphan machine node while the by-product

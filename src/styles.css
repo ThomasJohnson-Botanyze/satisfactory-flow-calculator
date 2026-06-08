@@ -327,6 +327,17 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 /* dynamic rows */
 .rowlist { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 .row { display: grid; grid-template-columns: 1fr 78px 26px; gap: 6px; }
+.row.row-dst { grid-template-columns: 1fr 64px 78px 26px; }
+.row-dest {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 7px 4px;
+  font-size: 12px;
+  min-width: 0;
+}
+.row-dest:focus { outline: none; border-color: var(--accent); }
 .row-item, .row-rate {
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -463,6 +474,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .node.out rect { fill: #15361f; stroke: var(--good); }
 .node.sink rect { fill: #3a1530; stroke: #c061a4; }
 .node.gen rect { fill: #1c2f3a; stroke: #4aa3c7; }
+.node.depot rect { fill: #2c2740; stroke: #8a7bd8; }
 .node .n-title { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
 .edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }
