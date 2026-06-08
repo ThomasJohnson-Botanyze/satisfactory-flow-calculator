@@ -19,6 +19,7 @@
         <button id="btnSupport" class="btn support" title="Support development on Ko-fi">♥ Support</button>
         <button id="btnReset" class="btn ghost" title="Reset planner recipe choices to standard">Reset recipes</button>
         <button id="btnClear" class="btn ghost" title="Clear saved plan">Clear plan</button>
+        <button id="btnSettings" class="btn ghost icon-btn" title="Settings — appearance, machine tuning, game multipliers" aria-label="Settings">⚙</button>
       </div>
     </header>
 
@@ -30,10 +31,10 @@
     </nav>
 
     <nav class="tabs">
-      <button class="tab active" data-mode="planner">Planner</button>
-      <button class="tab" data-mode="optimize">Recipe Optimizer</button>
+      <button class="tab active" data-mode="optimize">Recipe Optimizer</button>
       <button class="tab" data-mode="max">Max Throughput</button>
       <button class="tab" data-mode="map">Resource Map</button>
+      <button class="tab tab-secondary" data-mode="planner" title="Manual per-recipe planner">Planner</button>
     </nav>
 
     <main class="layout">
@@ -61,20 +62,6 @@
             <div id="plannerExtra" class="rowlist"></div>
             <button id="plannerAddOutput" class="btn mini ghost">+ add output</button>
             <small class="hint">Add more items to build several products in one plan.</small>
-          </section>
-
-          <section class="ctl-group">
-            <h2>Machine tuning</h2>
-            <div class="slider">
-              <div class="slider-head"><span>Overclock</span><output id="clockOut">100%</output></div>
-              <input id="clock" type="range" min="1" max="250" step="1" value="100" />
-              <small class="hint">Power per machine scales by clock^1.32</small>
-            </div>
-            <div class="slider">
-              <div class="slider-head"><span>Somersloop amplification</span><output id="sloopOut">1.0×</output></div>
-              <input id="sloop" type="range" min="100" max="200" step="50" value="100" />
-              <small class="hint">Output ×amp, power ×amp² · in-game max is 2× (all slots filled)</small>
-            </div>
           </section>
         </div>
 
@@ -229,24 +216,6 @@
           <div id="altList" class="alt-list"></div>
         </section>
 
-        <!-- ============ SHARED: COST MULTIPLIER (game settings) ============ -->
-        <section class="ctl-group calc-only">
-          <h2>Cost Multiplier <small class="badge">Advanced Game Settings</small></h2>
-          <label class="fld">
-            <span>Recipe Parts Cost Multiplier</span>
-            <select id="mRecipe" class="sel game-sel"></select>
-          </label>
-          <label class="fld">
-            <span>Power Consumption Multiplier</span>
-            <select id="mPower" class="sel game-sel"></select>
-          </label>
-          <label class="fld">
-            <span>Space Elevator Deliverable Cost Multiplier</span>
-            <select id="mSpace" class="sel game-sel"></select>
-            <small class="hint">Only scales space-elevator part targets (Smart Plating, etc.).</small>
-          </label>
-        </section>
-
         <!-- ============ SHARED SUMMARY ============ -->
         <section class="ctl-group summary calc-only">
           <h2>Summary</h2>
@@ -340,6 +309,61 @@
         </div>
       </section>
     </main>
+
+    <!-- ============ SETTINGS DRAWER ============ -->
+    <div id="settingsBackdrop" class="drawer-backdrop" hidden></div>
+    <aside id="settingsDrawer" class="drawer" hidden role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="drawer-head">
+        <h2 id="settingsTitle">Settings</h2>
+        <button id="settingsClose" class="modal-x" aria-label="Close settings" title="Close">✕</button>
+      </div>
+      <div class="drawer-body">
+        <!-- Appearance / theming -->
+        <section class="ctl-group">
+          <h2>Appearance</h2>
+          <label class="fld">
+            <span>Theme preset</span>
+            <select id="themePreset" class="sel"></select>
+          </label>
+          <div id="themeColors" class="theme-colors"></div>
+          <button id="themeReset" class="btn mini ghost">Reset to default</button>
+          <small class="hint">Colours apply live and are saved on this machine. They recolour the whole app, including the flowchart.</small>
+        </section>
+
+        <!-- Machine tuning (relocated from the Planner panel) -->
+        <section class="ctl-group">
+          <h2>Machine tuning</h2>
+          <div class="slider">
+            <div class="slider-head"><span>Overclock</span><output id="clockOut">100%</output></div>
+            <input id="clock" type="range" min="1" max="250" step="1" value="100" />
+            <small class="hint">Power per machine scales by clock^1.32</small>
+          </div>
+          <div class="slider">
+            <div class="slider-head"><span>Somersloop amplification</span><output id="sloopOut">1.0×</output></div>
+            <input id="sloop" type="range" min="100" max="200" step="50" value="100" />
+            <small class="hint">Output ×amp, power ×amp² · in-game max is 2× (all slots filled)</small>
+          </div>
+        </section>
+
+        <!-- Cost Multiplier (relocated from the controls sidebar) -->
+        <section class="ctl-group">
+          <h2>Cost Multiplier <small class="badge">Advanced Game Settings</small></h2>
+          <label class="fld">
+            <span>Recipe Parts Cost Multiplier</span>
+            <select id="mRecipe" class="sel game-sel"></select>
+          </label>
+          <label class="fld">
+            <span>Power Consumption Multiplier</span>
+            <select id="mPower" class="sel game-sel"></select>
+          </label>
+          <label class="fld">
+            <span>Space Elevator Deliverable Cost Multiplier</span>
+            <select id="mSpace" class="sel game-sel"></select>
+            <small class="hint">Only scales space-elevator part targets (Smart Plating, etc.).</small>
+          </label>
+        </section>
+      </div>
+    </aside>
 
     <!-- ============ SUPPORT MODAL ============ -->
     <div id="supportModal" class="modal-backdrop" hidden>
