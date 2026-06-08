@@ -517,5 +517,131 @@ check('old plan gains empty disabledRecipes default', Array.isArray(oldPlan.stat
 check('old plan gains empty disabledBuildings default', Array.isArray(oldPlan.state.disabledBuildings) && oldPlan.state.disabledBuildings.length === 0);
 check('old plan still produces (no veto applied)', d11.querySelectorAll('#prodTable tbody tr').length > 0);
 
+// ---- PROJECTS (F3): project switcher, plan-bar filtering, linked inputs, rollup ----
+// Helper to boot a fresh renderer + jsdom with an optional pre-seeded payload. Returns
+// { w, d, app, fire, setVal, click }. (Uses dom13+ to avoid the file's existing dom1..7
+// instance names.) prompt is stubbed so newProject() doesn't block.
+function boot13(seed) {
+  const w = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true }).window;
+  global.window = w; global.document = w.document; global.localStorage = w.localStorage;
+  global.location = w.location; global.Event = w.Event;
+  w.confirm = () => true; global.confirm = w.confirm;
+  w.alert = () => {}; global.alert = w.alert;
+  w.prompt = (msg, def) => def; global.prompt = w.prompt;
+  if (!w.SVGElement.prototype.setPointerCapture) w.SVGElement.prototype.setPointerCapture = () => {};
+  w.localStorage.clear();
+  if (seed != null) w.localStorage.setItem('satisfactory-factory-plans-v1', seed);
+  delete require.cache[require.resolve('../src/renderer.js')];
+  require('../src/renderer.js');
+  w.dispatchEvent(new w.Event('DOMContentLoaded'));
+  const d = w.document;
+  const fire = (n, t) => n.dispatchEvent(new w.Event(t, { bubbles: true }));
+  const setVal = (n, v, t = 'input') => { n.value = v; fire(n, t); };
+  const click = (n) => n.dispatchEvent(new w.Event('click', { bubbles: true }));
+  return { w, d, app: w.__app, fire, setVal, click };
+}
+const planNamesIn = (d) => [...d.querySelectorAll('#planTabs .plan-tab .plan-name')].map((s) => s.textContent);
+
+console.log('\n### PROJECTS: SWITCHER + PLAN-BAR FILTER + ROLLUP');
+{
+  const { d, app, setVal, click } = boot13(null);
+  check('starts with one project', app.projects.length === 1 && d.querySelectorAll('#projectSelect option').length === 1);
+  check('plan bar shows the project\'s single plan', planNamesIn(d).length === 1);
+  // Create a second project via the New Project button (prompt stubbed to default name).
+  click(d.getElementById('projectNew'));
+  check('two projects after New Project', app.projects.length === 2);
+  check('project switcher shows two options', d.querySelectorAll('#projectSelect option').length === 2);
+  check('new project is active', app.activeProjectId === app.projects[1].id);
+  check('plan bar filtered to new project (its starter plan only)', planNamesIn(d).length === 1 && planNamesIn(d)[0] === 'Factory 1');
+  // Add a 2nd plan to project 2, then confirm project 1 still shows only its own plan.
+  click(d.getElementById('planNew'));
+  check('project 2 now has 2 plans in the bar', planNamesIn(d).length === 2);
+  const proj1Id = app.projects[0].id;
+  setVal(d.getElementById('projectSelect'), proj1Id, 'change'); // switch back to project 1
+  check('switched back to project 1', app.activeProjectId === proj1Id);
+  check('plan bar filters by project (project 1 shows only its 1 plan)', planNamesIn(d).length === 1);
+  // Persistence of projects.
+  const persisted = JSON.parse(d.defaultView.localStorage.getItem('satisfactory-factory-plans-v1'));
+  check('projects persisted', Array.isArray(persisted.projects) && persisted.projects.length === 2);
+  check('activeProjectId persisted', persisted.activeProjectId === proj1Id);
+  check('each plan persisted with a projectId', persisted.plans.every((p) => !!p.projectId));
+}
+
+console.log('\n### PROJECTS: LINKED INPUT A -> B TRACKS A\'S OUTPUT');
+{
+  const { d, app, setVal, click } = boot13(null);
+  // Plan A: optimizer making 30 Iron Plate from raw. Records its net output.
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  const aOut = d.querySelector('#optOutputs .row');
+  setVal(aOut.querySelector('.row-item'), 'Iron Plate'); setVal(aOut.querySelector('.row-rate'), '30');
+  const planA = app.activePlan();
+  check('A records Iron Plate as a net output', (app.planNetOutputs(planA)[cls('Iron Plate')] || 0) === 30);
+  // Plan B in the same project: add an optimizer extra-input row, link it to A's Plate.
+  click(d.getElementById('planNew'));
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  click(d.getElementById('optAddInput'));
+  let linkSel = d.querySelector('#optExtraInputs .row .row-link');
+  check('extra-input row has a link <select>', !!linkSel);
+  const planB = app.activePlan();
+  // The select offers A's Iron Plate output as "planAId|itemClass".
+  const optVal = planA.id + '|' + cls('Iron Plate');
+  const hasOpt = [...linkSel.options].some((o) => o.value === optVal);
+  check('link select offers A\'s Iron Plate output', hasOpt);
+  setVal(linkSel, optVal, 'change');
+  const bRow = planB.state.opt.extraInputs[0];
+  check('B\'s row linked to A', bRow.fromPlanId === planA.id && bRow.fromItem === cls('Iron Plate'));
+  check('B\'s linked cap tracks A\'s output (30)', app.resolveLinkedCap(bRow) === 30);
+  // Change A's rate to 90; B's resolved cap must follow.
+  setVal(d.getElementById('projectSelect'), app.projects[0].id, 'change'); // back to A's project? same project here
+  // A and B share a project; switch to A by clicking its plan tab.
+  click([...d.querySelectorAll('#planTabs .plan-tab .plan-name')][0]);
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  const aOut2 = d.querySelector('#optOutputs .row');
+  setVal(aOut2.querySelector('.row-rate'), '90');
+  check('A re-solved to 90/min Iron Plate', (app.planNetOutputs(app.activePlan())[cls('Iron Plate')] || 0) === 90);
+  check('B\'s linked cap now tracks A\'s new output (90)', app.resolveLinkedCap(bRow) === 90);
+  // Cycle guard: linking A's input back to B (which already pulls from A) is refused.
+  check('linking A <- B would be a cycle (refused by guard)', app.linkWouldCycle(planA.id, planB.id) === true);
+
+  // Project rollup view: power + raw summed across A and B.
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'project'));
+  check('project view shown', !d.getElementById('projectView').hidden);
+  const powerTxt = d.getElementById('projPowerBig').textContent;
+  check('rollup shows a non-empty total power', /\d/.test(powerTxt));
+  const projRawRows = [...d.querySelectorAll('#projRawTable tbody tr')];
+  const rawItems = projRawRows.map((tr) => tr.querySelector('td') ? tr.querySelector('td').textContent : '');
+  check('rollup raw includes Iron Ore (A\'s raw input)', rawItems.some((t) => /Iron Ore/.test(t)));
+  check('rollup nets out internally-supplied Iron Plate', !rawItems.some((t) => /^.*Iron Plate/.test(t)));
+}
+
+// ---- BACK-COMPAT: a pre-F3 payload (plans, activeId, NO projects) loads into a
+//      default project with every plan intact and rendered. This is the headline
+//      acceptance criterion — old plans.json must never be lost. ----
+console.log('\n### PROJECTS: PRE-F3 BACK-COMPAT LOAD');
+{
+  const preF3 = JSON.stringify({
+    plans: [
+      { id: 'old1', name: 'Smelter', state: { mode: 'planner', targetItem: cls('Iron Ingot'), targetRate: 60 } },
+      { id: 'old2', name: 'Plates', state: { mode: 'planner', targetItem: cls('Iron Plate'), targetRate: 30 } },
+      { id: 'old3', name: 'Rods', state: { mode: 'planner', targetItem: cls('Iron Rod'), targetRate: 15 } },
+    ],
+    activeId: 'old2',
+    globals: { recipeCost: 1, powerMult: 1, spaceMult: 1, unlockedAlts: null, saveName: '', saveFile: '' },
+  });
+  const { d, app } = boot13(preF3);
+  check('pre-F3: a default project was synthesized', app.projects.length === 1);
+  check('pre-F3: default project named "Project 1"', app.projects[0].name === 'Project 1');
+  check('pre-F3: all 3 old plans loaded', app.plans.length === 3);
+  check('pre-F3: every old plan adopted into the default project', app.plans.every((p) => p.projectId === app.projects[0].id));
+  check('pre-F3: activeId preserved (old2)', app.activeId === 'old2');
+  check('pre-F3: all 3 plans render in the plan bar', planNamesIn(d).length === 3);
+  check('pre-F3: plan names intact', JSON.stringify(planNamesIn(d)) === JSON.stringify(['Smelter', 'Plates', 'Rods']));
+  check('pre-F3: active plan target restored (Iron Plate)', d.getElementById('targetItem').value === 'Iron Plate');
+  // And it persists forward in the new shape (projects now written).
+  const reSaved = JSON.parse(d.defaultView.localStorage.getItem('satisfactory-factory-plans-v1'));
+  check('pre-F3: re-saved payload now carries projects', Array.isArray(reSaved.projects) && reSaved.projects.length === 1);
+  check('pre-F3: re-saved plans all have projectId', reSaved.plans.every((p) => p.projectId === reSaved.projects[0].id));
+}
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);
