@@ -185,9 +185,14 @@ const defaultState = () => ({
   view: 'tables',
   targetItem: '',
   targetRate: 60,
+  // Where the primary target's production is routed: 'line' (a normal line product,
+  // the default), 'depot' (Dimensional Depot) or 'storage'. Absent on plans saved
+  // before this existed → treated as 'line' by normDest()/destOf().
+  targetDest: 'line',
   // Additional desired outputs for the Planner, beyond the primary target above.
-  // Each { name, rate }. The primary stays in targetItem/targetRate so it keeps
-  // syncing across the Planner/Optimizer/Max tabs; these extras are Planner-local.
+  // Each { name, rate, dest }. dest is 'line' | 'depot' | 'storage' (absent = 'line').
+  // The primary stays in targetItem/targetRate so it keeps syncing across the
+  // Planner/Optimizer/Max tabs; these extras are Planner-local.
   extraTargets: [],
   clock: 1.0,
   sloop: 1.0,
@@ -331,12 +336,28 @@ function effectiveClock(rc) {
 }
 // Desired outputs for the Planner: the primary target plus any extra rows.
 // Deliverables are scaled by the space-elevator multiplier, same as the optimizer.
+// Every output — whatever its destination — becomes production demand: a Depot /
+// Storage pull still has to be built. Destination only changes how it's grouped on
+// render (see destOf), it does not change the solver's demand.
 function plannerTargets() {
   const t = {};
   const add = (c, rate) => { if (c && rate > 0) t[c] = (t[c] || 0) + Number(rate) * (isDeliverable(c) ? state.spaceMult : 1); };
   add(state.targetItem, state.targetRate);
   for (const o of state.extraTargets || []) add(nameToClass(o.name), o.rate);
   return t;
+}
+// Each desired-output row's destination, normalised: absent / unknown → 'line'.
+const normDest = (d) => (d === 'depot' || d === 'storage' ? d : 'line');
+// Map item class -> destination for the current Planner outputs. When the same item
+// appears on multiple rows, 'line' wins (it stays a primary line product); otherwise
+// the (single) non-line destination applies. Items with no matching output default
+// to 'line', so callers can treat a missing entry as a normal line product.
+function destOf() {
+  const d = {};
+  const note = (c, dest) => { if (!c) return; const v = normDest(dest); if (d[c] === 'line') return; if (v === 'line' || d[c] == null) d[c] = v; };
+  note(nameToClass(state.targetItem) || state.targetItem, state.targetDest);
+  for (const o of state.extraTargets || []) note(nameToClass(o.name), o.dest);
+  return d;
 }
 function computePlanner(targets) {
   const tg = targets || plannerTargets();
@@ -541,6 +562,23 @@ function renderTables(res) {
     ytb.appendChild(tr);
   });
 
+  // Depot / Storage group: outputs the user tagged for the Dimensional Depot or storage
+  // (still real production — see renderPlanner), kept separate from primary line outputs.
+  const depot = res.depot || [];
+  const dwrap = $('depotWrap');
+  if (dwrap) {
+    dwrap.hidden = depot.length === 0;
+    const dtb = $('depotTable').querySelector('tbody');
+    dtb.innerHTML = '';
+    depot.slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((s) => {
+      const tr = el('tr');
+      const td = el('td'); td.appendChild(itemCell(s.item)); tr.appendChild(td);
+      tr.appendChild(el('td', 'num', fmt(s.rate)));
+      tr.appendChild(el('td', null, s.dest === 'storage' ? 'Storage' : 'Dimensional Depot'));
+      dtb.appendChild(tr);
+    });
+  }
+
   $('sumPower').textContent = fmtPower(res.totalPower);
   $('sumMachines').textContent = fmt(res.totalMachines, 0);
 }
@@ -624,6 +662,11 @@ function buildFlow(res, targets) {
   });
   drawDisposal(res.sunk, 'sink|', 'sink', () => 'Awesome Sink', (d) => `${itemName(d.item)} · ${fmt(d.points, 0)} pts/min`);
   drawDisposal(res.burned, 'gen|', 'gen', (d) => d.genName || 'Fuel Generator', (d) => `${itemName(d.item)} · ${fmt(d.mw, 0)} MW`);
+  // Depot / Storage terminals: outputs the user tagged to be pulled into the
+  // Dimensional Depot or stashed in storage. Built like the disposal terminals (one
+  // fed node per item) but a destination, not a sink — the production is still real.
+  drawDisposal(res.depot, 'depot|', 'depot', (d) => (d.dest === 'storage' ? 'Storage' : 'Dimensional Depot'),
+    (d) => `${itemName(d.item)} · ${fmt(d.rate)}/min`);
   return { nodes, byId, edges };
 }
 
@@ -1468,6 +1511,7 @@ const FLOW_EXPORT_CSS =
   '.edge-label{fill:#c2cad8;font:11px "Segoe UI",system-ui,sans-serif;paint-order:stroke;stroke:#11141a;stroke-width:4px}' +
   '.node rect{stroke-width:1.5}' +
   '.node.raw rect{fill:#2b313c;stroke:#5b6675}.node.machine rect{fill:#3a2a12;stroke:#f9a825}.node.out rect{fill:#15361f;stroke:#66bb6a}' +
+  '.node.sink rect{fill:#3a1530;stroke:#c061a4}.node.gen rect{fill:#1c2f3a;stroke:#4aa3c7}.node.depot rect{fill:#2c2740;stroke:#8a7bd8}' +
   '.node .n-title{fill:#e7eaf0;font:700 12px "Segoe UI",system-ui,sans-serif}.node .n-sub{fill:#9aa3b2;font:10px "Segoe UI",system-ui,sans-serif}';
 function exportFlowPng() {
   if (!currentFlow) return;
@@ -1523,7 +1567,19 @@ function renderPlanner() {
   }
   const res = computePlanner(targets);
   if (!res.feasible) return showEmpty('No feasible plan: the selected recipes can’t balance — a recycle loop that consumes more than it makes. Switch one alternate to break it.');
-  present(res, res.targets);
+  // Split the desired outputs by destination. Depot / Storage outputs stay full
+  // production demand (already in res.targets), but are pulled out of the line-output
+  // set so they render in their own group + a distinct flow terminal, not as primary
+  // line products. lineTargets is what feeds the normal green output nodes.
+  const dest = destOf();
+  const lineTargets = {};
+  res.depot = [];
+  for (const item in res.targets) {
+    const d = dest[item] || 'line';
+    if (d === 'line') lineTargets[item] = res.targets[item];
+    else res.depot.push({ item, rate: res.targets[item], dest: d });
+  }
+  present(res, lineTargets);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
 }
 
@@ -1633,6 +1689,16 @@ function buildGameSelect(id, values, cur) {
   sel.innerHTML = '';
   for (const v of values) { const o = el('option', null, v === 1 ? '1 (Default)' : String(v)); o.value = String(v); if (v === cur) o.selected = true; sel.appendChild(o); }
 }
+// Output-destination dropdown: a line product (default), or a tagged pull into the
+// Dimensional Depot / storage. The production is built either way (see plannerTargets);
+// the tag only regroups it. Returns a <select> with `cur` selected.
+function destSelect(cur) {
+  const sel = el('select', 'row-dest');
+  [['line', 'Line'], ['depot', 'Depot'], ['storage', 'Storage']].forEach(([v, label]) => {
+    const o = el('option', null, label); o.value = v; if (v === cur) o.selected = true; sel.appendChild(o);
+  });
+  return sel;
+}
 // Planner extra desired outputs (the primary stays in #targetItem/#targetRate).
 // These are Planner-local, so unlike the optimizer's first row they don't sync
 // across tabs; an empty list is fine because the primary is the anchor.
@@ -1641,14 +1707,16 @@ function buildPlannerExtra() {
   if (!box) return;
   box.innerHTML = '';
   (state.extraTargets || (state.extraTargets = [])).forEach((o, i) => {
-    const row = el('div', 'row');
+    const row = el('div', 'row row-dst'); // row-dst widens the grid for the destination select
     const name = el('input', 'row-item'); name.setAttribute('list', 'itemList'); name.placeholder = 'item…'; name.value = o.name; name.autocomplete = 'off';
     const rate = el('input', 'row-rate'); rate.type = 'number'; rate.min = '0'; rate.step = 'any'; rate.value = o.rate;
+    const dest = destSelect(normDest(o.dest)); dest.title = 'Where this output is routed';
     const rm = el('button', 'row-rm', '×'); rm.setAttribute('aria-label', 'Remove'); rm.title = 'Remove';
     name.addEventListener('input', () => { o.name = name.value; save(); solveAndRender(); });
     rate.addEventListener('input', () => { o.rate = parseFloat(rate.value) || 0; save(); solveAndRender(); });
+    dest.addEventListener('change', () => { o.dest = dest.value; save(); solveAndRender(); });
     rm.addEventListener('click', () => { state.extraTargets.splice(i, 1); save(); buildPlannerExtra(); solveAndRender(); });
-    row.append(name, rate, rm);
+    row.append(name, rate, dest, rm);
     box.appendChild(row);
   });
 }
@@ -1923,6 +1991,7 @@ function applyStateToControls() {
   renderSaveStatus();
   $('targetItem').value = state.targetItem ? itemName(state.targetItem) : '';
   $('targetRate').value = state.targetRate;
+  $('targetDest').value = normDest(state.targetDest);
   $('clock').value = Math.round(state.clock * 100);
   $('sloop').value = Math.round(state.sloop * 100);
   $('rateUnit').textContent = state.targetItem && isFluid(state.targetItem) ? 'm³ / min' : '/ min';
@@ -1954,7 +2023,8 @@ function init() {
   $('targetItem').addEventListener('change', (e) => onTarget(e.target.value));
   $('targetItem').addEventListener('input', (e) => { if (nameToClass(e.target.value)) onTarget(e.target.value); });
   $('targetRate').addEventListener('input', (e) => { state.targetRate = parseFloat(e.target.value) || 0; reflectPrimary('planner'); save(); solveAndRender(); });
-  $('plannerAddOutput').addEventListener('click', () => { (state.extraTargets || (state.extraTargets = [])).push({ name: '', rate: 60 }); save(); buildPlannerExtra(); });
+  $('targetDest').addEventListener('change', (e) => { state.targetDest = e.target.value; save(); solveAndRender(); });
+  $('plannerAddOutput').addEventListener('click', () => { (state.extraTargets || (state.extraTargets = [])).push({ name: '', rate: 60, dest: 'line' }); save(); buildPlannerExtra(); });
   $('clock').addEventListener('input', (e) => { state.clock = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
   $('sloop').addEventListener('input', (e) => { state.sloop = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
 
