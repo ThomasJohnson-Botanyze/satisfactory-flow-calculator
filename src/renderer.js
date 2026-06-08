@@ -54,6 +54,94 @@ const SUPPORT_LINKS = {
 };
 const openExternal = (url) => { if (api && api.openExternal) api.openExternal(url); else window.open(url, '_blank', 'noopener'); };
 
+// ---------- appearance / theming (app-wide, separate from per-plan state) ----------
+// Theme overrides live in their own localStorage key, NOT in the plan store. That
+// keeps them out of the durable plans.json sync (no risk of a bad theme value
+// corrupting a plan / the "blank app" class of bug) and makes them genuinely
+// app-wide rather than per-factory. Absent / malformed prefs fall back to the
+// stylesheet defaults, so a fresh install (or a wiped key) renders the dark theme.
+const THEME_KEY = 'satisfactory-app-prefs-v1';
+// The CSS custom properties the Appearance panel can override, with human labels.
+const THEME_VARS = [
+  ['--bg', 'Background'], ['--panel', 'Panel'], ['--panel-2', 'Panel (raised)'],
+  ['--line', 'Borders'], ['--text', 'Text'], ['--muted', 'Muted text'],
+  ['--accent', 'Accent'], ['--accent-2', 'Accent 2'],
+  ['--good', 'Good / output'], ['--warn', 'Warning'],
+];
+// Captured once at load, BEFORE any override is applied, so "Reset to default" and
+// the Dark preset always restore the stylesheet's :root palette verbatim.
+const THEME_DEFAULTS = (() => {
+  const out = {};
+  try {
+    const cs = getComputedStyle(document.documentElement);
+    for (const [v] of THEME_VARS) out[v] = (cs.getPropertyValue(v) || '').trim();
+  } catch (_) {}
+  return out;
+})();
+const THEME_PRESETS = {
+  dark: { name: 'Dark (default)', vars: {} }, // empty => stylesheet defaults
+  contrast: {
+    name: 'High contrast',
+    vars: {
+      '--bg': '#000000', '--panel': '#0d0d0d', '--panel-2': '#1a1a1a',
+      '--line': '#5a5a5a', '--text': '#ffffff', '--muted': '#cfcfcf',
+      '--accent': '#ffd400', '--accent-2': '#ff8a3d', '--good': '#46e06a', '--warn': '#ff5b5b',
+    },
+  },
+  ocean: {
+    name: 'Ocean',
+    vars: {
+      '--bg': '#0e1820', '--panel': '#13212c', '--panel-2': '#1a2c39',
+      '--line': '#2b4150', '--text': '#e6f0f5', '--muted': '#8fa7b5',
+      '--accent': '#34c6c0', '--accent-2': '#4f9bd9', '--good': '#5fcf8a', '--warn': '#ef6a5a',
+    },
+  },
+};
+// { preset: <key>, custom: { '--var': '#hex', ... } }. custom overrides win over the
+// preset so a tweaked-then-saved palette survives. Missing/garbage => dark.
+let themePrefs = { preset: 'dark', custom: {} };
+function loadThemePrefs() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(THEME_KEY));
+    if (raw && typeof raw === 'object') {
+      themePrefs = {
+        preset: THEME_PRESETS[raw.preset] ? raw.preset : 'dark',
+        custom: (raw.custom && typeof raw.custom === 'object') ? raw.custom : {},
+      };
+    }
+  } catch (_) { themePrefs = { preset: 'dark', custom: {} }; }
+}
+const saveThemePrefs = () => { try { localStorage.setItem(THEME_KEY, JSON.stringify(themePrefs)); } catch (_) {} };
+// Effective value of one var = explicit custom override, else preset, else stylesheet default.
+function themeVal(v) {
+  if (themePrefs.custom && themePrefs.custom[v]) return themePrefs.custom[v];
+  const p = THEME_PRESETS[themePrefs.preset];
+  if (p && p.vars[v]) return p.vars[v];
+  return THEME_DEFAULTS[v] || '';
+}
+// Push the effective palette onto :root. For the dark preset with no custom tweaks
+// we clear inline overrides so the stylesheet wins (keeps the cascade clean).
+function applyTheme() {
+  const root = document.documentElement;
+  for (const [v] of THEME_VARS) {
+    const cust = themePrefs.custom && themePrefs.custom[v];
+    const preset = THEME_PRESETS[themePrefs.preset];
+    const presetVal = preset && preset.vars[v];
+    const val = cust || presetVal;
+    if (val) root.style.setProperty(v, val);
+    else root.style.removeProperty(v); // fall back to :root stylesheet default
+  }
+}
+// Read the live computed value of a CSS var (post-theme) — used by canvas/PNG code
+// that can't rely on the CSS cascade. Falls back to the captured default.
+function cssVar(name) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    if (v) return v;
+  } catch (_) {}
+  return THEME_DEFAULTS[name] || '';
+}
+
 // ---------- update notifier (Level 1) ----------
 // main.js polls GitHub Releases on launch and fires 'update-available' when a
 // newer version is published — delivered to the page via the preload bridge
@@ -181,7 +269,7 @@ const anyNameToClass = (name) => {
 
 // ---------- state ----------
 const defaultState = () => ({
-  mode: 'planner',
+  mode: 'optimize', // Recipe Optimizer is the default landing tab (Planner is demoted in the nav)
   view: 'tables',
   targetItem: '',
   targetRate: 60,
@@ -1462,21 +1550,30 @@ function exportCsv() {
 }
 // The live <svg> is styled by stylesheet rules and carries the zoom/pan transform;
 // neither survives serialization, so the export embeds its own <style> + opaque
-// background and resets the transform to render the whole graph at 1:1.
-const FLOW_EXPORT_CSS =
-  '.edge-path{fill:none;stroke:#4b566c;stroke-width:1.5}' +
-  '.edge-label{fill:#c2cad8;font:11px "Segoe UI",system-ui,sans-serif;paint-order:stroke;stroke:#11141a;stroke-width:4px}' +
-  '.node rect{stroke-width:1.5}' +
-  '.node.raw rect{fill:#2b313c;stroke:#5b6675}.node.machine rect{fill:#3a2a12;stroke:#f9a825}.node.out rect{fill:#15361f;stroke:#66bb6a}' +
-  '.node .n-title{fill:#e7eaf0;font:700 12px "Segoe UI",system-ui,sans-serif}.node .n-sub{fill:#9aa3b2;font:10px "Segoe UI",system-ui,sans-serif}';
+// background and resets the transform to render the whole graph at 1:1. Colours are
+// pulled from the live theme CSS vars (cssVar) so a re-themed app exports a matching
+// PNG; the few node-body shades that aren't first-class vars stay as literals.
+function flowExportCss() {
+  const text = cssVar('--text') || '#e7eaf0';
+  const muted = cssVar('--muted') || '#9aa3b2';
+  const accent = cssVar('--accent') || '#f9a825';
+  const good = cssVar('--good') || '#66bb6a';
+  return (
+    '.edge-path{fill:none;stroke:#4b566c;stroke-width:1.5}' +
+    `.edge-label{fill:${muted};font:11px "Segoe UI",system-ui,sans-serif;paint-order:stroke;stroke:#11141a;stroke-width:4px}` +
+    '.node rect{stroke-width:1.5}' +
+    `.node.raw rect{fill:#2b313c;stroke:#5b6675}.node.machine rect{fill:#3a2a12;stroke:${accent}}.node.out rect{fill:#15361f;stroke:${good}}` +
+    `.node .n-title{fill:${text};font:700 12px "Segoe UI",system-ui,sans-serif}.node .n-sub{fill:${muted};font:10px "Segoe UI",system-ui,sans-serif}`
+  );
+}
 function exportFlowPng() {
   if (!currentFlow) return;
   const w = Math.max(1, Math.ceil(currentFlow.width)), h = Math.max(1, Math.ceil(currentFlow.height));
   const clone = $('flowSvg').cloneNode(true);
   const root = clone.querySelector('#flowRoot'); if (root) root.removeAttribute('transform'); // full graph, 1:1
   clone.setAttribute('width', w); clone.setAttribute('height', h); clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  const style = document.createElementNS(SVGNS, 'style'); style.textContent = FLOW_EXPORT_CSS;
-  const bg = document.createElementNS(SVGNS, 'rect'); bg.setAttribute('width', w); bg.setAttribute('height', h); bg.setAttribute('fill', '#11141a');
+  const style = document.createElementNS(SVGNS, 'style'); style.textContent = flowExportCss();
+  const bg = document.createElementNS(SVGNS, 'rect'); bg.setAttribute('width', w); bg.setAttribute('height', h); bg.setAttribute('fill', cssVar('--bg') || '#11141a');
   clone.insertBefore(bg, clone.firstChild); clone.insertBefore(style, clone.firstChild);
   const svgText = new XMLSerializer().serializeToString(clone);
   const img = new Image();
@@ -1934,7 +2031,64 @@ function applyStateToControls() {
   $('maxAlts').checked = state.max.alts;
   setMode(state.mode);
 }
+
+// ---------- settings drawer + appearance ----------
+function openSettings() {
+  const d = $('settingsDrawer'), b = $('settingsBackdrop');
+  if (!d || !b) return;
+  buildThemeControls(); // reflect current prefs each open
+  b.hidden = false; d.hidden = false;
+}
+function closeSettings() {
+  const d = $('settingsDrawer'), b = $('settingsBackdrop');
+  if (d) d.hidden = true;
+  if (b) b.hidden = true;
+}
+// Build the Appearance section: preset dropdown + one colour input per themeable var.
+function buildThemeControls() {
+  const sel = $('themePreset');
+  if (sel) {
+    sel.innerHTML = '';
+    for (const key in THEME_PRESETS) { const o = el('option', null, THEME_PRESETS[key].name); o.value = key; if (key === themePrefs.preset) o.selected = true; sel.appendChild(o); }
+  }
+  const box = $('themeColors');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const [v, label] of THEME_VARS) {
+    const row = el('div', 'theme-row');
+    row.appendChild(el('span', null, label));
+    const inp = el('input'); inp.type = 'color';
+    inp.value = toHex(themeVal(v));
+    inp.title = v;
+    inp.addEventListener('input', () => { (themePrefs.custom || (themePrefs.custom = {}))[v] = inp.value; applyTheme(); saveThemePrefs(); refreshThemedCanvases(); });
+    row.appendChild(inp);
+    box.appendChild(row);
+  }
+}
+// <input type=color> only accepts #rrggbb. Coerce short/space-padded values; the
+// theme values are all hex literals in practice, so the canvas-normalise fallback
+// (for an exotic named/rgb() value) is only reached off the happy path.
+function toHex(c) {
+  c = (c || '').trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(c)) return c.toLowerCase();
+  if (/^#[0-9a-fA-F]{3}$/.test(c)) return ('#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3]).toLowerCase();
+  const rgb = /rgba?\((\d+),\s*(\d+),\s*(\d+)/i.exec(c);
+  if (rgb) return '#' + [1, 2, 3].map((i) => Number(rgb[i]).toString(16).padStart(2, '0')).join('');
+  try {
+    const cv = el('canvas'); if (!cv.getContext) return '#000000';
+    const ctx = cv.getContext('2d'); if (!ctx) return '#000000';
+    ctx.fillStyle = '#000'; ctx.fillStyle = c;
+    const m = /^#([0-9a-f]{6})$/i.exec(ctx.fillStyle);
+    if (m) return ('#' + m[1]).toLowerCase();
+  } catch (_) {}
+  return '#000000';
+}
+// Re-render canvas/SVG views that read theme colours via getComputedStyle rather
+// than the CSS cascade (the resource map), so a colour change shows immediately.
+function refreshThemedCanvases() { try { if (state.mode === 'map' && typeof drawMap === 'function') drawMap(); } catch (_) {} }
 function init() {
+  loadThemePrefs();
+  applyTheme(); // paint the saved palette before first render so there's no flash
   load();
   buildItemList();
   buildSaveList();
@@ -2029,6 +2183,21 @@ function init() {
   supportModal.querySelectorAll('[data-url]').forEach((el) =>
     el.addEventListener('click', () => { const u = SUPPORT_LINKS[el.dataset.url]; if (u) openExternal(u); closeSupport(); })
   );
+
+  // settings drawer (appearance + machine tuning + cost multipliers)
+  $('btnSettings').addEventListener('click', openSettings);
+  $('settingsClose').addEventListener('click', closeSettings);
+  $('settingsBackdrop').addEventListener('click', closeSettings);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settingsDrawer').hidden) closeSettings(); });
+  $('themePreset').addEventListener('change', (e) => {
+    // Switching preset starts from a clean slate so the preset's palette is honoured.
+    themePrefs.preset = e.target.value; themePrefs.custom = {};
+    applyTheme(); saveThemePrefs(); buildThemeControls(); refreshThemedCanvases();
+  });
+  $('themeReset').addEventListener('click', () => {
+    themePrefs = { preset: 'dark', custom: {} };
+    applyTheme(); saveThemePrefs(); buildThemeControls(); refreshThemedCanvases();
+  });
 
   renderPlanBar();
   applyStateToControls();

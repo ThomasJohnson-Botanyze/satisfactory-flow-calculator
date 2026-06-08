@@ -673,3 +673,63 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .map-pur-pure { width: 13px; height: 13px; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.8); }
 .map-pur-normal { width: 10px; height: 10px; }
 .map-pur-impure { width: 7px; height: 7px; }
+
+/* ---------- header gear + secondary (demoted) tab ---------- */
+.icon-btn { padding: 8px 11px; font-size: 16px; line-height: 1; }
+/* Planner is demoted to a secondary action — present for saved-plan compatibility,
+   but visually de-emphasised so the Optimizer reads as the primary workflow. */
+.tab.tab-secondary { margin-left: auto; opacity: 0.7; font-weight: 500; }
+.tab.tab-secondary:hover { opacity: 1; }
+.tab.tab-secondary.active { opacity: 1; }
+
+/* ---------- settings drawer ---------- */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 11, 14, 0.55);
+  z-index: 70;
+}
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: min(420px, 100%);
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  box-shadow: -18px 0 50px rgba(0, 0, 0, 0.5);
+  z-index: 71;
+  display: flex;
+  flex-direction: column;
+}
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #1c1f26, #181b21);
+}
+.drawer-head h2 { margin: 0; font-size: 16px; }
+.drawer-head .modal-x { position: static; }
+.drawer-body { padding: 18px 20px; overflow: auto; flex: 1 1 auto; }
+
+/* appearance: per-property colour overrides */
+.theme-colors { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.theme-row {
+  display: grid;
+  grid-template-columns: 1fr 38px;
+  gap: 8px;
+  align-items: center;
+}
+.theme-row > span { font-size: 13px; color: var(--text); }
+.theme-row input[type="color"] {
+  width: 100%;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+.theme-row input[type="color"]:focus { outline: none; border-color: var(--accent); }
