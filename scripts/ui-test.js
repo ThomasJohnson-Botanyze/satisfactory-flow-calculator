@@ -101,6 +101,23 @@ check('setting 0 sloops clears the override', Object.keys(slPlan2.state.nodeSloo
 check('power restored after clearing sloops', mw() === slMwBefore);
 check('Somersloops-used back to 0', parseFloat(D.getElementById('sumSloops').textContent) === 0);
 
+// ---- clean ratios ----
+console.log('\n### CLEAN RATIO');
+setVal(D.getElementById('targetRate'), '7'); // 7 RIP/min -> fractional machine counts
+const machSubs = () => [...D.querySelectorAll('#prodTable .mach-sub')].map((s) => s.textContent);
+const anyFrac = () => machSubs().some((t) => t.includes('.'));
+check('fractional machine counts at 7/min', anyFrac());
+const crBox = D.getElementById('cleanRatio');
+crBox.checked = true; fire(crBox, 'change');
+check('clean ratio -> all whole machine counts', !anyFrac());
+const crStore = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'));
+const crPlan = crStore.plans.find((p) => p.id === crStore.activeId);
+check('clean ratio toggle persisted', crPlan.state.cleanRatio === true);
+check('clean ratio note shown', !D.getElementById('cleanRatioNote').hidden);
+crBox.checked = false; fire(crBox, 'change');
+check('toggling clean ratio off restores fractional counts', anyFrac());
+setVal(D.getElementById('targetRate'), '10'); // restore target for the factory-plans block below
+
 // ---- factory plans ----
 console.log('\n### FACTORY PLANS');
 check('starts with 1 plan', planNames().length === 1 && planNames()[0] === 'Factory 1');

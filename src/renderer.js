@@ -326,6 +326,9 @@ const defaultState = () => ({
   // Planner/Optimizer/Max tabs; these extras are Planner-local.
   extraTargets: [],
   clock: 1.0,
+  // When on, the plan is scaled to the nearest output that makes every step a whole
+  // number of machines (clean ratios, zero over/underclocking). See applyCleanScale.
+  cleanRatio: false,
   recipeCost: 1,
   powerMult: 1,
   spaceMult: 1,
@@ -706,6 +709,70 @@ function sloopCountOf(rc) {
 function effectiveSloop(rc) {
   const max = maxSloopSlots(rc);
   return max ? 1 + sloopCountOf(rc) / max : 1;
+}
+
+// ----- clean ratios: scale a plan so every step is a whole number of machines -----
+// Best rational p/q ≈ x with q ≤ maxDen (continued-fraction convergent). Satisfactory
+// rates are all rational, so machine counts rationalize with small denominators.
+function toFraction(x, maxDen = 1000) {
+  let h0 = 0, h1 = 1, k0 = 1, k1 = 0, b = x;
+  for (let i = 0; i < 40; i++) {
+    const a = Math.floor(b);
+    const h2 = a * h1 + h0, k2 = a * k1 + k0;
+    if (k2 > maxDen) break;
+    h0 = h1; h1 = h2; k0 = k1; k1 = k2;
+    const frac = b - a;
+    if (frac < 1e-9) break;
+    b = 1 / frac;
+  }
+  return { p: h1, q: k1 || 1 };
+}
+const _gcd = (a, b) => { a = Math.abs(a); b = Math.abs(b); while (b) { const t = a % b; a = b; b = t; } return a; };
+const _lcm = (a, b) => (a && b ? a / _gcd(a, b) * b : 0);
+// Smallest scale (×everything) that turns every machine count whole, then the multiple
+// of it nearest the current size so the adjusted output stays close to the requested one.
+// Returns null if the counts don't rationalize within range (no sane clean ratio).
+function cleanRatioScale(counts) {
+  const cs = counts.filter((c) => c > 1e-9);
+  if (!cs.length) return 1;
+  let Q = 1;
+  const fr = [];
+  for (const c of cs) {
+    const f = toFraction(c, 1000);
+    if (Math.abs(f.p / f.q - c) > 1e-4) return null; // can't clean this count
+    fr.push(f);
+    Q = _lcm(Q, f.q);
+    if (!isFinite(Q) || Q > 1e7) return null; // LCM exploded — no usable clean ratio
+  }
+  let g = 0;
+  for (const f of fr) g = _gcd(g, Math.round(Q * f.p / f.q));
+  if (!g) return 1;
+  const fMin = Q / g;                       // smallest scale giving all-integer machines
+  const k = Math.max(1, Math.round(1 / fMin));
+  return k * fMin;
+}
+// Scale a solved result in place to clean (whole-machine) ratios when the toggle is on.
+// Linear in the LP solution, so we just multiply the reported quantities. Returns the
+// scale (1 = unchanged / already clean); also stamps res._cleanScale for the UI note.
+function applyCleanScale(res, targets) {
+  if (!state.cleanRatio || !res || !res.recipes || !res.recipes.length) return 1;
+  const scale = cleanRatioScale(res.recipes.map((r) => r.machines)) || 1;
+  res._cleanScale = scale;
+  if (Math.abs(scale - 1) < 1e-9) return 1;
+  const mul = (arr, ...keys) => (arr || []).forEach((o) => keys.forEach((k) => { if (typeof o[k] === 'number') o[k] *= scale; }));
+  mul(res.recipes, 'machines', 'rate', 'power');
+  mul(res.raw, 'rate'); mul(res.outputs, 'rate'); mul(res.surplus, 'rate');
+  mul(res.sunk, 'rate', 'points'); mul(res.burned, 'rate', 'mw'); mul(res.depot, 'rate');
+  if (typeof res.totalPower === 'number') res.totalPower *= scale;
+  if (typeof res.recoveredPower === 'number') res.recoveredPower *= scale;
+  if (typeof res.objectiveValue === 'number') res.objectiveValue *= scale;
+  // Snap tiny float drift so ceil()/labels show exact integers.
+  res.recipes.forEach((r) => { const rd = Math.round(r.machines); if (Math.abs(r.machines - rd) < 1e-4) r.machines = rd; });
+  res.totalMachines = res.recipes.reduce((a, r) => a + Math.ceil(r.machines - 1e-9), 0);
+  if (res.totalSloops != null) res.totalSloops = res.recipes.reduce((a, r) => a + (r.sloops || 0) * Math.ceil(r.machines - 1e-9), 0);
+  for (const k in (res.targets || {})) res.targets[k] *= scale;
+  for (const k in (targets || {})) targets[k] *= scale;
+  return scale;
 }
 // Desired outputs for the Planner: the primary target plus any extra rows.
 // Deliverables are scaled by the space-elevator multiplier, same as the optimizer.
@@ -2010,6 +2077,7 @@ function computeStateResult(st) {
       const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false });
       if (!res.feasible) return { feasible: false };
       res.surplus = res.outputs.filter((o) => !outputs[o.item]);
+      applyCleanScale(res, outputs);
       return { feasible: true, res, targets: outputs };
     }
     if (st.mode === 'max') {
@@ -2026,6 +2094,7 @@ function computeStateResult(st) {
     if (!Object.keys(targets).length) return { feasible: false };
     const res = computePlanner(targets);
     if (!res.feasible) return { feasible: false };
+    applyCleanScale(res);
     return { feasible: true, res, targets: res.targets };
   } finally {
     state = saved;
@@ -2049,6 +2118,24 @@ function present(res, targets) {
   if (ap) { recordNetOutputs(ap, targets, res); propagateLinks(ap.id); }
   showOutput(); // -> applyView(), which renders the flowchart when that view is active
   renderTables(res);
+  updateCleanRatioNote(res);
+}
+// Explain what the Clean ratios toggle did this solve: how much the output was scaled to
+// land on whole machines, or that it was already clean / doesn't apply in this mode.
+function updateCleanRatioNote(res) {
+  const n = $('cleanRatioNote');
+  if (!n) return;
+  if (!state.cleanRatio) { n.hidden = true; n.textContent = ''; return; }
+  if (res && res._cleanScale != null) {
+    const sc = res._cleanScale;
+    n.hidden = false;
+    n.textContent = Math.abs(sc - 1) > 1e-9
+      ? `Inputs & outputs scaled ×${fmt(sc, 3)} so every step is a whole number of machines.`
+      : 'Already whole-machine ratios — no scaling needed.';
+  } else {
+    n.hidden = false;
+    n.textContent = 'Clean ratios apply in the Planner and Recipe Optimizer.';
+  }
 }
 function solveAndRender() {
   $('modeExtras').innerHTML = '';
@@ -2063,6 +2150,7 @@ function showEmpty(msg) {
   $('output').hidden = true;
   $('emptyMsg').textContent = msg;
   $('sumPower').textContent = '—'; $('sumMachines').textContent = '—'; $('sumRaw').textContent = '—';
+  if ($('cleanRatioNote')) $('cleanRatioNote').hidden = true;
   // An empty/infeasible plan produces nothing downstream — clear its recorded outputs
   // and let consumers re-resolve (their linked caps drop to 0).
   const ap = activePlan();
@@ -2099,6 +2187,7 @@ function renderPlanner() {
   if (deadTargets.length) return showEmpty(blockedWarn(deadTargets, 'build'));
   const res = computePlanner(targets);
   if (!res.feasible) return showEmpty('No feasible plan: the selected recipes can’t balance — a recycle loop that consumes more than it makes. Switch one alternate to break it.');
+  applyCleanScale(res); // scale to whole-machine ratios when the toggle is on (no-op otherwise)
   // Split the desired outputs by destination. Depot / Storage outputs stay full
   // production demand (already in res.targets), but are pulled out of the line-output
   // set so they render in their own group + a distinct flow terminal, not as primary
@@ -2143,6 +2232,7 @@ function renderOptimize() {
     return showEmpty('No feasible recipe set: those outputs cannot be made from the allowed inputs. Enable more resources or alternate recipes.');
   }
   res.surplus = res.outputs.filter((o) => !outputs[o.item]);
+  applyCleanScale(res, outputs); // whole-machine ratios when the toggle is on (no-op otherwise)
   present(res, outputs);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
 
@@ -2772,6 +2862,7 @@ function applyStateToControls() {
   $('targetRate').value = state.targetRate;
   $('targetDest').value = normDest(state.targetDest);
   $('clock').value = Math.round(state.clock * 100);
+  $('cleanRatio').checked = !!state.cleanRatio;
   $('rateUnit').textContent = state.targetItem && isFluid(state.targetItem) ? 'm³ / min' : '/ min';
   syncSliderLabels();
   $('optObjective').value = state.opt.objective;
@@ -2861,6 +2952,7 @@ function init() {
   $('targetDest').addEventListener('change', (e) => { state.targetDest = e.target.value; save(); solveAndRender(); });
   $('plannerAddOutput').addEventListener('click', () => { (state.extraTargets || (state.extraTargets = [])).push({ name: '', rate: 60, dest: 'line' }); save(); buildPlannerExtra(); });
   $('clock').addEventListener('input', (e) => { state.clock = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
+  $('cleanRatio').addEventListener('change', (e) => { state.cleanRatio = e.target.checked; save(); solveAndRender(); });
 
   $('mRecipe').addEventListener('change', (e) => { state.recipeCost = Number(e.target.value); save(); solveAndRender(); });
   $('mPower').addEventListener('change', (e) => { state.powerMult = Number(e.target.value); save(); solveAndRender(); });
