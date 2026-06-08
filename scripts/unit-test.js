@@ -91,6 +91,48 @@ check('Empty Canister comes from a real producer (not an unpackage loop)', cyc.r
 const supplied = LP.optimize({ outputs: { [cls('Fuel')]: 60 }, allowedInputs: Object.assign({ [PkgFuel]: Infinity }, allRaw), objective: 'machines', allowAlternates: true });
 check('unpackage allowed when its packaged input is supplied', supplied.feasible && supplied.recipes.some((s) => /unpackage/i.test(s.rc)));
 
+// ---- recipe + building exclusion (F1 / F4) ----
+// blockedRecipes drops the named recipes from the pool for optimize/maxThroughput,
+// covering STANDARD recipes (the alt veto can't) and whole buildings (the renderer
+// expands a disabled building into its recipe classNames before calling).
+console.log('\n### RECIPE / BUILDING EXCLUSION');
+const allRawX = Object.fromEntries(DATA.resources.map((r) => [r, Infinity]));
+const stdIngot = 'Recipe_IngotIron_C';          // standard Iron Ingot (Smelter), no alt needed
+const altIngotFoundry = 'Recipe_Alternate_IronIngot_Basic_C'; // an alternate Iron Ingot recipe
+
+// F1: blocking the standard recipe with alts OFF makes plain Iron Ingot infeasible
+// (its only non-alternate producer is gone).
+const blockStdNoAlt = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: allRawX, objective: 'raw', allowAlternates: false, blockedRecipes: new Set([stdIngot]) });
+check('F1: blocking sole standard recipe (alts off) -> infeasible', blockStdNoAlt.feasible === false);
+// ...and the standard recipe itself never appears even when it would otherwise be optimal.
+const baseIngot = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: allRawX, objective: 'raw', allowAlternates: false });
+check('control: standard Iron Ingot recipe used when not blocked', baseIngot.feasible && baseIngot.recipes.some((s) => s.rc === stdIngot));
+// F1 + alternates: blocking the standard recipe forces the solver onto an alternate.
+const blockStdWithAlts = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: allRawX, objective: 'raw', allowAlternates: true, blockedRecipes: new Set([stdIngot]) });
+check('F1: blocked standard recipe is never chosen', blockStdWithAlts.feasible && !blockStdWithAlts.recipes.some((s) => s.rc === stdIngot));
+
+// F4: a building disabled = every one of its recipes blocked. Time Crystal is produced
+// ONLY by the Converter, so blocking all Converter recipes makes it unbuildable.
+const TimeCrystal = cls('Time Crystal');
+const converterRecipes = Object.keys(DATA.recipes).filter((rc) => DATA.recipes[rc].building === 'Build_Converter_C');
+check('fixture: >1 Converter recipe exists', converterRecipes.length > 1);
+const tcBase = LP.optimize({ outputs: { [TimeCrystal]: 10 }, allowedInputs: allRawX, objective: 'machines', allowAlternates: true });
+check('control: Time Crystal feasible with Converter on', tcBase.feasible === true);
+const tcBlocked = LP.optimize({ outputs: { [TimeCrystal]: 10 }, allowedInputs: allRawX, objective: 'machines', allowAlternates: true, blockedRecipes: new Set(converterRecipes) });
+check('F4: disabling the Converter (all its recipes) -> Time Crystal infeasible', tcBlocked.feasible === false);
+// And no Converter recipe is used elsewhere once the building is off.
+const ironViaConv = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: allRawX, objective: 'raw', allowAlternates: true, blockedRecipes: new Set(converterRecipes) });
+check('F4: no Converter recipe appears in any plan when building disabled', ironViaConv.feasible && !ironViaConv.recipes.some((s) => DATA.recipes[s.rc].building === 'Build_Converter_C'));
+
+// maxThroughput honors the block too: max Iron Ingot from ore with the standard recipe
+// blocked and alts off must report infeasible (no producer left).
+const mtBlocked = LP.maxThroughput({ product: IronIngot, supply: { [IronOre]: 60 }, allowAlternates: false, blockedRecipes: new Set([stdIngot]) });
+check('F4/F1: maxThroughput infeasible when sole producer blocked', mtBlocked.feasible === false);
+
+// Sanity: blocking an irrelevant recipe leaves a plan unchanged & feasible.
+const harmless = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: allRawX, objective: 'raw', allowAlternates: false, blockedRecipes: new Set([altIngotFoundry]) });
+check('blocking an unused recipe leaves the plan feasible', harmless.feasible && harmless.recipes.some((s) => s.rc === stdIngot));
+
 // ---- factory-extract ----
 console.log('\n### FACTORY-EXTRACT');
 check('quatToYaw identity = 0', near(FE.quatToYaw({ x: 0, y: 0, z: 0, w: 1 }), 0));

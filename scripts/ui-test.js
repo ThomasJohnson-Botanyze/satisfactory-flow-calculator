@@ -449,5 +449,73 @@ require('../src/renderer.js');
 dom9.window.dispatchEvent(new dom9.window.Event('DOMContentLoaded'));
 check('saved theme override re-applied on reload', dom9.window.document.documentElement.style.getPropertyValue('--accent').trim() === '#abcdef');
 
+// Recipe + building exclusion (F1 / F4): the shared veto must drive the solver through the
+// real DOM/event path, persist per-plan, and surface the sole-producer guard message.
+console.log('\n### RECIPE / BUILDING EXCLUSION (F1 / F4)');
+const dom12 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom12.window; global.document = dom12.window.document; global.localStorage = dom12.window.localStorage;
+global.location = dom12.window.location; global.Event = dom12.window.Event;
+if (!dom12.window.SVGElement.prototype.setPointerCapture) dom12.window.SVGElement.prototype.setPointerCapture = () => {};
+dom12.window.localStorage.clear();
+delete require.cache[require.resolve('../src/renderer.js')];
+require('../src/renderer.js');
+dom12.window.dispatchEvent(new dom12.window.Event('DOMContentLoaded'));
+const d12 = dom12.window.document;
+const fire12 = (n, t) => n.dispatchEvent(new dom12.window.Event(t, { bubbles: true }));
+const setVal12 = (n, v, t = 'input') => { n.value = v; fire12(n, t); };
+const click12 = (n) => n.dispatchEvent(new dom12.window.Event('click', { bubbles: true }));
+const plan12 = () => { const s = JSON.parse(dom12.window.localStorage.getItem('satisfactory-factory-plans-v1')); return s.plans.find((p) => p.id === s.activeId); };
+
+// The two new veto sections exist and are wired.
+check('Buildings veto list rendered (>= the 11 crafting buildings)', d12.querySelectorAll('#bldList .alt-row').length >= 11);
+check('Standard-recipe veto list rendered (many base recipes)', d12.querySelectorAll('#stdList .alt-row').length > 50);
+
+// F4: build Time Crystal in the Optimizer, then disable the Converter via its checkbox.
+click12([...d12.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+click12(d12.getElementById('optAllInputs')); // allow every raw resource
+const oRow = d12.querySelector('#optOutputs .row');
+setVal12(oRow.querySelector('.row-item'), 'Time Crystal'); setVal12(oRow.querySelector('.row-rate'), '10');
+check('Time Crystal optimizes before any veto', !d12.getElementById('output').hidden && prodRows() > 0);
+// Find the Converter checkbox by its label text and untick it.
+const convRow = [...d12.querySelectorAll('#bldList .alt-row')].find((r) => /Converter/.test(r.textContent));
+check('Converter row present in building list', !!convRow);
+const convCb = convRow.querySelector('input');
+convCb.checked = false; fire12(convCb, 'change');
+check('disabling Converter persists in disabledBuildings', (plan12().state.disabledBuildings || []).includes('Build_Converter_C'));
+check('Time Crystal now infeasible (empty shown)', !d12.getElementById('empty').hidden && d12.getElementById('output').hidden);
+check('sole-producer guard message names the item', /Time Crystal/.test(d12.getElementById('emptyMsg').textContent) && /disabled/i.test(d12.getElementById('emptyMsg').textContent));
+// Re-enabling the Converter restores the plan.
+convCb.checked = true; fire12(convCb, 'change');
+check('re-enabling Converter restores the plan', !d12.getElementById('output').hidden && prodRows() > 0);
+
+// F1: ticking off a standard recipe persists to disabledRecipes and re-solves.
+const stdRow0 = d12.querySelector('#stdList .alt-row');
+const stdCb0 = stdRow0.querySelector('input');
+stdCb0.checked = false; fire12(stdCb0, 'change');
+check('disabling a standard recipe persists in disabledRecipes', (plan12().state.disabledRecipes || []).length === 1);
+stdCb0.checked = true; fire12(stdCb0, 'change');
+check('re-enabling clears the standard-recipe veto', (plan12().state.disabledRecipes || []).length === 0);
+
+// Back-compat: a plan saved before these fields existed must load with empty defaults.
+console.log('\n### EXCLUSION BACK-COMPAT');
+const dom11 = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+global.window = dom11.window; global.document = dom11.window.document; global.localStorage = dom11.window.localStorage;
+global.location = dom11.window.location; global.Event = dom11.window.Event;
+if (!dom11.window.SVGElement.prototype.setPointerCapture) dom11.window.SVGElement.prototype.setPointerCapture = () => {};
+dom11.window.localStorage.clear();
+// An "old" persisted plan with none of the new fields.
+dom11.window.localStorage.setItem('satisfactory-factory-plans-v1', JSON.stringify({
+  plans: [{ id: 'old1', name: 'Legacy', state: { mode: 'planner', targetItem: cls('Iron Plate'), targetRate: 10 } }],
+  activeId: 'old1',
+}));
+delete require.cache[require.resolve('../src/renderer.js')];
+require('../src/renderer.js');
+dom11.window.dispatchEvent(new dom11.window.Event('DOMContentLoaded'));
+const d11 = dom11.window.document;
+const oldPlan = JSON.parse(dom11.window.localStorage.getItem('satisfactory-factory-plans-v1')).plans[0];
+check('old plan gains empty disabledRecipes default', Array.isArray(oldPlan.state.disabledRecipes) && oldPlan.state.disabledRecipes.length === 0);
+check('old plan gains empty disabledBuildings default', Array.isArray(oldPlan.state.disabledBuildings) && oldPlan.state.disabledBuildings.length === 0);
+check('old plan still produces (no veto applied)', d11.querySelectorAll('#prodTable tbody tr').length > 0);
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);
