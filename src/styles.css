@@ -455,6 +455,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
   padding: 1px 5px;
   margin-left: 6px;
   vertical-align: middle;
+  white-space: nowrap; /* keep two-word pills (e.g. "manual veto") on one line */
 }
 .game-sel { margin-bottom: 0; }
 
@@ -522,7 +523,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
   font-size: 12px;
 }
 .alt-search:focus { outline: none; border-color: var(--accent); }
-.alt-count { font-size: 11px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.alt-count { font-size: 11px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; margin-left: auto; }
 .alt-list {
   max-height: 240px;
   overflow: auto;
@@ -540,12 +541,12 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 
 /* collapsible recipe/building veto sections (F1/F4) */
 #bldDisable > summary, #stdDisable > summary {
-  display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none;
+  display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; flex-wrap: wrap;
 }
 #bldDisable > summary::-webkit-details-marker, #stdDisable > summary::-webkit-details-marker { display: none; }
 #bldDisable > summary::before, #stdDisable > summary::before { content: '▸'; color: var(--muted); font-size: 11px; }
 #bldDisable[open] > summary::before, #stdDisable[open] > summary::before { content: '▾'; }
-.inline-h2 { display: inline; margin: 0 !important; flex: 1; }
+.inline-h2 { display: inline; margin: 0 !important; flex: 1; white-space: nowrap; }
 #bldDisable > summary + .hint, #stdDisable > summary + .hint { display: block; margin-top: 8px; }
 
 /* ---------- support button + modal ---------- */
