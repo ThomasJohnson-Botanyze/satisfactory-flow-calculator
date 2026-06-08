@@ -48,6 +48,16 @@ Still open (1):
   230-line harness to async-flush isn't justified by an imperceptible perf gain on
   already-sub-5ms solves. Revisit if a genuinely large plan ever shows lag.
 
+## Status — feature round (v1.6.0, branch `claude/confident-booth-3ae3a0`)
+All six backlog feature requests shipped. `npm test` green (98 unit + 147 UI + 7 bundle = 252).
+Built by parallel worktree agents, then integrated one-at-a-time with conflict resolution.
+- **F1** disable standard recipes — generalized the alternate veto into a per-recipe blocklist (`disabledRecipes`); honored by planner pick + LP via `blockedRecipeSet()`. Sole-producer guard.
+- **F4** turn off machines — `disabledBuildings`; a disabled building drops all its recipes (keyed into the same blocklist). "Buildings" veto section.
+- **F5** Depot / Storage outputs — per-output `dest` tag (`line`/`depot`/`storage`); depot/storage outputs build as demand but render in their own group + a distinct flow terminal.
+- **F6** declutter — default tab is now Optimizer, Planner demoted to a secondary tab (engine intact), game settings moved into a header-gear **Settings drawer**.
+- **F2** appearance theming — Settings drawer overrides `:root` CSS vars live, 3 presets + reset, persisted to its own `satisfactory-app-prefs-v1` key (kept OUT of the plan store — no blank-app risk).
+- **F3** Projects — plans group into projects (`projects`/`activeProjectId`/per-plan `projectId`); a plan's input can link to another plan's output (auto-syncs, cycle-guarded); Project Totals rollup. Pre-F3 `plans.json` migrates into a default "Project 1" (back-compat is the headline guarantee, covered by tests).
+
 ## Priority order (original)
 1. [S1] XSS→RCE via untrusted save strings in tooltips 🔴 — ✅ DONE
 2. [B1] Vanilla save nodes hidden by default 🔴 — ✅ DONE
