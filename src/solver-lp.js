@@ -45,6 +45,20 @@ for (const g in GENERATORS) {
   }
 }
 
+// Water by-product disposal via the "Wet Concrete" alternate (6 Limestone + 5 Water -> 4
+// Concrete, in a Refinery). Water is a raw RESOURCE, so without this surplus by-product
+// water just floats as a free input and silently vanishes from the plan — but in-game it
+// backs up the pipes and forces a fragile recirculation loop (e.g. an aluminum refinery's
+// scrap-step water fed back into its alumina step). When the optimizer's water-sink option
+// is on, every recipe's water OUTPUT is diverted to a virtual waste item that ONLY this
+// route consumes, turning surplus water into sinkable Concrete with no loop. Water INPUTS
+// stay on the real item, drawn fresh from extractors.
+const WATER = 'Desc_Water_C';
+const WASTE_WATER = '__wastewater__';
+const CONCRETE = 'Desc_Cement_C';
+const LIMESTONE = 'Desc_Stone_C';
+const WET_CONCRETE_RC = 'Recipe_Alternate_WetConcrete_C';
+
 // Unpackage recipes (Packaged X -> X + container) merely reverse a packaging step. When
 // the optimizer builds from raw resources they are never useful on their own — running one
 // only makes sense to consume a Packaged X you already have, otherwise it just pairs with
@@ -112,7 +126,7 @@ function recipePool(allowAlternates, unlockedAlts, blockedRecipes) {
   });
 }
 
-function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, sloopMult = null }) {
+function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, sloopMult = null }) {
   // Keep an unpackage recipe only when its packaged input is actually supplied; otherwise
   // it can only form a degenerate package<->unpackage loop (see UNPACKAGE note above).
   const pool = recipePool(allowAlternates, unlockedAlts, blockedRecipes).filter(
@@ -120,6 +134,17 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
   );
   const inPlay = new Set();
   for (const rc of pool) for (const it of itemsOf(RC_INFO[rc])) inPlay.add(it);
+
+  // Water-sink route availability: the optimizer may divert surplus by-product water into
+  // Wet Concrete (-> sinkable Concrete) instead of letting it loop or float. Gated to the
+  // optimizer (not max), to the recipe being present and allowed (respects block + save
+  // unlock, but NOT the alternates toggle — enabling this is an explicit opt-in to that
+  // recipe), and skipped when the user actually wants Water itself as a product.
+  const wetAvail = waterSink && !maxItem && RC_INFO[WET_CONCRETE_RC]
+    && outputs[WATER] == null
+    && !(blockedRecipes && blockedRecipes.has(WET_CONCRETE_RC))
+    && !(unlockedAlts && !unlockedAlts.has(WET_CONCRETE_RC));
+  if (wetAvail) inPlay.add(CONCRETE); // the route's Concrete output needs a constraint (sink / output)
 
   const variables = {};
   for (const rc of pool) {
@@ -129,6 +154,21 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
     for (const it of itemsOf(info)) v[it] = coefOf(info, it, recipeCost, sl);
     if (maxItem) v._out = coefOf(info, maxItem, recipeCost, sl);
     variables[rc] = v;
+  }
+
+  // Divert every recipe's water OUTPUT to the virtual waste item so it can't net against
+  // fresh-water demand — that netting IS the recirculation loop we're breaking. Water
+  // INPUTS keep their real-item coefficient and are met fresh from extractors.
+  if (wetAvail) {
+    for (const rc of pool) {
+      const sl = (sloopMult && sloopMult[rc]) || 1;
+      const wOut = (RC_INFO[rc].out[WATER] || 0) * sl;
+      if (wOut <= 1e-12) continue;
+      const v = variables[rc];
+      v[WASTE_WATER] = (v[WASTE_WATER] || 0) + wOut;
+      v[WATER] = (v[WATER] || 0) - wOut;
+      if (Math.abs(v[WATER]) < 1e-12) delete v[WATER];
+    }
   }
 
   // Disposal routes (optimize only): let by-products leave the system the way they do
@@ -151,6 +191,18 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
       disposal.gens.push(gb);
     }
   }
+  // Wet Concrete water route: consumes the diverted waste water + raw Limestone and emits
+  // Concrete (a solid, so the sink loop above can route it onward / it floats as output if
+  // sinking is off). Added whenever wetAvail, independent of the solid/fuel sink toggle.
+  if (wetAvail) {
+    const info = RC_INFO[WET_CONCRETE_RC];
+    const waterIn = effInnRate(info, WATER, recipeCost);
+    const stoneIn = effInnRate(info, LIMESTONE, recipeCost);
+    const cementOut = info.out[CONCRETE] || 0;
+    const power = info.power * powerMult;
+    variables['__wet__'] = { [WASTE_WATER]: -waterIn, [LIMESTONE]: -stoneIn, [CONCRETE]: cementOut, _power: power, _machines: 1, _raw: stoneIn };
+    disposal.wet = { key: '__wet__', waterIn, stoneIn, cementOut, power };
+  }
 
   const constraints = {};
   for (const it of inPlay) {
@@ -161,6 +213,7 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
     else if (sinkByproducts && !maxItem) constraints[it] = { equal: 0 }; // by-product: produce == consume (no backup)
     else constraints[it] = { min: 0 };
   }
+  if (wetAvail) constraints[WASTE_WATER] = { equal: 0 }; // all diverted water must leave via the Wet Concrete route
 
   // Minimization carries the chosen objective plus the tiny activity tie-break in one key
   // (`_score`), so a free package<->unpackage cycle can never spin. Max-throughput keeps a
@@ -215,6 +268,26 @@ function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
       burned.push({ item: g.fuel, rate: v * g.burn, machines: v, gen: g.gen, genName: g.genName, mw });
     }
   }
+  // Wet Concrete water route: not a pool recipe, so fold its raw Limestone draw and
+  // Concrete output into `net` by hand and tally its refineries' machines/power.
+  const watered = [];
+  if (disposal && disposal.wet) {
+    const v = res[disposal.wet.key];
+    if (v && v > 1e-6) {
+      const w = disposal.wet;
+      // summarize rebuilds `net` from each recipe's ORIGINAL water output, so it re-credits
+      // the diverted water to net[WATER]; cancel that here (it physically left as Concrete).
+      // The WASTE_WATER balance guarantees waterIn*v == the total diverted output, leaving
+      // net[WATER] = -(fresh draw) only — no phantom surplus for downstream links to grab.
+      net[WATER] = (net[WATER] || 0) - w.waterIn * v;
+      net[LIMESTONE] = (net[LIMESTONE] || 0) - w.stoneIn * v;
+      net[CONCRETE] = (net[CONCRETE] || 0) + w.cementOut * v;
+      totalMachines += Math.ceil(v - 1e-9);
+      fracMachines += v;
+      totalPower += w.power * v;
+      watered.push({ item: WATER, rate: w.waterIn * v, concrete: w.cementOut * v, limestone: w.stoneIn * v, machines: v });
+    }
+  }
   const raw = [];
   const outputs = [];
   let rawTotal = 0;
@@ -223,13 +296,13 @@ function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
     if (v > 1e-6 && !RES.has(it)) outputs.push({ item: it, rate: v });
     else if (v < -1e-6) { raw.push({ item: it, rate: -v }); rawTotal += -v; }
   }
-  return { recipes, raw, outputs, net, totalPower, totalMachines, fracMachines, rawTotal, sunk, burned, recoveredPower };
+  return { recipes, raw, outputs, net, totalPower, totalMachines, fracMachines, rawTotal, sunk, burned, recoveredPower, watered };
 }
 
-function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, sloopMult = null }) {
+function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, sloopMult = null }) {
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
-  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, sloopMult });
+  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
   // A demanded item no pooled recipe produces (every producer blocked / not unlocked)
   // would otherwise be silently dropped from the constraints — the solver would return a
   // feasible EMPTY plan. Detect it and report infeasible with the orphaned items named,
@@ -247,7 +320,7 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
     // surplus by-product that can't be sunk (a fluid with no consumer) — name it so the
     // UI can point the user at a recipe that consumes it.
     if (sinkByproducts) {
-      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts: false, sloopMult });
+      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts: false, waterSink, sloopMult });
       const rres = solver.Solve(relaxed.model);
       if (rres.feasible) {
         const rsum = summarize(rres, relaxed.pool, recipeCost, powerMult, relaxed.disposal, sloopMult);

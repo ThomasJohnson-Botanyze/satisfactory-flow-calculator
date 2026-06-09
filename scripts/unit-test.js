@@ -92,6 +92,38 @@ const loop = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, o
 check('alts + sink: feasible', loop.feasible === true);
 check('alts + sink: no by-product surplus at all', loop.feasible && !loop.outputs.some((o) => o.item !== Plastic));
 
+// Water sink via Wet Concrete: aluminum refining dumps Water from its scrap step. Water is
+// a raw RESOURCE, so by default that surplus silently floats (in-game it backs up the pipes
+// and forces a recirculation loop). With the water-sink option on, the surplus is diverted
+// into Wet Concrete (-> sinkable Concrete) and all fresh water is drawn from extractors — no
+// loop. Use a scrap/ingot plant that imports Alumina Solution so the scrap water is pure
+// surplus (no local alumina step to soak it back up).
+const AlIngot = cls('Aluminum Ingot'), Alumina = cls('Alumina Solution'), Water = cls('Water'), Concrete = cls('Concrete'), Limestone = cls('Limestone'), WetRC = 'Recipe_Alternate_WetConcrete_C';
+const scrapInputs = Object.assign({ [Alumina]: Infinity }, allRaw);
+const blockAlumina = new Set(['Recipe_Alternate_SloppyAlumina_C', 'Recipe_AluminaSolution_C', 'Recipe_PackagedWater_C']);
+const wsArgs = { outputs: { [AlIngot]: 100 }, allowedInputs: scrapInputs, objective: 'raw', allowAlternates: true, sinkByproducts: true, blockedRecipes: blockAlumina };
+const wOff = LP.optimize(Object.assign({}, wsArgs, { waterSink: false }));
+const wOn = LP.optimize(Object.assign({}, wsArgs, { waterSink: true }));
+check('water-sink off: surplus water floats (net > 0, hidden because Water is raw)', (wOff.net[Water] || 0) > 1);
+check('water-sink off: nothing routed to Wet Concrete', (wOff.watered || []).length === 0);
+check('water-sink on: feasible', wOn.feasible === true);
+check('water-sink on: surplus water disposed (net ~0)', near(wOn.net[Water] || 0, 0, 1e-4));
+check('water-sink on: Wet Concrete route ran', (wOn.watered || []).length > 0 && wOn.watered[0].machines > 0);
+check('water-sink on: routed water == prior surplus', near(wOn.watered[0].rate, wOff.net[Water] || 0, 0.5));
+check('water-sink on: Concrete produced and sunk', wOn.watered[0].concrete > 0 && (wOn.sunk || []).some((s) => s.item === Concrete && s.rate > 0));
+check('water-sink on: Limestone drawn as raw for it', wOn.raw.some((r) => r.item === Limestone && r.rate > 0));
+check('water-sink on: no phantom water output for downstream links', !wOn.outputs.some((o) => o.item === Water));
+// The route is an explicit opt-in to Wet Concrete, but still respects an outright block.
+const wBlocked = LP.optimize(Object.assign({}, wsArgs, { waterSink: true, blockedRecipes: new Set([...blockAlumina, WetRC]) }));
+check('water-sink: a blocked Wet Concrete disables the route', (wBlocked.watered || []).length === 0);
+// Integrated plant (makes Alumina Solution locally): water normally recirculates. The option
+// breaks the loop — fresh-water draw rises to the full demand and the scrap water is dumped.
+const intOff = LP.optimize({ outputs: { [AlIngot]: 100 }, allowedInputs: allRaw, objective: 'raw', allowAlternates: true, sinkByproducts: true, waterSink: false });
+const intOn = LP.optimize({ outputs: { [AlIngot]: 100 }, allowedInputs: allRaw, objective: 'raw', allowAlternates: true, sinkByproducts: true, waterSink: true });
+const freshOff = (intOff.raw.find((r) => r.item === Water) || {}).rate || 0;
+const freshOn = (intOn.raw.find((r) => r.item === Water) || {}).rate || 0;
+check('water-sink on: integrated plant draws more fresh water (loop broken)', intOn.feasible && freshOn > freshOff);
+
 // Generator data the disposal model relies on (Fuel-Powered Generator: 250 MW).
 check('generators data present', !!(DATA.generators && DATA.generators.Build_GeneratorFuel_C));
 check('Fuel Generator burns 20 Fuel/min', near(DATA.generators.Build_GeneratorFuel_C.fuels[Fuel], 20, 0.01));

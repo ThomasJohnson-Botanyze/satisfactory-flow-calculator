@@ -395,6 +395,7 @@ const defaultState = () => ({
     objective: 'raw',
     alts: true,
     sink: true, // route surplus by-products to the Awesome Sink / Fuel Generator
+    waterSink: false, // dispose excess by-product Water via Wet Concrete (off = old loop/float)
   },
   // Max-supply rows are { item, amount }, optionally + { fromPlanId, fromItem } so the
   // amount tracks an upstream plan's output (same Project link as opt.extraInputs).
@@ -868,6 +869,7 @@ function applyCleanScale(res, targets) {
   mul(res.recipes, 'machines', 'rate', 'power');
   mul(res.raw, 'rate'); mul(res.outputs, 'rate'); mul(res.surplus, 'rate');
   mul(res.sunk, 'rate', 'points'); mul(res.burned, 'rate', 'mw'); mul(res.depot, 'rate');
+  mul(res.watered, 'rate', 'concrete', 'limestone', 'machines');
   if (typeof res.totalPower === 'number') res.totalPower *= scale;
   if (typeof res.recoveredPower === 'number') res.recoveredPower *= scale;
   if (typeof res.objectiveValue === 'number') res.objectiveValue *= scale;
@@ -1162,8 +1164,9 @@ function renderTables(res) {
   const disp = [];
   (res.sunk || []).forEach((s) => disp.push({ item: s.item, rate: s.rate, dest: `Awesome Sink · ${fmt(s.points, 0)} pts/min` }));
   (res.burned || []).forEach((b) => disp.push({ item: b.item, rate: b.rate, dest: `${b.genName} · ${fmt(b.mw, 0)} MW` }));
+  (res.watered || []).forEach((w) => disp.push({ item: w.item, rate: w.rate, dest: `Wet Concrete · ${fmt(w.machines)}× → ${fmt(w.concrete)} Concrete/min` }));
   (res.surplus || []).forEach((s) => disp.push({ item: s.item, rate: s.rate, dest: 'surplus (unconsumed)' }));
-  const disposed = (res.sunk && res.sunk.length) || (res.burned && res.burned.length);
+  const disposed = (res.sunk && res.sunk.length) || (res.burned && res.burned.length) || (res.watered && res.watered.length);
   $('byprodTitle').textContent = disposed ? 'By-product disposal' : 'By-products / surplus';
   $('byprodWrap').hidden = disp.length === 0;
   const ytb = $('byprodTable').querySelector('tbody');
@@ -1342,6 +1345,7 @@ function buildFlow(res, targets) {
   });
   drawDisposal(res.sunk, 'sink|', 'sink', () => 'Awesome Sink', (d) => `${itemName(d.item)} · ${fmt(d.points, 0)} pts/min`);
   drawDisposal(res.burned, 'gen|', 'gen', (d) => d.genName || 'Fuel Generator', (d) => `${fmt(d.machines)}× · ${fmt(d.mw, 0)} MW`);
+  drawDisposal(res.watered, 'wet|', 'sink', () => 'Wet Concrete', (d) => `${fmt(d.machines)}× → ${fmt(d.concrete)} Concrete/min`);
   // Depot / Storage terminals: outputs the user tagged to be pulled into the
   // Dimensional Depot or stashed in storage. Built like the disposal terminals (one
   // fed node per item) but a destination, not a sink — the production is still real.
@@ -2955,10 +2959,11 @@ function buildCsv(res) {
   const disp = [];
   (res.sunk || []).forEach((s) => disp.push([itemName(s.item), fmt(s.rate), `Awesome Sink (${fmt(s.points, 0)} pts/min)`]));
   (res.burned || []).forEach((b) => disp.push([itemName(b.item), fmt(b.rate), `${b.genName} (${fmt(b.mw, 0)} MW)`]));
+  (res.watered || []).forEach((w) => disp.push([itemName(w.item), fmt(w.rate), `Wet Concrete (${fmt(w.machines)}x -> ${fmt(w.concrete)} Concrete/min)`]));
   (res.surplus || []).forEach((s) => disp.push([itemName(s.item), fmt(s.rate), 'surplus (unconsumed)']));
   if (disp.length) {
     L.push('');
-    L.push((res.sunk && res.sunk.length) || (res.burned && res.burned.length) ? 'By-product disposal' : 'By-products / surplus');
+    L.push((res.sunk && res.sunk.length) || (res.burned && res.burned.length) || (res.watered && res.watered.length) ? 'By-product disposal' : 'By-products / surplus');
     L.push(csvRow(['Item', 'Rate/min', 'Destination']));
     disp.sort((a, b) => a[0].localeCompare(b[0])).forEach((r) => L.push(csvRow(r)));
   }
@@ -3068,7 +3073,7 @@ function computeStateResult(st) {
       for (const o of st.opt.outputs) { const c = nameToClass(o.name); if (c && o.rate > 0) outputs[c] = (outputs[c] || 0) + Number(o.rate) * (isDeliverable(c) ? st.spaceMult : 1); }
       const allowedInputs = optAllowedInputs(st);
       if (!Object.keys(outputs).length || !Object.keys(allowedInputs).length) return { feasible: false };
-      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false, sloopMult: sloopMapAll() });
+      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false, waterSink: !!st.opt.waterSink, sloopMult: sloopMapAll() });
       if (!res.feasible) return { feasible: false };
       res.surplus = res.outputs.filter((o) => !outputs[o.item]);
       tuneSteps(res); // apply per-step overclock / somersloop (machines & power)
@@ -3223,11 +3228,12 @@ function renderOptimize() {
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
   const sink = state.opt.sink !== false;
-  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, sloopMult: sloopMapAll() });
+  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterSink: !!state.opt.waterSink, sloopMult: sloopMapAll() });
   if (!res.feasible) {
     if (res.backup && res.backup.length) {
       const names = res.backup.map(itemName).join(', ');
-      return showEmpty(`By-product would back up: ${names}. It’s a fluid with no recipe consuming it, so it can’t be sunk and would stall the line. Enable an alternate recipe that consumes it, or untick “Sink / consume by-products”.`);
+      const waterTip = res.backup.includes('Desc_Water_C') ? ' For Water specifically, tick “Sink excess water → Wet Concrete”.' : '';
+      return showEmpty(`By-product would back up: ${names}. It’s a fluid with no recipe consuming it, so it can’t be sunk and would stall the line. Enable an alternate recipe that consumes it, or untick “Sink / consume by-products”.${waterTip}`);
     }
     if (res.noProducer && res.noProducer.length) {
       const names = res.noProducer.map(itemName).join(', ');
@@ -3251,6 +3257,7 @@ function renderOptimize() {
   const sunkPts = (res.sunk || []).reduce((a, s) => a + s.points, 0);
   if ((res.sunk || []).length) ex.appendChild(el('div', 'extras-line', `By-products sunk: ${res.sunk.map((s) => itemName(s.item)).join(', ')} — ${fmt(sunkPts, 0)} AWESOME Sink points/min`));
   if ((res.burned || []).length) ex.appendChild(el('div', 'extras-line', `By-products burned: ${res.burned.map((b) => itemName(b.item)).join(', ')} — ${fmt(res.recoveredPower, 0)} MW recovered from generators`));
+  (res.watered || []).forEach((w) => ex.appendChild(el('div', 'extras-line', `Excess water sunk via Wet Concrete: ${fmt(w.rate)} Water/min → ${fmt(w.concrete)} Concrete/min (${fmt(w.machines)} Refinery, ${fmt(w.limestone)} Limestone/min) — no by-product loop`)));
   $('modeExtras').appendChild(ex);
 }
 
@@ -4598,6 +4605,7 @@ function applyStateToControls() {
   $('optObjective').value = state.opt.objective;
   $('optAlts').checked = state.opt.alts;
   $('optSink').checked = state.opt.sink !== false; // default on, incl. plans saved before this option existed
+  $('optWaterSink').checked = !!state.opt.waterSink; // default off; opt-in per plan
   $('maxProduct').value = state.max.product ? itemName(state.max.product) : '';
   $('maxAlts').checked = state.max.alts;
   if ($('xrayWholeBase')) $('xrayWholeBase').checked = !!state.xrayWholeBase;
@@ -4752,6 +4760,7 @@ function init() {
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });
   $('optAlts').addEventListener('change', (e) => { state.opt.alts = e.target.checked; save(); solveAndRender(); });
   $('optSink').addEventListener('change', (e) => { state.opt.sink = e.target.checked; save(); solveAndRender(); });
+  $('optWaterSink').addEventListener('change', (e) => { state.opt.waterSink = e.target.checked; save(); solveAndRender(); });
   $('optAllInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = true)); save(); buildOptInputs(); solveAndRender(); });
   $('optNoInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = false)); save(); buildOptInputs(); solveAndRender(); });
   $('optAddInput').addEventListener('click', () => { (state.opt.extraInputs || (state.opt.extraInputs = [])).push({ name: '', cap: '' }); save(); buildOptExtraInputs(); });
