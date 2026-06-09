@@ -848,12 +848,16 @@ console.log('\n### BASE X-RAY (per-plan area)');
   const { d, app, setVal } = boot13();
   const itemRows = () => [...d.querySelectorAll('#xrayItemsTable tbody tr')];
 
-  // 1) No area + not whole-base: opening X-ray must route to the map and arm the draw tool.
+  // 1) No area + not whole-base: STAY on the X-ray tab with a choice (the Whole-base
+  //    toggle lives in this panel — auto-routing away made it unreachable); the
+  //    "Edit area" button is what routes to the map and arms the draw tool.
   app.setMode('xray');
   let xs = app.getXray();
-  check('no-area X-ray routes to the map', xs.mode === 'map');
-  check('draw tool armed on route', xs.drawing === true && xs.armed === true);
-  check('X-ray view hidden while routed away', d.getElementById('xrayView').hidden === true);
+  check('no-area X-ray stays on its tab (whole-base toggle reachable)', xs.mode === 'xray');
+  check('no-area X-ray offers the two ways forward', d.getElementById('xrayView').hidden === false && /Whole base/.test(d.getElementById('xrayEmpty').textContent) && /Edit area/.test(d.getElementById('xrayEmpty').textContent));
+  d.getElementById('xrayDrawArea').click();
+  xs = app.getXray();
+  check('Edit area routes to the map and arms the draw tool', xs.mode === 'map' && xs.drawing === true && xs.armed === true);
 
   // 2) Trace a region around the near cluster (excludes constructor B at x=100000), close it.
   app.xrayPushWorldPoint(-5000, -5000); app.xrayPushWorldPoint(5000, -5000);
@@ -885,10 +889,10 @@ console.log('\n### BASE X-RAY (per-plan area)');
   check('filter narrows the item table', itemRows().length === 1);
   setVal(d.getElementById('xrayFilter'), '');
 
-  // 6) Clearing the area routes the next X-ray open back to the map.
+  // 6) Clearing the area: the next X-ray open stays put and shows the choice again.
   app.xraySetRegion(null);
   app.setMode('xray');
-  check('clearing the area re-routes to the map', app.getXray().mode === 'map');
+  check('clearing the area shows the area/whole-base choice (no auto-route)', app.getXray().mode === 'xray' && d.getElementById('xrayBody').hidden === true && /Whole base/.test(d.getElementById('xrayEmpty').textContent));
 }
 
 // ---- Sankey view: proportional flow bands as a 3rd view toggle ----

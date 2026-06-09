@@ -327,6 +327,9 @@ const anyNameToClass = (name) => {
 // ---------- state ----------
 const defaultState = () => ({
   mode: 'optimize', // Recipe Optimizer is the default landing tab (Planner is demoted in the nav)
+  // NOTE: `prodMode` (the plan's last PRODUCTION tab: optimize | max | planner) is set
+  // lazily by setMode, NOT defaulted here — a default would override the legacy
+  // fall-back for plans saved before the field existed (see computeStateResult).
   view: 'tables',
   targetItem: '',
   targetRate: 60,
@@ -555,6 +558,10 @@ function deletePlan(id) {
   if (plans.length > 1 && typeof confirm === 'function' && !confirm(`Delete plan "${victim.name}"?`)) return;
   plans.splice(idx, 1);
   if (!plans.length) plans.push({ id: newId(), name: 'Factory 1', projectId: activeProjectId, state: defaultState() });
+  // Links may point at the deleted plan; strip the now-dangling source refs so a
+  // consumer row falls back to its manual cap instead of resolving against a ghost
+  // (which reads as a silent, disabled 0 cap — same treatment as deleteProject).
+  pruneDanglingLinks();
   // When the active plan was deleted, fall back to a sibling in the SAME project (the
   // plan bar only shows that project's plans), else any remaining plan.
   if (id === activeId) {
@@ -707,11 +714,23 @@ function directConsumersOf(sourceId) {
 // After the active plan solves, refresh any plans that consume its output so their
 // linked caps stay in sync. We re-solve each dependent off-screen (compute only,
 // updating its recorded netOutputs) without disturbing the on-screen active plan.
-// Simple one-hop propagation: the active plan's direct consumers are recomputed.
+// Propagation follows the whole downstream chain breadth-first (A→B→C→D all refresh
+// when A changes — one hop used to leave C and D stale), with a visited set so the
+// cycle guard's invariant (links are acyclic) is belt-and-braces enforced here too.
 function propagateLinks(sourcePlanId) {
-  const consumers = directConsumersOf(sourcePlanId).filter((p) => p.id !== activeId);
-  for (const c of consumers) recomputePlanOutputs(c);
-  if (consumers.length) save();
+  const seen = new Set([sourcePlanId]);
+  const queue = [sourcePlanId];
+  let touched = 0;
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const c of directConsumersOf(cur)) {
+      if (seen.has(c.id)) continue;
+      seen.add(c.id);
+      if (c.id !== activeId) { recomputePlanOutputs(c); touched++; }
+      queue.push(c.id); // even the active plan's consumers continue the chain
+    }
+  }
+  if (touched) save();
 }
 
 // ---------- planner solver ----------
@@ -2641,7 +2660,15 @@ function renderXray() {
   const body = $('xrayBody'), empty = $('xrayEmpty');
   if (!body) return;
   if (!xrayData && xrayRaw) aggregateXray(); // (re)aggregate the cached parse for the active scope
-  if (!xrayData) { if (empty) empty.hidden = false; body.hidden = true; return; }
+  if (!xrayData) {
+    if (empty) {
+      // Restore the default no-data prompt (setMode's no-area branch swaps in its own).
+      empty.innerHTML = '<p>Pick your save in the left panel and <b>Analyze base</b> to X-ray your factory.</p>';
+      empty.hidden = false;
+    }
+    body.hidden = true;
+    return;
+  }
   if (empty) empty.hidden = true;
   body.hidden = false;
   const s = xrayData.stats;
@@ -3004,10 +3031,15 @@ function computeStateResult(st) {
   const saved = state;
   state = st; // computePlanner/effectiveAltSet read module `state`; swap then restore
   try {
+    // Solve the plan's PRODUCTION mode. The tab (`st.mode`) may be parked on a
+    // non-production view (project / map / xray / power) — falling through to the
+    // literal tab used to silently re-interpret an Optimizer plan as a Planner one.
+    const m = POWER_SOURCES.includes(st.mode) ? st.mode
+      : st.prodMode || (st.power && st.power.sourceMode) || st.mode;
     // The Power Planner isn't a material-flow plan (it sizes generation, not recipes),
     // so it contributes no raw/machines/power to the project rollup — report no output.
-    if (st.mode === 'power') return { feasible: false };
-    if (st.mode === 'optimize') {
+    if (m === 'power') return { feasible: false };
+    if (m === 'optimize') {
       const outputs = {};
       for (const o of st.opt.outputs) { const c = nameToClass(o.name); if (c && o.rate > 0) outputs[c] = (outputs[c] || 0) + Number(o.rate) * (isDeliverable(c) ? st.spaceMult : 1); }
       const allowedInputs = optAllowedInputs(st);
@@ -3019,7 +3051,7 @@ function computeStateResult(st) {
       applyCleanScale(res, outputs);
       return { feasible: true, res, targets: outputs };
     }
-    if (st.mode === 'max') {
+    if (m === 'max') {
       const product = st.max.product;
       const supply = maxSupplyMap(st);
       if (!product || !Object.keys(supply).length) return { feasible: false };
@@ -3968,6 +4000,12 @@ function setMode(mode) {
   // Entering the Power Planner from a production tab: remember which production solve to
   // read, so the ledger reflects the plan you were just on (and switching back is lossless).
   if (mode === 'power' && POWER_SOURCES.includes(state.mode)) ensurePower().sourceMode = state.mode;
+  // Remember the last production mode separately: parking the tab on a non-production
+  // view (project/map/xray/power) must not change how this plan solves headlessly
+  // (rollup / base balance / linked caps). Capture it both on entering a production
+  // tab and on leaving one, so the info survives `state.mode` being overwritten.
+  if (POWER_SOURCES.includes(mode)) state.prodMode = mode;
+  else if (POWER_SOURCES.includes(state.mode)) state.prodMode = state.mode;
   state.mode = mode;
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.mode === mode));
   document.querySelectorAll('.mode-panel').forEach((p) => { p.hidden = p.dataset.mode !== mode; });
@@ -4008,12 +4046,18 @@ function setMode(mode) {
     renderPower();
   } else if (isXray) {
     $('empty').hidden = true; $('output').hidden = true;
-    // Per-plan scope: the X-ray needs an outlined area (unless "Whole base" is on). With
-    // no area, route to the map, arm the draw tool, and ask the user to outline it.
+    // Per-plan scope: the X-ray prefers an outlined area (unless "Whole base" is on).
+    // With no area, STAY on this tab and offer both ways forward — the "Whole base"
+    // checkbox lives in this panel, and "✏ Edit area" routes to the map with the draw
+    // tool armed. (Auto-routing to the map made the whole-base toggle unreachable and
+    // dropped first-time users into a blank draw mode.)
     if (!state.xrayWholeBase && !activeXrayRegion()) {
-      mapArmedForXray = true;
-      setMode('map');
-      startAreaDraw();
+      const xe = $('xrayEmpty');
+      if (xe) {
+        xe.innerHTML = '<p>No factory area outlined for this plan.</p><p>Tick <b>Whole base (ignore area)</b> in the left panel to analyze your entire save, or click <b>✏ Edit area</b> to outline this plan’s factory on the map.</p>';
+        xe.hidden = false;
+      }
+      if ($('xrayBody')) $('xrayBody').hidden = true;
       return;
     }
     // Parse once for this save (cached); otherwise just re-aggregate for the active scope.
@@ -4187,28 +4231,44 @@ function computeBaseBalance() {
 
   // ----- factory dependency edges -----
   // Explicit links (a consumer declares it pulls item X from plan Y) are authoritative.
-  // A (source,item) is a BOTTLENECK when its explicit consumers' combined demand exceeds
-  // what the source makes, or when a consumer can't solve at all. Auto edges fill in
-  // producer→consumer item matches that have no explicit link yet (drawn dashed as a hint).
+  // A (source,item) is a BOTTLENECK when its explicit consumers' combined attributed
+  // demand exceeds what the source makes, or when a consumer can't solve at all. Auto
+  // edges fill in producer→consumer item matches with no explicit link (drawn dashed).
+  const supplyOf = (id, it) => { const q = planById(id); return q ? (q.produces[it] || 0) : 0; };
   const explicit = [];
   for (const pl of rows) {
+    const consumer = planById(pl.id);
+    // Group this consumer's links by item: its consumption of an item is attributed
+    // ACROSS its sources (split ∝ each source's supply), not counted in full against
+    // every source — otherwise one consumer with two suppliers double-counts.
+    const byItem = {};
     for (const r of planLinkRows(pl)) {
       if (!idSet.has(r.fromPlanId)) continue; // link points outside this project
-      const consumer = planById(pl.id);
-      explicit.push({ from: r.fromPlanId, to: pl.id, item: r.fromItem, demand: consumer ? (consumer.consumes[r.fromItem] || 0) : 0 });
+      const arr = (byItem[r.fromItem] = byItem[r.fromItem] || []);
+      if (!arr.some((q) => q.fromPlanId === r.fromPlanId)) arr.push(r); // dedup same src+item
+    }
+    for (const it in byItem) {
+      const srcs = byItem[it];
+      const totalCons = consumer ? (consumer.consumes[it] || 0) : 0;
+      const supplies = srcs.map((r) => supplyOf(r.fromPlanId, it));
+      const totSup = supplies.reduce((a, b) => a + b, 0);
+      srcs.forEach((r, i) => {
+        const share = srcs.length === 1 ? totalCons : totalCons * (totSup > 0 ? supplies[i] / totSup : 1 / srcs.length);
+        explicit.push({ from: r.fromPlanId, to: pl.id, item: it, demand: share });
+      });
     }
   }
-  // Per (source,item): combined declared demand AND the set of distinct consumers. The app
-  // grants EVERY linking consumer the source's FULL output (resolveLinkedCap doesn't divide
-  // it), so two consumers on one source-item are each promised the whole thing — the source
-  // is over-subscribed even before the solver's reported draw is considered.
+  // Per (source,item): combined attributed demand and the set of distinct consumers.
+  // resolveLinkedCap grants every linking consumer the source's FULL output (caps aren't
+  // divided) — that over-promise is surfaced as a `shared` note on the edge, but a RED
+  // bottleneck is only flagged when the combined demand actually exceeds the supply (so
+  // the graph never contradicts the Part Balance table showing a surplus).
   const demandBySrcItem = {}, consumersBySrcItem = {};
   for (const e of explicit) {
     const k = e.from + '|' + e.item;
     demandBySrcItem[k] = (demandBySrcItem[k] || 0) + e.demand;
     (consumersBySrcItem[k] = consumersBySrcItem[k] || new Set()).add(e.to);
   }
-  const supplyOf = (id, it) => { const q = planById(id); return q ? (q.produces[it] || 0) : 0; };
   const depEdges = [];
   const covered = new Set();
   for (const e of explicit) {
@@ -4216,13 +4276,10 @@ function computeBaseBalance() {
     const k = e.from + '|' + e.item;
     const supply = supplyOf(e.from, e.item);
     const dst = planById(e.to);
-    // Over-subscribed when 2+ factories draw the same source-item (each allotted its full
-    // output) or the combined declared draw already exceeds it; starved when the consumer
-    // can't solve at all.
     const shared = (consumersBySrcItem[k] ? consumersBySrcItem[k].size : 1) >= 2;
-    const over = shared || (demandBySrcItem[k] || 0) > supply + EPS;
-    const rate = e.demand > EPS ? Math.min(e.demand, supply) : supply;
-    depEdges.push({ from: e.from, to: e.to, item: e.item, rate, supply, demand: e.demand, kind: 'link', bottleneck: over || (dst && !dst.feasible) });
+    const over = (demandBySrcItem[k] || 0) > supply + EPS;
+    const rate = Math.min(e.demand, supply); // an infeasible consumer draws nothing — never show the full supply flowing into a dead node
+    depEdges.push({ from: e.from, to: e.to, item: e.item, rate, supply, demand: e.demand, kind: 'link', shared, bottleneck: over || (dst && !dst.feasible) });
   }
   for (const part of parts) {
     const it = part.item;
@@ -4351,7 +4408,7 @@ function renderDepGraph(bal) {
     if (e.kind === 'auto') path.setAttribute('stroke-dasharray', '5 4');
     path.setAttribute('marker-end', e.bottleneck ? 'url(#depArrowBad)' : e.kind === 'auto' ? 'url(#depArrowAuto)' : 'url(#depArrow)');
     const tip = mk('title');
-    tip.textContent = `${itemName(e.item)} · ${fmt(e.rate)}/min${e.bottleneck ? ' · bottleneck (demand exceeds supply)' : ''}${e.kind === 'auto' ? ' · not linked yet' : ''}`;
+    tip.textContent = `${itemName(e.item)} · ${fmt(e.rate)}/min${e.bottleneck ? ' · bottleneck (demand exceeds supply)' : ''}${!e.bottleneck && e.shared ? ' · shared source (each link is granted the full output)' : ''}${e.kind === 'auto' ? ' · not linked yet' : ''}`;
     path.appendChild(tip);
     gE.appendChild(path);
     // Label link edges (and any bottleneck) with item + rate; leave plain auto hints to the tooltip.
