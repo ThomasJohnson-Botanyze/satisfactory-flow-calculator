@@ -129,8 +129,73 @@ for (const c of groups.FGBuildableGeneratorFuel || []) {
   generators[c.ClassName] = { className: c.ClassName, name: c.mDisplayName || c.ClassName, power, fuels };
 }
 
-const out = { items, buildings, recipes, resources, generators };
+// ---- powergen: full generator set for the POWER PLANNER (coal, fuel, biomass,
+// nuclear), incl. solid fuels + supplemental water. Kept SEPARATE from `generators`
+// above (which the by-product sink uses, liquid-only) so adding solid-fuel burners
+// here can't change the optimizer's disposal routing. Geothermal is omitted: its
+// output is location-variable (no fuel), not plannable as a fixed rate.
+//   burn rate (units/min @100%) = 60·power / E      (E from energyOf; fluids per-m³)
+//   supplemental water (m³/min)  = power · ratio · 60 / 1000   (coal 45, nuclear 240)
+const SUPP_ITEM = 'Desc_Water_C'; // every supplemental-requiring generator uses water
+function fuelRates(power, c) {
+  const fuelClasses = (c.mDefaultFuelClasses || '').match(/Desc_[A-Za-z0-9_]+_C/g) || [];
+  const fuels = {};
+  for (const f of fuelClasses) {
+    const e = energyOf[f];
+    if (e > 0) fuels[f] = (60 * power) / e; // includes solids now (coal/coke/biomass)
+  }
+  return fuels;
+}
+const powergen = {};
+for (const gname of ['FGBuildableGeneratorFuel', 'FGBuildableGeneratorNuclear']) {
+  for (const c of groups[gname] || []) {
+    const cn = c.ClassName || '';
+    const power = Number(c.mPowerProduction) || 0;
+    if (!power) continue;
+    const reqSupp = String(c.mRequiresSupplementalResource) === 'True';
+    const ratio = Number(c.mSupplementalToPowerRatio) || 0;
+    powergen[cn] = {
+      className: cn, name: c.mDisplayName || cn, power,
+      fuels: fuelRates(power, c),
+      supplemental: (reqSupp && ratio) ? { item: SUPP_ITEM, rate: (power * ratio * 60) / 1000 } : null,
+    };
+  }
+}
+
+// ---- extractors: for the POWER PLANNER's "from a node" sizing (miners, water/oil
+// pumps, resource-well satellite). rate = items/cycle ÷ cycle-time × 60 at NORMAL
+// purity & 100% clock; fluids are stored in mL so /1000 -> m³. Purity tiers
+// (impure ×0.5 / normal ×1 / pure ×2) apply at plan time to all but the Water
+// Extractor (water sources have no purity). Power scales by clock^exponent.
+function formOf(s) {
+  if (/RF_SOLID/.test(s)) return 'solid';
+  if (/RF_LIQUID/.test(s)) return 'liquid';
+  if (/RF_GAS/.test(s)) return 'gas';
+  return 'solid';
+}
+const extractors = {};
+for (const gname of ['FGBuildableResourceExtractor', 'FGBuildableWaterPump', 'FGBuildableFrackingExtractor']) {
+  for (const c of groups[gname] || []) {
+    const cn = c.ClassName || '';
+    const cycle = Number(c.mExtractCycleTime) || 1;
+    const per = Number(c.mItemsPerCycle) || 0;
+    const form = formOf(c.mAllowedResourceForms || '');
+    let rate = (per / cycle) * 60;
+    if (form !== 'solid') rate /= 1000; // fluids: mL -> m³
+    const allowed = (c.mAllowedResources || '').match(/Desc_[A-Za-z0-9_]+_C/g) || [];
+    extractors[cn] = {
+      className: cn, name: c.mDisplayName || cn,
+      power: Number(c.mPowerConsumption) || 0,
+      exponent: Number(c.mPowerConsumptionExponent) || 1.321929,
+      form, ratePerMin: rate,
+      purity: cn !== 'Build_WaterPump_C', // water nodes have no purity
+      resource: allowed.length === 1 ? allowed[0] : (allowed.length ? allowed : null),
+    };
+  }
+}
+
+const out = { items, buildings, recipes, resources, generators, powergen, extractors };
 const outPath = path.join(__dirname, '..', 'src', 'data.json');
 fs.writeFileSync(outPath, JSON.stringify(out));
 console.log(`Wrote ${outPath}`);
-console.log(`  items ${Object.keys(items).length}, buildings ${Object.keys(buildings).length}, recipes ${Object.keys(recipes).length} (${Object.values(recipes).filter(r=>r.alternate).length} alt), resources ${resources.length}, generators ${Object.keys(generators).length}`);
+console.log(`  items ${Object.keys(items).length}, buildings ${Object.keys(buildings).length}, recipes ${Object.keys(recipes).length} (${Object.values(recipes).filter(r=>r.alternate).length} alt), resources ${resources.length}, generators ${Object.keys(generators).length}, powergen ${Object.keys(powergen).length}, extractors ${Object.keys(extractors).length}`);

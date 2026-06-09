@@ -174,6 +174,15 @@ const ITEMS = DATA.items;
 const RECIPES = DATA.recipes;
 const BUILDINGS = DATA.buildings;
 const RESOURCES = new Set(DATA.resources);
+// Power-planner data (added in 1.x for the Power Planner tab). POWERGEN holds every
+// generator with its fuels{item->burn/min @100%} and optional supplemental water;
+// EXTRACTORS holds miners/pumps with rate/min @100% normal purity + power draw.
+const POWERGEN = DATA.powergen || {};
+const EXTRACTORS = DATA.extractors || {};
+// Node purity output multipliers (impure ½ · normal 1 · pure 2). Applied to a miner/
+// pump's normal-purity rate. Water Extractors have no purity (EXTRACTORS[x].purity=false).
+const PURITY = { impure: 0.5, normal: 1, pure: 2 };
+const WATER_ITEM = 'Desc_Water_C';
 const SVGNS = 'http://www.w3.org/2000/svg';
 
 const itemName = (c) => (ITEMS[c] ? ITEMS[c].name : c);
@@ -345,6 +354,10 @@ const defaultState = () => ({
   nodeSloop: {},
   flowPos: {}, // saved flowchart node positions for this plan (nodeId -> {x,y})
   flowView: null, // saved flowchart zoom/pan for this plan ({k, tx, ty}); null = fit on render
+  // When on, the flowchart shows power infrastructure (opt-in): miner/extractor nodes at
+  // the front feeding each raw, and generator nodes at the end burning the outputs added
+  // in the Power Planner. Off by default so existing charts are unchanged. Per-plan.
+  flowPower: false,
   // null = no save loaded → every alternate available (original behavior).
   // [] = a save was read but no alternates unlocked. [...classNames] = restrict to these.
   unlockedAlts: null,
@@ -380,6 +393,21 @@ const defaultState = () => ({
   // Max-supply rows are { item, amount }, optionally + { fromPlanId, fromItem } so the
   // amount tracks an upstream plan's output (same Project link as opt.extraInputs).
   max: { supply: [{ item: resList[0] ? resList[0].c : '', amount: 120 }], product: '', alts: true },
+  // Power Planner: a whole-factory power ledger over this plan's production. sourceMode =
+  // which production solve to read (optimize|max|planner); minerTier = miner used for solid
+  // raws; purity = per-resource node purity (rawClass -> impure|normal|pure); gens = the
+  // generators you've added to burn an output, each { output: fuelClass, gen: genClass }.
+  power: {
+    sourceMode: 'optimize',
+    minerTier: 'Build_MinerMk1_C',
+    purity: {},
+    gens: [],
+    // Global overclock % (1–250). minerClock applies to every miner/extractor (power
+    // ∝ clock^exponent — overclocking trades buildings for power). genClock applies to
+    // every generator (changes how many you run; gross power & water are clock-invariant).
+    minerClock: 100,
+    genClock: 100,
+  },
   // Net outputs of this plan's last solve (itemClass -> rate/min), recorded so a
   // downstream plan can link an input to it. Per-plan + persisted so links resolve on
   // load before any re-solve. Empty by default (no outputs known yet).
@@ -1096,9 +1124,41 @@ function renderTables(res) {
     });
   }
 
+  renderPowerInfraTables(res);
   $('sumPower').textContent = fmtPower(res.totalPower);
   $('sumMachines').textContent = fmt(res.totalMachines, 0);
   if ($('sumSloops')) $('sumSloops').textContent = fmt(res.totalSloops || 0, 0);
+}
+// Extraction + Power-generation tables in the table view, shown only when the "Power infra"
+// toggle is on. Same powerInfraFor() sizing as the flowchart + Power Planner, so all agree.
+function renderPowerInfraTables(res) {
+  const exWrap = $('extractionWrap'), gnWrap = $('genWrap');
+  if (!exWrap || !gnWrap) return;
+  if (!state.flowPower) { exWrap.hidden = true; gnWrap.hidden = true; return; }
+  const mult = state.powerMult || 1;
+  const { extraction, gens } = powerInfraFor(res, lastTargets);
+  exWrap.hidden = extraction.length === 0;
+  const etb = $('extractionTable').querySelector('tbody'); etb.innerHTML = '';
+  extraction.slice().sort((a, b) => b.powerBase - a.powerBase).forEach((e) => {
+    const tr = el('tr');
+    const td = el('td'); td.appendChild(itemCell(e.item)); tr.appendChild(td);
+    tr.appendChild(el('td', null, e.name + (e.hasPurity ? ` · ${e.purity}` : '')));
+    const c = el('td', 'num'); c.innerHTML = `${fmt(Math.ceil(e.count - 1e-9), 0)}× <span class="mach-sub">(${fmt(e.count)})</span>`; tr.appendChild(c);
+    tr.appendChild(el('td', 'num', `${Math.round(e.clock * 100)}%`));
+    tr.appendChild(el('td', 'num', fmtPower(e.powerBase * mult)));
+    etb.appendChild(tr);
+  });
+  gnWrap.hidden = gens.length === 0;
+  const gtb = $('genTable').querySelector('tbody'); gtb.innerHTML = '';
+  gens.forEach((g) => {
+    const tr = el('tr');
+    const td = el('td'); td.appendChild(itemCell(g.output)); tr.appendChild(td);
+    tr.appendChild(el('td', null, g.name));
+    const c = el('td', 'num'); c.innerHTML = `${fmt(Math.ceil(g.nGen - 1e-9), 0)}× <span class="mach-sub">(${fmt(g.nGen)})</span>`; tr.appendChild(c);
+    tr.appendChild(el('td', 'num', `${Math.round(g.clock * 100)}%`));
+    tr.appendChild(el('td', 'num', '+' + fmtPower(g.mw)));
+    gtb.appendChild(tr);
+  });
 }
 
 // ---------- flowchart ----------
@@ -1166,9 +1226,28 @@ function buildFlow(res, targets) {
       } else addEdge('raw|' + ing.item, s._nid, ing.item, total);
     });
   });
+  // Power infrastructure (opt-in): shared sizing so the flowchart, table, and Power Planner
+  // agree. Extractors gather each raw at the FRONT (extractor → raw → machine); generators
+  // burn outputs at the END (below). Nodes are interactive — double-click to set per-node
+  // overclock (power shards), like a machine.
+  const infra = state.flowPower ? powerInfraFor(res, targets) : null;
+  if (infra) {
+    const mult = state.powerMult || 1;
+    infra.extraction.forEach((e) => {
+      const oc = e.clock !== 1 ? ` · ${Math.round(e.clock * 100)}%` : '';
+      const id = 'ext|' + e.item;
+      const n = addNode(id, 'ext', e.name, `${fmt(Math.ceil(e.count - 1e-9), 0)}× · ${fmtPower(e.powerBase * mult)}${oc}`);
+      n.interactive = true; n.power = { kind: 'ext', item: e.item };
+      addEdge(id, 'raw|' + e.item, e.item, e.rate);
+    });
+  }
   const outs = Object.assign({}, targets || {});
   (res.surplus || []).forEach((s) => { if (outs[s.item] == null) outs[s.item] = s.rate; });
+  // Outputs the Power Planner routes into generators (opt-in) are CONSUMED for power, not
+  // exported — skip their green output node and let the generator node below carry them.
+  const burnedSet = new Set(infra ? infra.gens.map((g) => g.output) : []);
   for (const item in outs) {
+    if (burnedSet.has(item)) continue;
     const oid = 'out|' + item;
     addNode(oid, 'out', itemName(item), fmt(outs[item]) + '/min');
     const provs = producers[item];
@@ -1184,7 +1263,7 @@ function buildFlow(res, targets) {
     if (provs && provs.length) { const tot = provs.reduce((a, p) => a + p.rate, 0) || 1; provs.forEach((p) => addEdge(p.step._nid, id, d.item, d.rate * (p.rate / tot))); }
   });
   drawDisposal(res.sunk, 'sink|', 'sink', () => 'Awesome Sink', (d) => `${itemName(d.item)} · ${fmt(d.points, 0)} pts/min`);
-  drawDisposal(res.burned, 'gen|', 'gen', (d) => d.genName || 'Fuel Generator', (d) => `${itemName(d.item)} · ${fmt(d.mw, 0)} MW`);
+  drawDisposal(res.burned, 'gen|', 'gen', (d) => d.genName || 'Fuel Generator', (d) => `${fmt(d.machines)}× · ${fmt(d.mw, 0)} MW`);
   // Depot / Storage terminals: outputs the user tagged to be pulled into the
   // Dimensional Depot or stashed in storage. Built like the disposal terminals (one
   // fed node per item) but a destination, not a sink — the production is still real.
@@ -1192,6 +1271,28 @@ function buildFlow(res, targets) {
   // terminals (depot|item, storage|item) instead of colliding on one node id.
   drawDisposal(res.depot, (d) => `${d.dest}|${d.item}`, 'depot', (d) => (d.dest === 'storage' ? 'Storage' : 'Dimensional Depot'),
     (d) => `${itemName(d.item)} · ${fmt(d.rate)}/min`);
+  // Power infrastructure (opt-in): generators added in the Power Planner, burning a plan
+  // output at the END of the chart (blue, like the by-product fuel generators), plus the
+  // water extractor that feeds coal/nuclear generators. The burned output's green node was
+  // skipped above, so its producers flow straight into the generator here.
+  if (infra) {
+    const mult = state.powerMult || 1;
+    infra.gens.forEach((g) => {
+      const oc = g.clock !== 1 ? ` · ${Math.round(g.clock * 100)}%` : '';
+      const gid = 'pgen|' + g.idx + '|' + g.output;
+      // count× generators · total MW (fractional count, matching the machine nodes)
+      const gn = addNode(gid, 'gen', g.name, `${fmt(g.nGen)}× · ${fmt(g.mw, 0)} MW${oc}`);
+      gn.interactive = true; gn.power = { kind: 'gen', idx: g.idx };
+      const provs = producers[g.output];
+      if (provs && provs.length) { const tot = provs.reduce((a, pp) => a + pp.rate, 0) || 1; provs.forEach((pp) => addEdge(pp.step._nid, gid, g.output, g.avail * (pp.rate / tot))); }
+      else addEdge('raw|' + g.output, gid, g.output, g.avail);
+      if (g.water) {
+        const wid = 'wgen|' + g.idx;
+        addNode(wid, 'ext', EXTRACTORS.Build_WaterPump_C.name, `${fmt(g.water.count, 0)}× · ${fmtPower(g.water.powerBase * mult)}`);
+        addEdge(wid, gid, WATER_ITEM, g.water.need);
+      }
+    });
+  }
   return { nodes, byId, edges };
 }
 
@@ -1340,7 +1441,7 @@ function drawFlow(flow) {
 
   flow.nodes.forEach((n) => {
     const g = document.createElementNS(SVGNS, 'g');
-    g.setAttribute('class', 'node ' + n.kind + (n.kind === 'machine' && n.interactive ? ' tunable' : ''));
+    g.setAttribute('class', 'node ' + n.kind + (((n.kind === 'machine' && n.interactive) || n.power) ? ' tunable' : ''));
     g.setAttribute('transform', `translate(${n.x},${n.y})`);
     const rect = document.createElementNS(SVGNS, 'rect');
     rect.setAttribute('width', n.w); rect.setAttribute('height', n.h);
@@ -1392,6 +1493,10 @@ function attachDrag(g, node, flow) {
     else if (isUp && last && !moved && node.kind === 'machine' && node.rc && node.interactive) {
       openNodePopup(node.rc, ev.clientX, ev.clientY);
     }
+    // Power-infrastructure nodes (extractor / generator) open the per-node overclock popup.
+    else if (isUp && last && !moved && node.power) {
+      openPowerPopup(node.power, ev.clientX, ev.clientY);
+    }
     last = null; down = null; g.classList.remove('dragging');
     try { g.releasePointerCapture(ev.pointerId); } catch (e) {}
   };
@@ -1406,6 +1511,7 @@ function attachDrag(g, node, flow) {
 // survives the re-render each edit triggers (it keys off the recipe class, re-reading the
 // fresh step from lastResult on every refresh).
 let nodePopupRc = null;
+let powerPopupRef = null; // { kind:'ext', item } | { kind:'gen', idx } — power-node popup
 const stepByRc = (rc) => (lastResult && lastResult.recipes ? lastResult.recipes.find((s) => s.rc === rc) : null);
 
 function onNodePopupOutside(ev) {
@@ -1419,6 +1525,7 @@ function onNodePopupOutside(ev) {
 function onNodePopupKey(ev) { if (ev.key === 'Escape') closeNodePopup(); }
 function closeNodePopup() {
   nodePopupRc = null;
+  powerPopupRef = null;
   const p = $('nodePopup');
   if (p && p.parentNode) p.parentNode.removeChild(p);
   document.removeEventListener('pointerdown', onNodePopupOutside, true);
@@ -1427,6 +1534,7 @@ function closeNodePopup() {
 function openNodePopup(rc, clientX, clientY) {
   if (!stepByRc(rc)) return;
   nodePopupRc = rc;
+  powerPopupRef = null; // leaving any power-node popup
   let p = $('nodePopup');
   if (!p) {
     p = el('div', 'node-popup'); p.id = 'nodePopup';
@@ -1521,6 +1629,77 @@ function renderNodePopup() {
   p.appendChild(el('div', 'np-foot', 'Esc or click away to close'));
 }
 
+// ---------- power-node popup (overclock / power shards for extractors & generators) ----------
+// Opened by tapping an extractor or generator node on the flowchart. Writes a per-node
+// overclock override into state.power (extClock[item] for an extractor, gens[idx].clock for
+// a generator), falling back to the global default when set back to it — mirroring the
+// machine node popup. Re-solves so the table + flowchart + Power Planner page all update.
+function openPowerPopup(ref, clientX, clientY) {
+  nodePopupRc = null;
+  powerPopupRef = ref;
+  let p = $('nodePopup');
+  if (!p) {
+    p = el('div', 'node-popup'); p.id = 'nodePopup';
+    document.body.appendChild(p);
+    document.addEventListener('pointerdown', onNodePopupOutside, true);
+    document.addEventListener('keydown', onNodePopupKey, true);
+  }
+  renderPowerPopup();
+  positionNodePopup(clientX, clientY);
+}
+function renderPowerPopup() {
+  const p = $('nodePopup'); if (!p) return;
+  const ref = powerPopupRef; if (!ref) { closeNodePopup(); return; }
+  const pw = ensurePower();
+  let title, sub, curPct, note, apply;
+  if (ref.kind === 'ext') {
+    const rawRow = (lastResult && lastResult.raw || []).find((r) => r.item === ref.item);
+    const e = rawRow ? extractionFor(ref.item, rawRow.rate, pw) : null;
+    if (!e) { closeNodePopup(); return; }
+    const exCls = FLUID_EXTRACTOR[ref.item] || pw.minerTier;
+    const exponent = (EXTRACTORS[exCls] && EXTRACTORS[exCls].exponent) || 1.321929;
+    title = `${e.name} · ${itemName(ref.item)}`;
+    sub = `${fmt(Math.ceil(e.count - 1e-9), 0)}× · ${fmt(e.rate)} ${isFluid(ref.item) ? 'm³' : ''}/min`;
+    curPct = clampClock(extClockOf(ref.item, pw));
+    note = (s) => s ? `${s} shard${s > 1 ? 's' : ''} / extractor · power ×${fmt(Math.pow(curPct / 100, exponent), 2)}` : 'No shards · power ×1.00';
+    apply = (pct) => { const v = clampClock(pct); if (v === clampClock(pw.minerClock)) delete pw.extClock[ref.item]; else pw.extClock[ref.item] = v; };
+  } else {
+    const g = pw.gens[ref.idx]; const G = g && POWERGEN[g.gen];
+    if (!G) { closeNodePopup(); return; }
+    const avail = lastResult ? outputsOf(lastResult, lastTargets).filter((o) => o.item === g.output).reduce((a, o) => a + o.rate, 0) : 0;
+    const z = genSizing(G, g.output, avail, genClockOf(g, pw));
+    title = `${G.name} · ${itemName(g.output)}`;
+    sub = `${fmt(z.nGen)}× · ${fmt(z.mw, 0)} MW`;
+    curPct = clampClock(genClockOf(g, pw));
+    note = (s) => s ? `${s} shard${s > 1 ? 's' : ''} / generator · runs fewer, harder (total power unchanged)` : 'No shards · 100%';
+    apply = (pct) => { const v = clampClock(pct); if (v === clampClock(pw.genClock)) delete g.clock; else g.clock = v; };
+  }
+  const applyClock = (pct) => { apply(pct); save(); solveAndRender(); renderPowerPopup(); };
+  p.innerHTML = '';
+  const x = el('button', 'modal-x', '✕'); x.title = 'Close'; x.addEventListener('click', closeNodePopup); p.appendChild(x);
+  p.appendChild(el('div', 'np-title', title));
+  p.appendChild(el('div', 'np-sub', sub));
+  const ocSec = el('div', 'np-section');
+  ocSec.appendChild(el('div', 'np-label', 'Overclock (Power Shards)'));
+  const ocRow = el('div', 'np-row');
+  const inp = el('input', 'clock-input'); inp.type = 'number'; inp.min = '1'; inp.max = '250'; inp.step = '1'; inp.value = curPct;
+  inp.addEventListener('change', () => applyClock(parseFloat(inp.value) || 100));
+  ocRow.appendChild(inp); ocRow.appendChild(el('span', 'np-unit', '%'));
+  ocSec.appendChild(ocRow);
+  const shardRow = el('div', 'np-shards');
+  [[0, 100], [1, 150], [2, 200], [3, 250]].forEach(([n, pct]) => {
+    const chip = el('button', 'np-chip', n + '◈');
+    chip.title = n === 0 ? 'No shards · 100%' : `${n} power shard${n > 1 ? 's' : ''} · ${pct}%`;
+    if (curPct === pct) chip.classList.add('on');
+    chip.addEventListener('click', () => applyClock(pct));
+    shardRow.appendChild(chip);
+  });
+  ocSec.appendChild(shardRow);
+  ocSec.appendChild(el('div', 'np-note', note(Math.max(0, Math.min(3, Math.ceil((curPct - 100) / 50))))));
+  p.appendChild(ocSec);
+  p.appendChild(el('div', 'np-foot', 'Esc or click away to close'));
+}
+
 // ---------- flowchart zoom / pan ----------
 const FLOW_MINK = 0.12, FLOW_MAXK = 2;
 const clampFlowK = (k) => Math.max(FLOW_MINK, Math.min(FLOW_MAXK, k));
@@ -1608,12 +1787,18 @@ function renderFlowView() {
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { if (flow === currentFlow) fitFlow(flow); });
   }
 }
+// Reflect the per-plan flowPower toggle on its button (active = power infrastructure shown).
+function syncFlowPowerBtn() {
+  const b = $('flowPowerToggle');
+  if (b) b.classList.toggle('active', !!state.flowPower);
+}
 function applyView() {
   const flow = state.view === 'flow';
   $('flowView').hidden = !flow;
   $('tableView').hidden = flow;
   $('viewFlow').classList.toggle('active', flow);
   $('viewTables').classList.toggle('active', !flow);
+  syncFlowPowerBtn();
   if (flow) renderFlowView();
   else closeNodePopup(); // the popup belongs to the flowchart — drop it when leaving flow view
 }
@@ -2307,6 +2492,9 @@ function computeStateResult(st) {
   const saved = state;
   state = st; // computePlanner/effectiveAltSet read module `state`; swap then restore
   try {
+    // The Power Planner isn't a material-flow plan (it sizes generation, not recipes),
+    // so it contributes no raw/machines/power to the project rollup — report no output.
+    if (st.mode === 'power') return { feasible: false };
     if (st.mode === 'optimize') {
       const outputs = {};
       for (const o of st.opt.outputs) { const c = nameToClass(o.name); if (c && o.rate > 0) outputs[c] = (outputs[c] || 0) + Number(o.rate) * (isDeliverable(c) ? st.spaceMult : 1); }
@@ -2382,6 +2570,7 @@ function solveAndRender() {
   if (state.mode === 'planner') return renderPlanner();
   if (state.mode === 'optimize') return renderOptimize();
   if (state.mode === 'max') return renderMax();
+  if (state.mode === 'power') return renderPower();
 }
 function showEmpty(msg) {
   lastResult = null;
@@ -2530,6 +2719,284 @@ function renderMax() {
   });
   tbl.appendChild(tbody); ex.appendChild(tbl);
   $('modeExtras').appendChild(ex);
+}
+
+// ---------- power planner ----------
+// Whole-factory power LEDGER for the active plan: every production machine's draw, plus
+// miners/extractors sized for the plan's raw inputs, minus generators you choose to burn
+// an output in. Consumption is scaled by the Power Consumption Multiplier; GENERATION is
+// NOT — so the multiplier-impact table shows net power falling as the cost rises. Physics
+// come from POWERGEN / EXTRACTORS (the game's own Docs; see transform-docs.js).
+// Production is read from the plan's chosen source mode so opening this tab never
+// overwrites the Optimizer/Max/Planner setup it reflects.
+const POWER_SOURCES = ['optimize', 'max', 'planner'];
+// Raw fluids extract from a fixed building (no miner-tier choice); solids use the chosen
+// miner tier. Nitrogen comes from a Resource Well satellite (purity applies).
+const FLUID_EXTRACTOR = { Desc_Water_C: 'Build_WaterPump_C', Desc_LiquidOil_C: 'Build_OilPump_C', Desc_NitrogenGas_C: 'Build_FrackingExtractor_C' };
+
+const clampClock = (v) => Math.max(1, Math.min(250, Math.round(Number(v) || 100)));
+function ensurePower() {
+  const p = (state.power && typeof state.power === 'object') ? state.power : {};
+  if (!POWER_SOURCES.includes(p.sourceMode)) p.sourceMode = 'optimize';
+  if (!EXTRACTORS[p.minerTier]) p.minerTier = 'Build_MinerMk1_C';
+  if (!p.purity || typeof p.purity !== 'object') p.purity = {};
+  if (!p.extClock || typeof p.extClock !== 'object') p.extClock = {}; // per-raw OC override
+  if (!Array.isArray(p.gens)) p.gens = [];
+  p.minerClock = clampClock(p.minerClock);
+  p.genClock = clampClock(p.genClock);
+  state.power = p;
+  return p;
+}
+// Effective overclock %: a per-node override (set by double-clicking the flowchart node)
+// falls back to the global default — mirroring the machine model (state.clock + nodeClock).
+const extClockOf = (item, p) => (p.extClock && p.extClock[item] != null ? p.extClock[item] : p.minerClock);
+const genClockOf = (g, p) => (g && g.clock != null ? g.clock : p.genClock);
+// Solve the active plan's production in the chosen source mode WITHOUT touching the plan's
+// own mode (which is 'power' while this tab is open). Shape: { feasible, res, targets }.
+function activePlanProduction() {
+  const p = ensurePower();
+  return computeStateResult(Object.assign({}, state, { mode: p.sourceMode }));
+}
+// A solved plan's net outputs as [{item, rate}] — optimize/max expose res.outputs; the
+// planner exposes targets. Drives the burnable-output picker for generators.
+function planOutputs(prod) {
+  const res = prod.res || {};
+  if (Array.isArray(res.outputs) && res.outputs.length) return res.outputs.map((o) => ({ item: o.item, rate: o.rate }));
+  if (prod.targets) return Object.keys(prod.targets).map((it) => ({ item: it, rate: prod.targets[it] }));
+  return [];
+}
+const outputRate = (prod, item) => planOutputs(prod).filter((o) => o.item === item).reduce((a, o) => a + o.rate, 0);
+// Generators that accept `item` as fuel.
+const gensForFuel = (item) => Object.keys(POWERGEN).filter((g) => POWERGEN[g].fuels && POWERGEN[g].fuels[item] != null);
+// Plan outputs that some generator can burn.
+const burnableOutputs = (prod) => planOutputs(prod).filter((o) => o.rate > 1e-6 && gensForFuel(o.item).length);
+
+// Extractor sizing to gather `rate`/min of raw `item` at its per-resource purity. Base
+// (multiplier = 1) power; the last unit is underclocked to the exact remainder (power ∝
+// clock^exponent), as you'd trim a partial node in-game. Returns null for a non-resource
+// raw (a supplied intermediate) — nothing to mine.
+function extractionFor(item, rate, p) {
+  if (rate <= 1e-9) return null;
+  let M = null;
+  if (FLUID_EXTRACTOR[item]) M = EXTRACTORS[FLUID_EXTRACTOR[item]];
+  else if (RESOURCES.has(item) && !isFluid(item)) M = EXTRACTORS[p.minerTier] || EXTRACTORS.Build_MinerMk1_C;
+  if (!M) return null;
+  const hasPurity = !!M.purity;
+  const base = M.ratePerMin * (hasPurity ? (PURITY[p.purity[item] || 'normal'] || 1) : 1); // one unit @100%
+  if (base <= 0) return null;
+  const c = clampClock(extClockOf(item, p)) / 100;  // per-resource OC (override or global)
+  const fullEach = base * c;
+  const full = Math.floor(rate / fullEach + 1e-9);
+  const rem = rate - full * fullEach;
+  const frac = rem > 1e-9 ? rem / base : 0;         // last unit's clock fraction (≤ c), trims the remainder
+  const count = full + (frac > 0 ? 1 : 0);
+  // Power scales by clock^exponent: full units run at c, the trim unit at frac.
+  const powerBase = full * M.power * Math.pow(c, M.exponent) + (frac > 0 ? M.power * Math.pow(frac, M.exponent) : 0);
+  // Report the dominant clock: the cap c when any full unit runs there, else the trim
+  // clock (a single under-target machine that already makes the whole demand).
+  return { item, rate, name: M.name, hasPurity, purity: p.purity[item] || 'normal', clock: full > 0 ? c : frac, count, powerBase };
+}
+// Size generators of type G burning `avail`/min of `fuelItem` at genClock. Overclocking a
+// generator scales its fuel burn AND output together, so for a fixed fuel rate the total
+// power and water are clock-invariant — only the machine COUNT changes (run fewer, harder).
+function genSizing(G, fuelItem, avail, genClockPct) {
+  const c = clampClock(genClockPct) / 100;
+  const burn = (G.fuels[fuelItem] || 0) * c;
+  const nGen = burn > 0 ? avail / burn : 0;
+  const mw = nGen * G.power * c;
+  let water = null;
+  if (G.supplemental && nGen > 1e-9) {
+    const W = EXTRACTORS.Build_WaterPump_C;
+    const need = nGen * G.supplemental.rate * c;
+    const cnt = Math.max(1, Math.ceil(need / W.ratePerMin - 1e-9));
+    const ck = need / (cnt * W.ratePerMin);
+    water = { need, count: cnt, clock: ck, powerBase: cnt * W.power * Math.pow(ck, W.exponent) };
+  }
+  return { clock: c, nGen, mw, water };
+}
+
+// Net outputs of a SOLVED plan as [{item, rate}] from its result + targets.
+function outputsOf(res, targets) {
+  if (res && Array.isArray(res.outputs) && res.outputs.length) return res.outputs.map((o) => ({ item: o.item, rate: o.rate }));
+  if (targets) return Object.keys(targets).map((it) => ({ item: it, rate: targets[it] }));
+  return [];
+}
+// Shared power-infrastructure sizing for a solved plan — the single seam the Power Planner
+// page, the table view, and the flowchart all read, so a change in one shows in all. Returns
+// the extractors gathering each raw and the generators burning outputs, each at its
+// effective overclock (per-node override or global default). `idx` ties a generator row
+// back to state.power.gens for the node popup.
+function powerInfraFor(res, targets) {
+  const p = ensurePower();
+  const outs = outputsOf(res, targets);
+  const extraction = [];
+  for (const r of (res.raw || [])) { const e = extractionFor(r.item, r.rate, p); if (e) extraction.push(e); }
+  const gens = [];
+  for (let i = 0; i < p.gens.length; i++) {
+    const g = p.gens[i]; const G = POWERGEN[g.gen];
+    if (!G || !G.fuels || G.fuels[g.output] == null) continue;
+    const avail = outs.filter((o) => o.item === g.output).reduce((a, o) => a + o.rate, 0);
+    if (!(avail > 1e-9)) continue;
+    const z = genSizing(G, g.output, avail, genClockOf(g, p));
+    gens.push({ idx: i, output: g.output, gen: g.gen, name: G.name, avail, nGen: z.nGen, mw: z.mw, clock: z.clock, water: z.water });
+  }
+  return { extraction, gens };
+}
+function computeFactoryPower() {
+  const p = ensurePower();
+  const prod = activePlanProduction();
+  if (!prod.feasible) return { feasible: false, sourceMode: p.sourceMode };
+  const res = prod.res;
+  const mult = state.powerMult || 1;
+  const prodPowerBase = (res.totalPower || 0) / mult; // res power already carries ×mult
+  const { extraction, gens } = powerInfraFor(res, prod.targets);
+  const extractionBase = extraction.reduce((a, e) => a + e.powerBase, 0);
+  const genWaterBase = gens.reduce((a, g) => a + (g.water ? g.water.powerBase : 0), 0);
+  const generated = gens.reduce((a, g) => a + g.mw, 0);
+  const consumptionBase = prodPowerBase + extractionBase + genWaterBase;
+  return { feasible: true, sourceMode: p.sourceMode, res, machines: res.totalMachines || 0, prodPowerBase, extraction, extractionBase, gens, generated, genWaterBase, consumptionBase };
+}
+function powerConsRow(tb, stage, building, count, power) {
+  const tr = el('tr');
+  tr.appendChild(el('td', null, stage));
+  tr.appendChild(el('td', null, building));
+  const c = el('td', 'num'); c.innerHTML = `${fmt(Math.ceil(count - 1e-9), 0)}× <span class="mach-sub">(${fmt(count)})</span>`; tr.appendChild(c);
+  tr.appendChild(el('td', 'num', '−' + fmtPower(power)));
+  tb.appendChild(tr);
+}
+function renderPower() {
+  ensurePower();
+  $('empty').hidden = true; $('output').hidden = true;
+  const pv = $('powerView'); if (pv) pv.hidden = false;
+  const set = (id, txt) => { const e = $(id); if (e) e.textContent = txt; };
+  const body = (id) => { const t = $(id); return t ? t.querySelector('tbody') : null; };
+  const cons = body('pwrConsTable'), gtb = body('pwrGenTable'), mtb = body('pwrMultTable');
+  [cons, gtb, mtb].forEach((b) => { if (b) b.innerHTML = ''; });
+  const r = computeFactoryPower();
+  if (!r.feasible) {
+    ['pwrNet', 'pwrDraw', 'pwrGenerated', 'pwrMachines'].forEach((id) => set(id, '—'));
+    const ML = { optimize: 'Recipe Optimizer', max: 'Max Throughput', planner: 'Planner' };
+    set('pwrNote', `No production to account for — set up a plan in the ${ML[r.sourceMode] || 'Optimizer'} first (or repoint the source on the left).`);
+    return;
+  }
+  const m = state.powerMult || 1;
+  const draw = r.consumptionBase * m;
+  const net = r.generated - draw;
+  set('pwrDraw', fmtPower(draw));
+  set('pwrGenerated', fmtPower(r.generated));
+  set('pwrMachines', fmt(Math.ceil(r.machines - 1e-9), 0));
+  set('pwrNet', (net >= 0 ? '+' : '') + fmtPower(net));
+  const netEl = $('pwrNet'); if (netEl) netEl.classList.toggle('neg', net < 0);
+
+  if (cons) {
+    const bld = {};
+    for (const s of r.res.recipes) { (bld[s.building] = bld[s.building] || { name: s.buildingName, count: 0, power: 0 }); bld[s.building].count += s.machines; bld[s.building].power += s.power; }
+    Object.values(bld).sort((a, b) => b.power - a.power).forEach((b, i) => powerConsRow(cons, i === 0 ? 'Production' : '', b.name, b.count, b.power));
+    r.extraction.slice().sort((a, b) => b.powerBase - a.powerBase).forEach((e, i) => powerConsRow(cons, i === 0 ? 'Extraction' : '', `${e.name}${e.hasPurity ? ` · ${e.purity}` : ''}${e.clock !== 1 ? ` · ${Math.round(e.clock * 100)}%` : ''} · ${itemName(e.item)}`, e.count, e.powerBase * m));
+    r.gens.forEach((g) => { if (g.water) powerConsRow(cons, 'Gen. water', `Water Extractor → ${g.name}`, g.water.count, g.water.powerBase * m); });
+    if (!cons.children.length) cons.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No machines.</td></tr>';
+  }
+  if (gtb) {
+    r.gens.forEach((g) => {
+      const tr = el('tr');
+      const td = el('td'); td.appendChild(itemCell(g.output)); tr.appendChild(td);
+      tr.appendChild(el('td', null, g.name + (g.clock !== 1 ? ` · ${Math.round(g.clock * 100)}%` : '')));
+      const c = el('td', 'num'); c.innerHTML = `${fmt(Math.ceil(g.nGen - 1e-9), 0)}× <span class="mach-sub">(${fmt(g.nGen)})</span>`; tr.appendChild(c);
+      tr.appendChild(el('td', 'num', '+' + fmtPower(g.mw)));
+      gtb.appendChild(tr);
+    });
+    if (!r.gens.length) gtb.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No generators — add one to burn an output for power.</td></tr>';
+  }
+  if (mtb) {
+    GAME.power.forEach((mm) => {
+      const d = r.consumptionBase * mm, n = r.generated - d;
+      const tr = el('tr'); if (Math.abs(mm - m) < 1e-9) tr.classList.add('cur');
+      tr.appendChild(el('td', null, mm + '×' + (Math.abs(mm - m) < 1e-9 ? ' (current)' : '')));
+      tr.appendChild(el('td', 'num', fmtPower(d)));
+      const ntd = el('td', 'num', (n >= 0 ? '+' : '') + fmtPower(n)); if (n < 0) ntd.classList.add('neg'); tr.appendChild(ntd);
+      mtb.appendChild(tr);
+    });
+  }
+  const note = $('pwrNote');
+  if (note) {
+    const bits = [`production ${fmtPower(r.prodPowerBase * m)}`];
+    if (r.extractionBase > 1e-9) bits.push(`extraction ${fmtPower(r.extractionBase * m)}`);
+    if (r.genWaterBase > 1e-9) bits.push(`generator water ${fmtPower(r.genWaterBase * m)}`);
+    note.textContent = `Draw = ${bits.join(' + ')}. Extraction power is an estimate at the purity set per resource; generation is never scaled by the multiplier.`;
+  }
+}
+function purityRow(item, p) {
+  const row = el('label', 'fld');
+  row.appendChild(el('span', null, itemName(item)));
+  const sel = el('select', 'sel');
+  [['impure', 'Impure (×0.5)'], ['normal', 'Normal (×1)'], ['pure', 'Pure (×2)']].forEach(([v, lbl]) => {
+    const o = el('option', null, lbl); o.value = v; if ((p.purity[item] || 'normal') === v) o.selected = true; sel.appendChild(o);
+  });
+  sel.addEventListener('change', () => { ensurePower().purity[item] = sel.value; save(); renderPower(); });
+  row.appendChild(sel);
+  return row;
+}
+function powerGenRow(g, idx, burnable) {
+  const row = el('div', 'pwr-row');
+  const osel = el('select', 'sel');
+  burnable.forEach((o) => { const opt = el('option', null, itemName(o.item)); opt.value = o.item; if (o.item === g.output) opt.selected = true; osel.appendChild(opt); });
+  if (!burnable.some((o) => o.item === g.output)) { const opt = el('option', null, `${itemName(g.output)} (n/a)`); opt.value = g.output; opt.selected = true; osel.appendChild(opt); }
+  osel.addEventListener('change', () => { const p = ensurePower(); p.gens[idx].output = osel.value; const gg = gensForFuel(osel.value); if (!gg.includes(p.gens[idx].gen)) p.gens[idx].gen = gg[0] || ''; save(); buildPowerControls(); renderPower(); });
+  const gsel = el('select', 'sel');
+  gensForFuel(g.output).forEach((gc) => { const opt = el('option', null, POWERGEN[gc].name); opt.value = gc; if (gc === g.gen) opt.selected = true; gsel.appendChild(opt); });
+  gsel.addEventListener('change', () => { ensurePower().gens[idx].gen = gsel.value; save(); renderPower(); });
+  const del = el('button', 'btn mini ghost pwr-del', '✕');
+  del.title = 'Remove generator';
+  del.addEventListener('click', () => { ensurePower().gens.splice(idx, 1); save(); buildPowerControls(); renderPower(); });
+  row.appendChild(osel); row.appendChild(gsel); row.appendChild(del);
+  return row;
+}
+function buildPowerControls() {
+  const p = ensurePower();
+  if ($('pwrSource')) $('pwrSource').value = p.sourceMode;
+  const msel = $('pwrMiner');
+  if (msel) {
+    msel.innerHTML = '';
+    Object.keys(EXTRACTORS).filter((c) => EXTRACTORS[c].form === 'solid').forEach((c) => {
+      const o = el('option', null, `${EXTRACTORS[c].name} (${fmt(EXTRACTORS[c].ratePerMin, 0)}/min normal)`); o.value = c;
+      if (c === p.minerTier) o.selected = true; msel.appendChild(o);
+    });
+  }
+  if ($('pwrMinerClock')) $('pwrMinerClock').value = p.minerClock;
+  if ($('pwrGenClock')) $('pwrGenClock').value = p.genClock;
+  const prod = activePlanProduction();
+  const pl = $('pwrPurityList');
+  if (pl) {
+    pl.innerHTML = '';
+    const raws = prod.feasible ? (prod.res.raw || []) : [];
+    const purityRaws = raws.filter((r) => { const e = extractionFor(r.item, r.rate, p); return e && e.hasPurity; })
+      .sort((a, b) => itemName(a.item).localeCompare(itemName(b.item)));
+    purityRaws.forEach((r) => pl.appendChild(purityRow(r.item, p)));
+    if (!purityRaws.length) pl.appendChild(el('small', 'hint', prod.feasible ? 'No purity-based raws in this plan.' : 'Set up production to list raw inputs.'));
+  }
+  const gl = $('pwrGenList');
+  if (gl) {
+    gl.innerHTML = '';
+    const burnable = burnableOutputs(prod);
+    p.gens.forEach((g, idx) => gl.appendChild(powerGenRow(g, idx, burnable)));
+    if (!p.gens.length) gl.appendChild(el('small', 'hint', burnable.length ? 'Add a generator to burn an output for power.' : (prod.feasible ? 'This plan makes no burnable fuel output.' : 'Set up production first.')));
+    if ($('pwrAddGen')) $('pwrAddGen').disabled = !burnable.length;
+  }
+}
+function wirePowerControls() {
+  const on = (id, ev, fn) => { const e = $(id); if (e) e.addEventListener(ev, fn); };
+  on('pwrSource', 'change', (e) => { ensurePower().sourceMode = e.target.value; save(); buildPowerControls(); renderPower(); });
+  on('pwrMiner', 'change', (e) => { ensurePower().minerTier = e.target.value; save(); buildPowerControls(); renderPower(); });
+  on('pwrMinerClock', 'change', (e) => { const v = clampClock(e.target.value); ensurePower().minerClock = v; e.target.value = v; save(); renderPower(); });
+  on('pwrGenClock', 'change', (e) => { const v = clampClock(e.target.value); ensurePower().genClock = v; e.target.value = v; save(); renderPower(); });
+  on('pwrAddGen', 'click', () => {
+    const p = ensurePower();
+    const burnable = burnableOutputs(activePlanProduction());
+    if (!burnable.length) return;
+    const out = burnable[0].item;
+    p.gens.push({ output: out, gen: gensForFuel(out)[0] || '' });
+    save(); buildPowerControls(); renderPower();
+  });
 }
 
 // ---------- control builders ----------
@@ -2922,14 +3389,18 @@ function clearUnlockedFilter() {
 
 function setMode(mode) {
   closeNodePopup(); // switching modes rebuilds the plan — drop any open node popup
+  // Entering the Power Planner from a production tab: remember which production solve to
+  // read, so the ledger reflects the plan you were just on (and switching back is lossless).
+  if (mode === 'power' && POWER_SOURCES.includes(state.mode)) ensurePower().sourceMode = state.mode;
   state.mode = mode;
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.mode === mode));
   document.querySelectorAll('.mode-panel').forEach((p) => { p.hidden = p.dataset.mode !== mode; });
   const isMap = mode === 'map';
   const isProject = mode === 'project';
-  // Map and Project Totals are not single-plan calculators, so the shared calc-only
-  // panels (alternates / cost / per-plan summary) don't apply to them.
-  document.querySelectorAll('.calc-only').forEach((e) => { e.style.display = (isMap || isProject) ? 'none' : ''; });
+  const isPower = mode === 'power';
+  // Map, Project Totals and the Power Planner are not single-plan recipe calculators, so
+  // the shared calc-only panels (alternates / cost / per-plan summary) don't apply.
+  document.querySelectorAll('.calc-only').forEach((e) => { e.style.display = (isMap || isProject || isPower) ? 'none' : ''; });
   $('btnReset').style.display = mode === 'planner' ? '' : 'none';
   // The alternate list auto-selects recipes only in Optimizer/Max. Planner builds
   // from the per-row dropdowns, so spell that out instead of letting users expect a
@@ -2940,6 +3411,7 @@ function setMode(mode) {
     : 'Untick a recipe to stop the optimizer using it — even if unlocked or optimal.';
   $('mapView').hidden = !isMap;
   if ($('projectView')) $('projectView').hidden = !isProject;
+  if ($('powerView')) $('powerView').hidden = !isPower;
   save();
   if (isMap) {
     $('empty').hidden = true; $('output').hidden = true;
@@ -2950,6 +3422,10 @@ function setMode(mode) {
   } else if (isProject) {
     $('empty').hidden = true; $('output').hidden = true;
     renderProjectTotals();
+  } else if (isPower) {
+    $('empty').hidden = true; $('output').hidden = true;
+    buildPowerControls(); // (re)build the dynamic purity + generator lists for this plan
+    renderPower();
   } else solveAndRender();
 }
 
@@ -3053,7 +3529,7 @@ function renderProjectTotals() {
   const ptb = $('projPlansTable') && $('projPlansTable').querySelector('tbody');
   if (ptb) {
     ptb.innerHTML = '';
-    const MODE_LABEL = { planner: 'Planner', optimize: 'Optimizer', max: 'Max Throughput', map: 'Map', project: 'Project' };
+    const MODE_LABEL = { planner: 'Planner', optimize: 'Optimizer', max: 'Max Throughput', map: 'Map', project: 'Project', power: 'Power Planner' };
     t.perPlan.forEach((p) => {
       const tr = el('tr');
       tr.appendChild(el('td', null, p.name));
@@ -3139,6 +3615,7 @@ function applyStateToControls() {
   buildOptInputs();
   buildOptExtraInputs();
   buildMaxSupply();
+  buildPowerControls();
   buildGameSelect('mRecipe', GAME.recipe, state.recipeCost);
   buildGameSelect('mPower', GAME.power, state.powerMult);
   buildGameSelect('mSpace', GAME.space, state.spaceMult);
@@ -3224,9 +3701,11 @@ function init() {
   window.addEventListener('beforeunload', save); // belt-and-suspenders autosave on close
 
   document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setMode(t.dataset.mode)));
+  wirePowerControls();
   $('viewTables').addEventListener('click', () => { state.view = 'tables'; save(); applyView(); });
   $('viewFlow').addEventListener('click', () => { state.view = 'flow'; save(); applyView(); });
   $('flowReset').addEventListener('click', () => { state.flowPos = {}; state.flowView = null; save(); renderFlowView(); });
+  $('flowPowerToggle').addEventListener('click', () => { state.flowPower = !state.flowPower; save(); syncFlowPowerBtn(); solveAndRender(); });
   $('flowFit').addEventListener('click', () => { fitFlow(currentFlow); save(); });
   $('flowZoomIn').addEventListener('click', () => zoomFlowCenter(1.2));
   $('flowZoomOut').addEventListener('click', () => zoomFlowCenter(1 / 1.2));

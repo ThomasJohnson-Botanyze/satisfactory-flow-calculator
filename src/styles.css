@@ -53,6 +53,11 @@ html, body {
 .btn:hover { filter: brightness(1.08); }
 .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
 .btn.ghost:hover { color: var(--text); border-color: var(--accent); }
+/* A ghost button acting as an on/off toggle (e.g. the flowchart "Power infra" button). */
+.btn.ghost.active { background: rgba(249, 168, 37, 0.16); color: var(--accent); border-color: var(--accent); }
+/* The "⚡ Power infra" toggle in the view bar: distinct on-state (it's a toggle, not a
+   view selector, so it shouldn't read the same as the active Tables/Flowchart tab). */
+#flowPowerToggle.active { background: rgba(201, 143, 74, 0.22); color: #e0b074; }
 
 .layout {
   display: grid;
@@ -124,6 +129,36 @@ html, body {
   border-bottom: 1px dashed var(--line);
 }
 .stat b { color: var(--accent); font-variant-numeric: tabular-nums; }
+
+/* Power Planner: a row of headline stat cards (net/gross/support/efficiency), then
+   tables. Net goes red when negative; the current power-multiplier row is highlighted. */
+.power-hero {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.power-hero .stat {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 14px 16px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 10px;
+}
+.power-hero .stat span { color: var(--muted); font-size: 12px; }
+.power-hero .stat b { font-size: 20px; }
+.power-hero .stat.big { grid-column: span 1; }
+.power-hero .stat.big b { font-size: 30px; }
+.power-hero .stat b.neg, #pwrMultTable td.num.neg { color: var(--accent-2); }
+#pwrMultTable tr.cur { background: rgba(249, 168, 37, 0.12); }
+#pwrMultTable tr.cur td { font-weight: 600; color: var(--text); }
+/* A generator row in the Power Planner controls: output select + generator select + remove. */
+.pwr-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.pwr-row .sel { flex: 1; min-width: 0; }
+.pwr-row .pwr-del { flex: none; padding: 4px 8px; }
 .warn {
   margin-top: 12px;
   background: rgba(239, 83, 80, 0.12);
@@ -512,6 +547,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .node.sink rect { fill: #3a1530; stroke: #c061a4; }
 .node.gen rect { fill: #1c2f3a; stroke: #4aa3c7; }
 .node.depot rect { fill: #2c2740; stroke: #8a7bd8; }
+.node.ext rect { fill: #2a2418; stroke: #c98f4a; }
 .node .n-title { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
 /* A tunable machine node is clickable (opens the Overclock / Somersloop popup). */
