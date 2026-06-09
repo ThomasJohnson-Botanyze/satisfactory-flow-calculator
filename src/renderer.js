@@ -466,6 +466,21 @@ function mergeState(s) {
   m.max = Object.assign(defaultState().max, (s && s.max) || {});
   return m;
 }
+// Disk writes are debounced: save() fires on every edit (often every keystroke), so
+// localStorage gets the payload immediately (cheap, synchronous, the crash fallback)
+// while the IPC + fs write coalesces to at most one per pause. flushDiskSave() (on
+// beforeunload) pushes any pending payload through the BLOCKING IPC path so quitting
+// can't outrun the write and silently revert the last edit on next launch.
+let diskSaveTimer = null;
+let diskSavePending = null;
+function flushDiskSave() {
+  if (diskSaveTimer) { clearTimeout(diskSaveTimer); diskSaveTimer = null; }
+  const payload = diskSavePending;
+  diskSavePending = null;
+  if (payload == null || !api) return;
+  if (api.savePlansSync) { if (api.savePlansSync(payload)) return; }
+  if (api.savePlans) api.savePlans(payload); // older preload — best effort
+}
 const save = () => {
   try {
     const globals = syncGlobals(); // keep world-level settings identical across plans
@@ -475,9 +490,13 @@ const save = () => {
       plans: plans.map((p) => ({ id: p.id, name: p.name, projectId: p.projectId, state: p.state })),
       activeId,
       globals,
+      savedAt: Date.now(), // lets load() pick the FRESHER of file vs localStorage
     });
-    if (api && api.savePlans) api.savePlans(payload); // durable userData/plans.json (survives reinstalls)
-    localStorage.setItem(PLANS_KEY, payload);          // fallback + back-compat for older builds
+    localStorage.setItem(PLANS_KEY, payload); // fallback + back-compat for older builds
+    if (api && (api.savePlans || api.savePlansSync)) { // durable userData/plans.json (survives reinstalls)
+      diskSavePending = payload;
+      if (!diskSaveTimer) diskSaveTimer = setTimeout(() => { diskSaveTimer = null; if (diskSavePending != null && api.savePlans) { api.savePlans(diskSavePending); diskSavePending = null; } }, 400);
+    }
   } catch (e) {}
 };
 // Project back-compat seam. Given whatever `projects`/`activeProjectId` a payload
@@ -501,11 +520,16 @@ function ensureProjects(loaded, loadedActive) {
 function load() {
   let fromFile = false;
   try {
-    // Prefer the durable userData file; fall back to localStorage (older builds, or the
-    // first run after upgrade — that case is migrated forward by the save() call below).
-    const f = (api && api.loadPlans) ? api.loadPlans() : null;
-    const raw = JSON.parse(f || localStorage.getItem(PLANS_KEY));
-    fromFile = !!f;
+    // Prefer the durable userData file, but if BOTH stores parse, take the FRESHER one
+    // by savedAt — localStorage is written synchronously on every edit, so when a raced
+    // or quit-interrupted file write left plans.json one save behind, the localStorage
+    // copy carries the missing edit. (Payloads without savedAt count as 0, which keeps
+    // the old file-wins behavior for pre-stamp saves.)
+    const tryParse = (s) => { try { return s ? JSON.parse(s) : null; } catch (_) { return null; } };
+    const pf = tryParse((api && api.loadPlans) ? api.loadPlans() : null);
+    const pl = tryParse(localStorage.getItem(PLANS_KEY));
+    const raw = (pf && pl) ? (((pl.savedAt || 0) > (pf.savedAt || 0)) ? pl : pf) : (pf || pl);
+    fromFile = raw === pf && !!pf;
     if (raw && Array.isArray(raw.plans) && raw.plans.length) {
       // Keep each plan's saved projectId if present; ensureProjects() reconciles it
       // against the project list (and synthesizes a default project for pre-F3 saves).
@@ -3977,15 +4001,32 @@ function loadFromSelectedSave() {
 // follow it, re-read alternates, and refresh the map if one was already loaded. Guarded by
 // the Auto-load toggle and de-duped on (file, mtime) so a burst of writes acts once.
 let _autoSaveFile = '', _autoSaveMtime = 0;
+// The save parses below run synchronously over the preload bridge (~1s each, up to
+// three of them) and the game autosaves every few minutes — running them the moment
+// the watcher fires used to freeze the UI mid-keystroke. Wait for an input lull,
+// then run each parse in its own macrotask so queued events interleave between them.
+let _lastUserInput = 0;
+if (typeof window !== 'undefined') {
+  ['pointerdown', 'keydown', 'wheel'].forEach((t) =>
+    window.addEventListener(t, () => { _lastUserInput = Date.now(); }, { capture: true, passive: true }));
+}
+let _autoSaveTimer = null;
 function onNewestSave(info) {
   if (!info || !info.file || state.autoSave === false) return;
   if (info.file === _autoSaveFile && info.mtimeMs === _autoSaveMtime) return;
   _autoSaveFile = info.file; _autoSaveMtime = info.mtimeMs || 0;
-  state.saveFile = info.file; save();
-  buildSaveList(); // surface the new file in both pickers and re-select it
-  loadAlternatesFrom(info.file, true);
-  if (mapNodes.length || mapBuildings.length) loadMapFrom(info.file, true); // keep a loaded map fresh
-  if (xrayData) loadXrayFrom(info.file, true); // keep a loaded X-ray fresh
+  const IDLE = 1500;
+  const run = () => {
+    _autoSaveTimer = null;
+    if (Date.now() - _lastUserInput < IDLE) { _autoSaveTimer = setTimeout(run, IDLE); return; } // still typing/dragging — try again shortly
+    state.saveFile = info.file; save();
+    buildSaveList(); // surface the new file in both pickers and re-select it
+    loadAlternatesFrom(info.file, true);
+    if (mapNodes.length || mapBuildings.length) setTimeout(() => loadMapFrom(info.file, true), 60); // keep a loaded map fresh
+    if (xrayData) setTimeout(() => loadXrayFrom(info.file, true), 120); // keep a loaded X-ray fresh
+  };
+  clearTimeout(_autoSaveTimer);
+  _autoSaveTimer = setTimeout(run, 50);
 }
 function clearUnlockedFilter() {
   state.unlockedAlts = null;
@@ -4610,7 +4651,7 @@ function init() {
   load();
   buildItemList();
   buildSaveList();
-  window.addEventListener('beforeunload', save); // belt-and-suspenders autosave on close
+  window.addEventListener('beforeunload', () => { save(); flushDiskSave(); }); // blocking flush — quit can't outrun the disk write
 
   document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setMode(t.dataset.mode)));
   wirePowerControls();
@@ -4760,7 +4801,16 @@ function init() {
   renderPlanBar();
   // Seed every plan's recorded net outputs once on boot (headless solve) so links
   // resolve to live numbers immediately, even for plans the user hasn't opened yet.
-  for (const p of plans) recomputePlanOutputs(p);
+  // Only the ACTIVE project's plans solve before first paint (their links are what
+  // the user sees); other projects' plans defer to time-budgeted chunks so cold
+  // start no longer scales with the whole base's plan count.
+  for (const p of activeProjectPlans()) recomputePlanOutputs(p);
+  const deferred = plans.filter((p) => p.projectId !== activeProjectId);
+  if (deferred.length) setTimeout(function chunk() {
+    const t0 = Date.now();
+    while (deferred.length && Date.now() - t0 < 30) recomputePlanOutputs(deferred.shift());
+    if (deferred.length) setTimeout(chunk, 16); else save();
+  }, 0);
   applyStateToControls();
 }
 

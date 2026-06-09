@@ -18,15 +18,38 @@ ipcMain.on('plans:load', (e) => {
   try { e.returnValue = fs.readFileSync(plansPath(), 'utf8'); }
   catch (_) { e.returnValue = null; }
 });
-// Asynchronous, fire-and-forget save (renderer calls on every change). Write to a
-// temp file then rename, so a crash mid-write can never leave a truncated plans.json.
+// Asynchronous, fire-and-forget save (renderer calls on change, debounced). Write to
+// a temp file then rename, so a crash mid-write can never leave a truncated
+// plans.json. Writes are SERIALIZED through a promise chain: overlapping saves used
+// to race on one shared tmp path (two fds truncating the same file; rename EPERM on
+// Windows while the other writer held it open) and failures were silently dropped.
+let saveChain = Promise.resolve();
 ipcMain.on('plans:save', (_e, json) => {
   if (typeof json !== 'string') return;
+  saveChain = saveChain.then(() => new Promise((done) => {
+    try {
+      const p = plansPath();
+      const tmp = p + '.tmp';
+      fs.writeFile(tmp, json, (err) => {
+        if (err) return done();
+        fs.rename(tmp, p, () => done());
+      });
+    } catch (_) { done(); } /* best-effort; localStorage still holds a copy */
+  }));
+});
+// Synchronous save for quit: the async write above can be outrun by app.quit()
+// (window-all-closed fires before the rename lands), silently reverting the last
+// edit on next launch. The renderer's beforeunload flush calls this and blocks
+// until the bytes are on disk.
+ipcMain.on('plans:save-sync', (e, json) => {
   try {
+    if (typeof json !== 'string') { e.returnValue = false; return; }
     const p = plansPath();
-    const tmp = p + '.tmp';
-    fs.writeFile(tmp, json, (err) => { if (!err) fs.rename(tmp, p, () => {}); });
-  } catch (_) { /* best-effort; localStorage still holds a copy */ }
+    const tmp = p + '.tmp-quit';
+    fs.writeFileSync(tmp, json);
+    fs.renameSync(tmp, p);
+    e.returnValue = true;
+  } catch (_) { e.returnValue = false; }
 });
 
 // GitHub repo polled for the latest published release (update notifier).

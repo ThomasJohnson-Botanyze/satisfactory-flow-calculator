@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('api', {
   // renderer can read it during its boot load(); savePlans is fire-and-forget.
   loadPlans: () => { try { return ipcRenderer.sendSync('plans:load'); } catch (_) { return null; } },
   savePlans: (json) => { try { ipcRenderer.send('plans:save', json); } catch (_) {} },
+  // Blocking save for the renderer's beforeunload flush — the async path can be
+  // outrun by app quit, dropping the last edit (see main.js plans:save-sync).
+  savePlansSync: (json) => { try { return ipcRenderer.sendSync('plans:save-sync', json); } catch (_) { return false; } },
   // Open external (http/https) links in the OS browser; ignore anything else so a
   // crafted string can't drive shell.openExternal to a file:/custom-scheme handler.
   openExternal: (url) => { if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url); },
