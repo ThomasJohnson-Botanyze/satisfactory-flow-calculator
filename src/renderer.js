@@ -783,16 +783,21 @@ function applyCleanScale(res, targets) {
 function plannerTargets() { return plannerTargetsFor(state); }
 // Each desired-output row's destination, normalised: absent / unknown → 'line'.
 const normDest = (d) => (d === 'depot' || d === 'storage' ? d : 'line');
-// Map item class -> destination for the current Planner outputs. When the same item
-// appears on multiple rows, 'line' wins (it stays a primary line product); otherwise
-// the (single) non-line destination applies. Items with no matching output default
-// to 'line', so callers can treat a missing entry as a normal line product.
-function destOf() {
-  const d = {};
-  const note = (c, dest) => { if (!c) return; const v = normDest(dest); if (d[c] === 'line') return; if (v === 'line' || d[c] == null) d[c] = v; };
-  note(nameToClass(state.targetItem) || state.targetItem, state.targetDest);
-  for (const o of state.extraTargets || []) note(nameToClass(o.name), o.dest);
-  return d;
+// Per-item rate split across destinations for the current Planner outputs. Unlike a
+// single dest-per-item map, this lets the SAME item feed multiple destinations — e.g.
+// 60/min Rocket Fuel to the line AND 60/min to storage render as two separate output
+// terminals, not one merged box (the old 'line'-wins collapse). Returns item class ->
+// { line, depot, storage } weights in raw row rates; consumed as fractions of the
+// scaled total, so the space-elevator multiplier and clean-ratio scale cancel out.
+function destBreakdown() {
+  const b = {};
+  const add = (c, rate, dest) => {
+    if (!c || !(Number(rate) > 0)) return;
+    (b[c] = b[c] || { line: 0, depot: 0, storage: 0 })[normDest(dest)] += Number(rate);
+  };
+  add(nameToClass(state.targetItem) || state.targetItem, state.targetRate, state.targetDest);
+  for (const o of state.extraTargets || []) add(nameToClass(o.name), o.rate, o.dest);
+  return b;
 }
 function computePlanner(targets) {
   const tg = targets || plannerTargets();
@@ -1127,7 +1132,7 @@ function buildFlow(res, targets) {
   // Fuel Generator. One node per disposed item, fed by whatever produced it (a producer
   // can split between a real consumer and disposal, so these coexist with normal edges).
   const drawDisposal = (list, prefix, kind, title, sub) => (list || []).forEach((d) => {
-    const id = prefix + d.item;
+    const id = (typeof prefix === 'function' ? prefix(d) : prefix + d.item);
     addNode(id, kind, title(d), sub(d));
     const provs = producers[d.item];
     if (provs && provs.length) { const tot = provs.reduce((a, p) => a + p.rate, 0) || 1; provs.forEach((p) => addEdge(p.step._nid, id, d.item, d.rate * (p.rate / tot))); }
@@ -1137,7 +1142,9 @@ function buildFlow(res, targets) {
   // Depot / Storage terminals: outputs the user tagged to be pulled into the
   // Dimensional Depot or stashed in storage. Built like the disposal terminals (one
   // fed node per item) but a destination, not a sink — the production is still real.
-  drawDisposal(res.depot, 'depot|', 'depot', (d) => (d.dest === 'storage' ? 'Storage' : 'Dimensional Depot'),
+  // Keyed by dest so the SAME item routed to both depot and storage gets two separate
+  // terminals (depot|item, storage|item) instead of colliding on one node id.
+  drawDisposal(res.depot, (d) => `${d.dest}|${d.item}`, 'depot', (d) => (d.dest === 'storage' ? 'Storage' : 'Dimensional Depot'),
     (d) => `${itemName(d.item)} · ${fmt(d.rate)}/min`);
   return { nodes, byId, edges };
 }
@@ -2189,16 +2196,22 @@ function renderPlanner() {
   if (!res.feasible) return showEmpty('No feasible plan: the selected recipes can’t balance — a recycle loop that consumes more than it makes. Switch one alternate to break it.');
   applyCleanScale(res); // scale to whole-machine ratios when the toggle is on (no-op otherwise)
   // Split the desired outputs by destination. Depot / Storage outputs stay full
-  // production demand (already in res.targets), but are pulled out of the line-output
-  // set so they render in their own group + a distinct flow terminal, not as primary
-  // line products. lineTargets is what feeds the normal green output nodes.
-  const dest = destOf();
+  // production demand (already summed into res.targets), but are pulled out of the
+  // line-output set so they render in their own group + a distinct flow terminal, not
+  // as primary line products. A single item split across rows (e.g. some to the line,
+  // some to storage) is divided by its per-destination weights so each destination
+  // gets its own terminal. lineTargets is what feeds the normal green output nodes.
+  const bd = destBreakdown();
   const lineTargets = {};
   res.depot = [];
   for (const item in res.targets) {
-    const d = dest[item] || 'line';
-    if (d === 'line') lineTargets[item] = res.targets[item];
-    else res.depot.push({ item, rate: res.targets[item], dest: d });
+    const total = res.targets[item];
+    const b = bd[item];
+    const sum = b ? b.line + b.depot + b.storage : 0;
+    if (!sum) { lineTargets[item] = total; continue; } // no breakdown row -> treat as line
+    if (b.line > 1e-9) lineTargets[item] = total * (b.line / sum);
+    if (b.depot > 1e-9) res.depot.push({ item, rate: total * (b.depot / sum), dest: 'depot' });
+    if (b.storage > 1e-9) res.depot.push({ item, rate: total * (b.storage / sum), dest: 'storage' });
   }
   present(res, lineTargets);
   // Intermediates whose producers were all blocked silently became free "raw" inputs —

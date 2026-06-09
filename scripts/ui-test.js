@@ -329,6 +329,23 @@ setVal8(exRow8.querySelector('.row-dest'), 'storage', 'change');
 check('storage destination relabels to Storage', [...d8.querySelectorAll('#depotTable tbody tr')].some((tr) => /Storage/.test(tr.textContent)));
 check('storage output still excluded from line outputs', d8.getElementById('depotWrap').hidden === false);
 
+// Same item, two destinations: Iron Plate to the line (primary, 30) AND to storage (extra
+// row, now also Iron Plate at 30) must split into two terminals — one green line output
+// AND one storage terminal — not collapse into a single box. Regression guard for the
+// per-row destination breakdown (the old item->one-dest map dropped the storage portion).
+setVal8(exRow8.querySelector('.row-item'), 'Iron Plate'); // extra row: Iron Plate -> storage
+const iplateCls8 = Object.keys(DATA.items).find((k) => DATA.items[k].name === 'Iron Plate');
+check('split: Iron Plate still listed under To Depot / Storage', depotRowTexts8().some((t) => /Iron Plate/.test(t)));
+check('split: storage row reads Storage', [...d8.querySelectorAll('#depotTable tbody tr')].some((tr) => /Iron Plate/.test(tr.textContent) && /Storage/.test(tr.textContent)));
+click8(d8.getElementById('viewFlow'));
+const flow8b = dom8.window.__lastFlow;
+check('split: same item is STILL a green line output', flow8b.nodes.some((n) => n.id === 'out|' + iplateCls8 && n.kind === 'out'));
+check('split: same item ALSO has a fed storage terminal', flow8b.nodes.some((n) => n.id === 'storage|' + iplateCls8 && n.kind === 'depot' && n.ins.length > 0));
+check('split: line + storage portions both ~30/min (no double-count, no drop)',
+  /\b30\b/.test((flow8b.nodes.find((n) => n.id === 'out|' + iplateCls8) || {}).sub || '') &&
+  /\b30\b/.test((flow8b.nodes.find((n) => n.id === 'storage|' + iplateCls8) || {}).sub || ''));
+click8(d8.getElementById('viewTables'));
+
 // Optimizer by-product edges: a recipe that eats another recipe's *by-product*
 // (Petroleum Coke consumes the Heavy Oil Residue that standard Plastic emits) must
 // render with a real input edge — not as an orphan machine node while the by-product
