@@ -207,6 +207,16 @@
             <small id="mapStatus" class="hint">Pick your save and Load to plot resource nodes.</small>
           </section>
 
+          <section class="ctl-group" id="areaPanel">
+            <h2>Factory area <small class="badge">for Base X-ray</small></h2>
+            <p class="hint" style="margin-top:-6px">Outline this plan’s factory on the map. The Base X-ray tab then analyzes only the machines inside it. Editing area for: <b id="areaPlanName">—</b></p>
+            <div class="chip-toolbar">
+              <button id="areaDraw" class="btn mini">✏ Draw area</button>
+              <button id="areaClear" class="btn mini ghost" title="Remove this plan’s outlined area">Clear area</button>
+            </div>
+            <small id="areaStatus" class="hint">No area drawn. Draw one to scope this plan’s Base X-ray to its machines.</small>
+          </section>
+
           <section class="ctl-group">
             <h2>Show resources</h2>
             <div class="chip-toolbar">
@@ -275,10 +285,15 @@
               <select id="xraySaveSelect" class="sel"></select>
             </label>
             <div class="chip-toolbar">
-              <button id="xrayLoad" class="btn mini" title="Analyze the selected save's production">Analyze base</button>
+              <button id="xrayLoad" class="btn mini" title="Re-read the selected save and analyze">Analyze</button>
               <button id="xrayRefresh" class="btn mini ghost" aria-label="Rescan the save folder" title="Rescan the save folder">↻</button>
             </div>
-            <small id="xrayStatus" class="hint">Pick your save and Analyze to X-ray your base.</small>
+            <small id="xrayStatus" class="hint">Pick your save and Analyze to X-ray this plan’s area.</small>
+            <div class="xray-scope-row">
+              <span id="xrayScope" class="hint">Scope: this plan’s outlined area</span>
+              <button id="xrayDrawArea" class="btn mini ghost" title="Outline this plan’s factory area on the map">✏ Edit area</button>
+            </div>
+            <label class="check"><input type="checkbox" id="xrayWholeBase" /> Whole base (ignore area)</label>
           </section>
 
           <section class="ctl-group">

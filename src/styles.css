@@ -902,3 +902,11 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
   background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
   vertical-align: middle;
 }
+
+/* ============ Factory-area drawing + per-plan X-ray ============ */
+#mapCanvas.drawing { cursor: crosshair; }
+/* the area button while a trace is in progress */
+.btn.active { background: var(--accent); color: #1a1205; border-color: var(--accent); }
+#areaPanel { border-left: 2px solid var(--accent); padding-left: 10px; }
+.xray-scope-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin: 8px 0 6px; }
+#xrayScope { color: var(--accent); font-weight: 600; }

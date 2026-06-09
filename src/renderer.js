@@ -8,11 +8,12 @@
 // data/solver/building-meta are pure compute and get bundled into this script by
 // esbuild (so the renderer needs no Node require at runtime, which lets the window
 // run with contextIsolation on / nodeIntegration off).
-let DATA, LP, BMETA;
+let DATA, LP, BMETA, PX;
 try {
   DATA = require('./data.json');
   LP = require('./solver-lp');
   BMETA = require('./building-meta');
+  PX = require('./production-xray'); // pure aggregation, bundled so the page re-scopes the X-ray locally
 } catch (err) {
   showFatalLoadError(err);
   throw err; // the rest of the renderer can't run without these — halt cleanly
@@ -47,6 +48,7 @@ const SAVE = {
   readUnlockedAlternates: (file) => (api ? api.readUnlockedAlternates(file) : SAVE_UNAVAILABLE),
   readMap: (file) => (api ? api.readMap(file) : SAVE_UNAVAILABLE),
   readProduction: (file, opts) => (api ? api.readProduction(file, opts) : SAVE_UNAVAILABLE),
+  readProductionRecords: (file) => (api ? api.readProductionRecords(file) : SAVE_UNAVAILABLE),
 };
 
 // ---------- support links ----------
@@ -413,6 +415,14 @@ const defaultState = () => ({
   // downstream plan can link an input to it. Per-plan + persisted so links resolve on
   // load before any re-solve. Empty by default (no outputs known yet).
   netOutputs: {},
+  // Base X-ray: a polygon (world centimetres, [{x,y},...]) the user draws on the map to
+  // mark THIS plan's factory footprint. The X-ray tab scopes its analysis to the machines
+  // inside it. null/<3 points = no area drawn yet (the X-ray tab routes to the map to draw
+  // one). Per-plan so each factory carves out its own slice of the shared save.
+  xrayRegion: null,
+  // When on, the X-ray ignores xrayRegion and analyzes the whole save (the original
+  // whole-base view). Per-plan toggle; default off = scoped to the drawn area.
+  xrayWholeBase: false,
 });
 let state = defaultState();
 
@@ -1864,11 +1874,19 @@ let mapRAF = 0;
 let mapCw = 0, mapCh = 0;          // last canvas CSS size, for reframing on window resize
 
 // ---------- Base X-ray (production analysis from a save) ----------
-let xrayData = null;               // last computeProduction() result, or null before a load
+let xrayRaw = null;                // flat per-actor records from the last parse (PX.extractRecords)
+let xrayRawFile = '';              // which .sav xrayRaw was parsed from (so plan switches don't re-parse)
+let xrayData = null;               // aggregated summary for the active plan's scope (PX.aggregate)
 let xrayFilter = '';               // item-table search box
 let xraySort = 'netDesc';          // item-table sort key
 let xrayHideBalanced = false;
 let xrayRawOnly = false;
+
+// ---------- map region drawing (the per-plan factory outline) ----------
+let mapDrawing = false;            // true while the user is tracing a polygon
+let mapDrawPts = [];               // in-progress vertices in WORLD cm
+let mapDrawHover = null;           // live cursor position in world cm (preview segment)
+let mapArmedForXray = false;       // routed here from the X-ray tab — show the "outline this" prompt
 
 // ---------- factory buildings overlay (Cartograph-style) ----------
 // Buildings are drawn as vectors every frame (not baked to an offscreen) so that
@@ -1947,6 +1965,13 @@ function ensureMapImg() {
 }
 function worldToImgX(x) { return (x - MAP_BOUNDS.west) / (MAP_BOUNDS.east - MAP_BOUNDS.west) * MAP_IMG_W; }
 function worldToImgY(y) { return (y - MAP_BOUNDS.north) / (MAP_BOUNDS.south - MAP_BOUNDS.north) * MAP_IMG_H; }
+// Inverses, for turning a click back into world cm (region drawing).
+function imgToWorldX(ix) { return MAP_BOUNDS.west + (ix / MAP_IMG_W) * (MAP_BOUNDS.east - MAP_BOUNDS.west); }
+function imgToWorldY(iy) { return MAP_BOUNDS.north + (iy / MAP_IMG_H) * (MAP_BOUNDS.south - MAP_BOUNDS.north); }
+// Canvas CSS-pixel coords -> world cm (screen = img*s + o; getBoundingClientRect gives CSS px).
+function screenToWorld(sx, sy) {
+  return { x: imgToWorldX((sx - mapV.ox) / mapV.s), y: imgToWorldY((sy - mapV.oy) / mapV.s) };
+}
 function resourceColor(n) { return (n.resourceClass && RES_COLORS[n.resourceClass]) || KIND_COLOR[n.kind] || '#bbb'; }
 
 function resOn(n) {
@@ -2115,6 +2140,7 @@ function drawMap() {
   const cv = $('mapCanvas'); if (!cv) return;
   const { cw, ch, dpr } = resizeMapCanvas();
   const ctx = cv.getContext('2d');
+  if (!ctx) return; // no 2D context (e.g. headless jsdom without the canvas package)
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#10141b'; ctx.fillRect(0, 0, cv.width, cv.height);
   if (!mapV.ready) fitMapView();
@@ -2131,7 +2157,57 @@ function drawMap() {
     if (!collVisible(c)) continue;
     drawCollectable(ctx, c, worldToImgX(c.x), worldToImgY(c.y), s);
   }
+  drawRegions(ctx, s);
   updateMapCount();
+}
+
+// Draw the per-plan factory outlines: other plans in this project faintly (with a name
+// label) so the carve-up is visible, the active plan's saved area solid, and any
+// in-progress trace with a preview segment to the cursor. All in image space (ctx
+// already carries the map transform); strokes are /s so they stay one screen px.
+function regionToImg(poly) { return poly.map((p) => ({ x: worldToImgX(p.x), y: worldToImgY(p.y) })); }
+function strokePoly(ctx, pts, close) {
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  if (close) ctx.closePath();
+}
+function drawRegions(ctx, s) {
+  const accent = (getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#f9a825').trim();
+  // other plans in the active project (faint, read-only) — context for the carve-up
+  const act = activePlan();
+  for (const p of (typeof activeProjectPlans === 'function' ? activeProjectPlans() : [])) {
+    if (!act || p.id === act.id) continue;
+    const poly = p.state && p.state.xrayRegion;
+    if (!poly || poly.length < 3) continue;
+    const pts = regionToImg(poly);
+    strokePoly(ctx, pts, true);
+    ctx.fillStyle = 'rgba(120,140,170,0.06)'; ctx.fill();
+    ctx.lineWidth = 1 / s; ctx.strokeStyle = 'rgba(150,170,200,0.5)'; ctx.setLineDash([6 / s, 5 / s]); ctx.stroke(); ctx.setLineDash([]);
+    // name label at the polygon's centroid
+    let cx = 0, cy = 0; for (const q of pts) { cx += q.x; cy += q.y; } cx /= pts.length; cy /= pts.length;
+    ctx.fillStyle = 'rgba(180,195,215,0.7)'; ctx.font = `${12 / s}px system-ui, sans-serif`; ctx.textAlign = 'center';
+    ctx.fillText(p.name, cx, cy);
+  }
+  // active plan's saved area (solid accent)
+  const saved = state.xrayRegion;
+  if (saved && saved.length >= 3 && !mapDrawing) {
+    const pts = regionToImg(saved);
+    strokePoly(ctx, pts, true);
+    ctx.fillStyle = 'rgba(249,168,37,0.10)'; ctx.fill();
+    ctx.lineWidth = 2 / s; ctx.strokeStyle = accent; ctx.stroke();
+    for (const q of pts) { ctx.beginPath(); ctx.arc(q.x, q.y, 3 / s, 0, Math.PI * 2); ctx.fillStyle = accent; ctx.fill(); }
+  }
+  // in-progress trace
+  if (mapDrawing && mapDrawPts.length) {
+    const pts = regionToImg(mapDrawPts);
+    strokePoly(ctx, pts, false);
+    if (mapDrawHover) ctx.lineTo(worldToImgX(mapDrawHover.x), worldToImgY(mapDrawHover.y));
+    ctx.lineWidth = 2 / s; ctx.strokeStyle = accent; ctx.setLineDash([5 / s, 4 / s]); ctx.stroke(); ctx.setLineDash([]);
+    for (const q of pts) { ctx.beginPath(); ctx.arc(q.x, q.y, 3.5 / s, 0, Math.PI * 2); ctx.fillStyle = accent; ctx.fill(); }
+    // highlight the first vertex (click it to close) once there are enough points
+    if (pts.length >= 3) { ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, 6 / s, 0, Math.PI * 2); ctx.lineWidth = 1.5 / s; ctx.strokeStyle = '#fff'; ctx.stroke(); }
+  }
 }
 function updateMapCount() {
   const c = $('mapCount'); if (!c) return;
@@ -2287,9 +2363,70 @@ function loadMapFromSave() {
   loadMapFrom(sel && sel.value, false);
 }
 
-// ---------- Base X-ray (whole-base production analysis) ----------
-// Parse a save and compute the production X-ray. Mirrors loadMapFrom: defers the
-// (synchronous, ~1s on a big base) parse so the "Analyzing…" line paints first.
+// ---------- factory-area drawing (the per-plan outline that scopes the X-ray) ----------
+// The polygon is stored on the ACTIVE plan (state.xrayRegion) in world cm, so each plan
+// outlines its own slice of the shared save. Trace = click vertices, click the first
+// vertex (or double-click / Enter) to close, Esc to cancel.
+function startAreaDraw() {
+  if (state.mode !== 'map') setMode('map');
+  mapDrawing = true; mapDrawPts = []; mapDrawHover = null;
+  const cv = $('mapCanvas'); if (cv) cv.classList.add('drawing');
+  renderAreaControls(); scheduleMapDraw();
+}
+function cancelAreaDraw() {
+  mapDrawing = false; mapDrawPts = []; mapDrawHover = null;
+  const cv = $('mapCanvas'); if (cv) cv.classList.remove('drawing');
+  renderAreaControls(); scheduleMapDraw();
+}
+function finishAreaDraw() {
+  if (mapDrawPts.length >= 3) {
+    state.xrayRegion = mapDrawPts.map((p) => ({ x: p.x, y: p.y }));
+    save();
+    xrayData = null; // force the X-ray to re-aggregate for the new area
+    mapArmedForXray = false;
+  }
+  cancelAreaDraw();
+}
+function clearArea() {
+  state.xrayRegion = null; save(); xrayData = null;
+  renderAreaControls(); scheduleMapDraw();
+}
+// A click while drawing: close if it lands on the first vertex (>=3 pts), else add a point.
+function addAreaPoint(sx, sy) {
+  if (mapDrawPts.length >= 3) {
+    const p0 = mapDrawPts[0];
+    const dx = (worldToImgX(p0.x) * mapV.s + mapV.ox) - sx;
+    const dy = (worldToImgY(p0.y) * mapV.s + mapV.oy) - sy;
+    if (dx * dx + dy * dy <= 100) { finishAreaDraw(); return; } // within ~10px of the start
+  }
+  mapDrawPts.push(screenToWorld(sx, sy));
+  renderAreaControls(); scheduleMapDraw();
+}
+// Update the map's "Factory area" panel: which plan it edits, point count, button state.
+function renderAreaControls() {
+  const lab = $('areaPlanName'); if (lab) lab.textContent = activePlan() ? activePlan().name : '—';
+  const st = $('areaStatus');
+  const has = state.xrayRegion && state.xrayRegion.length >= 3;
+  if (st) {
+    st.classList.toggle('warn-text', mapArmedForXray && !has && !mapDrawing);
+    st.textContent = mapDrawing
+      ? `Tracing… ${mapDrawPts.length} point${mapDrawPts.length === 1 ? '' : 's'}. Click the first dot, double-click, or press Enter to close · Esc to cancel.`
+      : has
+        ? `Area set (${state.xrayRegion.length} points). The X-ray analyzes machines inside it.`
+        : mapArmedForXray
+          ? 'This plan has no area yet — click “Draw area” and trace around its machines, then reopen Base X-ray.'
+          : 'No area drawn. Draw one to scope this plan’s Base X-ray to its machines.';
+  }
+  const draw = $('areaDraw'), clr = $('areaClear');
+  if (draw) { draw.textContent = mapDrawing ? '■ Stop' : (has ? '✏ Redraw area' : '✏ Draw area'); draw.classList.toggle('active', mapDrawing); }
+  if (clr) clr.disabled = !has && !mapDrawing;
+}
+
+// ---------- Base X-ray (per-plan production analysis) ----------
+// Parse a save ONCE into flat per-actor records (cached as xrayRaw), then aggregate them
+// for the active plan's scope. Re-scoping to another plan's area never re-parses — it
+// just re-runs the cheap aggregate. Mirrors loadMapFrom: defers the (~1s) parse so the
+// "Analyzing…" line paints first.
 function loadXrayFrom(file, silent) {
   const st = $('xrayStatus');
   if (!file) { if (st && !silent) st.textContent = 'No save selected.'; return; }
@@ -2297,27 +2434,35 @@ function loadXrayFrom(file, silent) {
   state.saveFile = file; save(); // remember across sessions (shared with the other save pickers)
   setTimeout(() => {
     let res;
-    // Power draw is scaled by the same Power Consumption Multiplier the rest of the app uses,
-    // so the X-ray's MW matches the Power Planner and the user's game setting.
-    try { res = SAVE.readProduction(file, { powerMult: state.powerMult || 1 }); }
+    try { res = SAVE.readProductionRecords(file); }
     catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
-    if (!res.ok) { if (st) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); } xrayData = null; renderXray(); return; }
-    xrayData = res.xray;
-    xrayData._saveName = res.saveName;
-    xrayData._savedAt = res.savedAt;
-    const s = xrayData.stats;
-    const age = relAge(res.savedAt);
-    if (st) {
-      st.classList.remove('warn-text');
-      st.textContent = `${res.saveName}: ${fmt(s.totalMachines, 0)} machines · ${fmt(s.itemTypes, 0)} item types · ${fmtPower(s.totalPower + s.extractionPower)} draw`
-        + (age ? ` · saved ${age}` : '');
-    }
+    if (!res.ok) { if (st) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); } xrayRaw = null; xrayData = null; renderXray(); return; }
+    xrayRaw = res.records;
+    xrayRawFile = file;
+    xrayRaw._saveName = res.saveName;
+    xrayRaw._savedAt = res.savedAt;
+    xrayData = null; // re-aggregate for the current scope
     renderXray();
   }, 20);
 }
 function loadXrayFromSave() {
   const sel = $('xraySaveSelect');
   loadXrayFrom(sel && sel.value, false);
+}
+// The region the X-ray should use for the active plan: null = whole base (toggle on, or
+// no area drawn). Only a >=3-point polygon scopes the analysis.
+function activeXrayRegion() {
+  if (state.xrayWholeBase) return null;
+  const r = state.xrayRegion;
+  return r && r.length >= 3 ? r : null;
+}
+// (Re)aggregate the cached records for the active plan's scope. Cheap — safe to call on
+// every plan switch / region edit / filter change.
+function aggregateXray() {
+  if (!xrayRaw) { xrayData = null; return; }
+  xrayData = PX.aggregate(xrayRaw, DATA, { powerMult: state.powerMult || 1, region: activeXrayRegion() });
+  xrayData._saveName = xrayRaw._saveName;
+  xrayData._savedAt = xrayRaw._savedAt;
 }
 
 // Round a /min rate to a cell, colour-coded by surplus / deficit / balanced.
@@ -2379,11 +2524,28 @@ function renderXrayItems() {
 function renderXray() {
   const body = $('xrayBody'), empty = $('xrayEmpty');
   if (!body) return;
+  if (!xrayData && xrayRaw) aggregateXray(); // (re)aggregate the cached parse for the active scope
   if (!xrayData) { if (empty) empty.hidden = false; body.hidden = true; return; }
   if (empty) empty.hidden = true;
   body.hidden = false;
   const s = xrayData.stats;
   const draw = s.totalPower + s.extractionPower;
+
+  // ----- scope line (which plan / area this analysis covers) -----
+  const scoped = xrayData.scope && xrayData.scope.regionUsed;
+  const st = $('xrayStatus');
+  if (st) {
+    st.classList.remove('warn-text');
+    const age = relAge(xrayData._savedAt);
+    const where = state.xrayWholeBase ? 'whole base' : (scoped ? `“${activePlan() ? activePlan().name : 'this plan'}” area` : 'whole base');
+    st.textContent = `${xrayData._saveName || 'save'}: ${where} · ${fmt(s.totalMachines, 0)} machines · ${fmtPower(draw)} draw` + (age ? ` · saved ${age}` : '');
+  }
+  const scopeEl = $('xrayScope');
+  if (scopeEl) {
+    scopeEl.textContent = state.xrayWholeBase
+      ? 'Scope: whole base (area ignored)'
+      : scoped ? `Scope: “${activePlan() ? activePlan().name : 'this plan'}” outlined area` : 'Scope: whole base (no area drawn)';
+  }
 
   // ----- hero -----
   const net = $('xrNetPower');
@@ -2563,15 +2725,28 @@ function wireMap() {
     const r = cv.getBoundingClientRect();
     zoomMapAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
   }, { passive: false });
-  cv.addEventListener('pointerdown', (e) => { mapDrag = { x: e.clientX, y: e.clientY, ox: mapV.ox, oy: mapV.oy }; try { cv.setPointerCapture(e.pointerId); } catch (_) {} });
+  cv.addEventListener('pointerdown', (e) => {
+    const r = cv.getBoundingClientRect();
+    if (mapDrawing) { addAreaPoint(e.clientX - r.left, e.clientY - r.top); return; } // place a vertex, don't pan
+    mapDrag = { x: e.clientX, y: e.clientY, ox: mapV.ox, oy: mapV.oy };
+    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  });
   cv.addEventListener('pointermove', (e) => {
+    if (mapDrawing) { const r = cv.getBoundingClientRect(); mapDrawHover = screenToWorld(e.clientX - r.left, e.clientY - r.top); scheduleMapDraw(); return; }
     if (mapDrag) { mapV.ox = mapDrag.ox + (e.clientX - mapDrag.x); mapV.oy = mapDrag.oy + (e.clientY - mapDrag.y); $('mapTip').hidden = true; scheduleMapDraw(); }
     else mapHover(e);
   });
+  cv.addEventListener('dblclick', (e) => { if (mapDrawing) { e.preventDefault(); finishAreaDraw(); } });
   const up = (e) => { if (mapDrag) { try { cv.releasePointerCapture(e.pointerId); } catch (_) {} mapDrag = null; } };
   cv.addEventListener('pointerup', up);
   cv.addEventListener('pointercancel', up);
   cv.addEventListener('pointerleave', () => { $('mapTip').hidden = true; });
+  // Enter closes the trace, Esc cancels it (only while drawing).
+  document.addEventListener('keydown', (e) => {
+    if (!mapDrawing) return;
+    if (e.key === 'Enter') { e.preventDefault(); finishAreaDraw(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancelAreaDraw(); }
+  });
   window.addEventListener('resize', () => {
     if (state.mode === 'map') { reframeMapForResize(); scheduleMapDraw(); }
     if (state.view === 'flow' && $('flowView') && !$('flowView').hidden) applyFlowTransform();
@@ -3702,6 +3877,7 @@ function setMode(mode) {
     // so reopening the app restores the last map without a manual "Load map" click.
     if (state.saveFile && !mapNodes.length && !mapBuildings.length) loadMapFromSave();
     else renderMap();
+    renderAreaControls(); // reflect the active plan's outline in the Factory-area panel
   } else if (isProject) {
     $('empty').hidden = true; $('output').hidden = true;
     renderProjectTotals();
@@ -3711,9 +3887,17 @@ function setMode(mode) {
     renderPower();
   } else if (isXray) {
     $('empty').hidden = true; $('output').hidden = true;
-    // Auto-analyze the remembered save the first time X-ray opens this session.
-    if (state.saveFile && !xrayData) loadXrayFromSave();
-    else renderXray();
+    // Per-plan scope: the X-ray needs an outlined area (unless "Whole base" is on). With
+    // no area, route to the map, arm the draw tool, and ask the user to outline it.
+    if (!state.xrayWholeBase && !activeXrayRegion()) {
+      mapArmedForXray = true;
+      setMode('map');
+      startAreaDraw();
+      return;
+    }
+    // Parse once for this save (cached); otherwise just re-aggregate for the active scope.
+    if (state.saveFile && (!xrayRaw || xrayRawFile !== state.saveFile)) loadXrayFromSave();
+    else { xrayData = null; renderXray(); }
   } else solveAndRender();
 }
 
@@ -3923,6 +4107,8 @@ function applyStateToControls() {
   $('optSink').checked = state.opt.sink !== false; // default on, incl. plans saved before this option existed
   $('maxProduct').value = state.max.product ? itemName(state.max.product) : '';
   $('maxAlts').checked = state.max.alts;
+  if ($('xrayWholeBase')) $('xrayWholeBase').checked = !!state.xrayWholeBase;
+  if (mapDrawing) cancelAreaDraw(); // a plan switch mid-trace would write to the wrong plan
   setMode(state.mode);
 }
 
@@ -4061,6 +4247,12 @@ function init() {
   $('xraySort').addEventListener('change', (e) => { xraySort = e.target.value; if (xrayData) renderXrayItems(); });
   $('xrayHideBalanced').addEventListener('change', (e) => { xrayHideBalanced = e.target.checked; if (xrayData) renderXrayItems(); });
   $('xrayRawOnly').addEventListener('change', (e) => { xrayRawOnly = e.target.checked; if (xrayData) renderXrayItems(); });
+  $('xrayWholeBase').addEventListener('change', (e) => { state.xrayWholeBase = e.target.checked; save(); xrayData = null; setMode('xray'); });
+  $('xrayDrawArea').addEventListener('click', () => { mapArmedForXray = true; setMode('map'); startAreaDraw(); });
+
+  // factory-area drawing (on the map)
+  $('areaDraw').addEventListener('click', () => { if (mapDrawing) finishAreaDraw(); else startAreaDraw(); });
+  $('areaClear').addEventListener('click', clearArea);
 
   $('optAddOutput').addEventListener('click', () => { state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); });
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });
@@ -4149,9 +4341,17 @@ if (typeof window !== 'undefined') {
     linkWouldCycle, resolveLinkedCap, planNetOutputs, recomputePlanOutputs,
     computeProjectTotals, ensureProjects,
     setMode,
-    // Inject a precomputed X-ray result and render it — lets the headless test exercise
-    // the full renderXray DOM path without a real save parse or the async load timer.
-    injectXray: (xray) => { xrayData = xray; setMode('xray'); if ($('xrayView')) $('xrayView').hidden = false; renderXray(); return xrayData; },
+    // X-ray test surface: inject parsed records (no real save), set the plan's region /
+    // whole-base scope, drive the draw lifecycle, and read live X-ray/draw state — so the
+    // headless test exercises routing, region scoping and drawing without a canvas.
+    xrayInjectRecords: (records, file) => { xrayRaw = records; xrayRawFile = file || 'test'; xrayRaw._saveName = 'test'; xrayRaw._savedAt = 0; xrayData = null; },
+    xraySetRegion: (poly) => { state.xrayRegion = poly; save(); xrayData = null; },
+    xraySetWholeBase: (b) => { state.xrayWholeBase = b; save(); xrayData = null; },
+    xrayStartDraw: startAreaDraw,
+    xrayPushWorldPoint: (x, y) => { mapDrawPts.push({ x, y }); },
+    xrayFinishDraw: finishAreaDraw,
+    xrayCancelDraw: cancelAreaDraw,
+    getXray: () => ({ mode: state.mode, drawing: mapDrawing, drawPts: mapDrawPts.length, region: state.xrayRegion, wholeBase: state.xrayWholeBase, hasData: !!xrayData, armed: mapArmedForXray }),
   };
 }
 window.addEventListener('DOMContentLoaded', init);

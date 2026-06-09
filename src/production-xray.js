@@ -1,6 +1,6 @@
 'use strict';
-// Whole-base production X-ray. Reads an ALREADY-PARSED Satisfactory save plus the
-// static data tables (recipes / buildings / items / extractors / powergen) and
+// Whole-base / per-area production X-ray. Reads an ALREADY-PARSED Satisfactory save
+// plus the static data tables (recipes / buildings / items / extractors / powergen) and
 // computes what the built factory is configured to do:
 //   - per-item production, consumption and net (surplus / deficit)
 //   - total power draw, idle / under- / over-clocked / somerslooped machine counts
@@ -8,10 +8,20 @@
 //   - generation capacity (powergen nameplate) and net power
 //   - a spatial per-factory breakdown (machines clustered by proximity)
 //
+// Two-phase so the renderer can re-scope to a user-drawn map region WITHOUT re-parsing:
+//   extractRecords(save, DATA) -> a flat array of compact per-actor records (the parse-
+//     dependent pass; resolves extractor purity once). Returned to the page over the
+//     preload bridge and cached there.
+//   aggregate(records, DATA, {region, powerMult}) -> the render-ready summary. Pure and
+//     cheap, so the page calls it on every plan switch / region edit. opts.region is a
+//     polygon in WORLD centimetres ([{x,y},...]); when set, only actors inside it count.
+//   computeProduction(save, DATA, opts) = aggregate(extractRecords(...), ...) — the
+//     whole-base convenience used by the Node side and the unit tests.
+//
 // Pure & dependency-free by design: never reads files, never requires the parser or
 // data.json — the caller passes the parsed save and the DATA object in. That keeps it
-// unit-testable with tiny synthetic inputs and no node_modules present, exactly like
-// the sibling factory-extract.js.
+// unit-testable with tiny synthetic inputs and lets it be esbuild-bundled into the
+// renderer (so the page can aggregate locally), exactly like the LP solver.
 //
 // IMPORTANT honesty note (surfaced in the UI): a .sav stores each machine's *nameplate
 // configuration* (recipe + overclock + Somersloop), NOT live belt/pipe throughput. So
@@ -100,6 +110,70 @@ function extractorYield(o, extDef, instIdx) {
   return { resClass, purMult, purity, estimated };
 }
 
+// ---------- phase 1: flat records (the only parse-dependent pass) ----------
+// One linear sweep over the save. Emits a compact record per production machine,
+// extractor and generator — enough for aggregate() to recompute rates/power from DATA
+// without the parsed save. Kinds: 'm' machine, 'e' extractor, 'g' generator.
+function extractRecords(save, DATA) {
+  const BUILDINGS = (DATA && DATA.buildings) || {};
+  const EXTRACTORS = (DATA && DATA.extractors) || {};
+  const POWERGEN = (DATA && DATA.powergen) || {};
+  const instIdx = indexByInstance(save);
+  const records = [];
+  const levels = (save && save.levels) || {};
+  for (const lvl in levels) {
+    const objs = (levels[lvl] && levels[lvl].objects) || [];
+    for (let oi = 0; oi < objs.length; oi++) {
+      const o = objs[oi];
+      if (!o || typeof o.typePath !== 'string') continue;
+      const cn = classFromPath(o.typePath);
+      const props = o.properties || {};
+      const tr = o.transform && o.transform.translation;
+      const x = tr ? tr.x : 0, y = tr ? tr.y : 0;
+
+      if (BUILDINGS[cn]) {
+        const rawBoost = floatProp(props, 'mCurrentProductionBoost', 0);
+        records.push({
+          k: 'm',
+          x, y,
+          b: cn,
+          rc: recipeClassOf(props), // null = idle
+          clock: floatProp(props, 'mCurrentPotential', 1) || 1,
+          amp: rawBoost >= 1 ? rawBoost : 1, // mCurrentProductionBoost stores the output multiplier (2 = doubled)
+        });
+      } else if (EXTRACTORS[cn]) {
+        const y2 = extractorYield(o, EXTRACTORS[cn], instIdx);
+        records.push({
+          k: 'e',
+          x, y,
+          e: cn,
+          clock: floatProp(props, 'mCurrentPotential', 1) || 1,
+          res: y2.resClass,
+          pur: y2.purMult,
+          est: y2.estimated,
+        });
+      } else if (POWERGEN[cn]) {
+        records.push({ k: 'g', x, y, g: cn, clock: floatProp(props, 'mCurrentPotential', 1) || 1 });
+      }
+    }
+  }
+  return records;
+}
+
+// ---------- point in polygon (region scoping) ----------
+// Ray-casting test. poly = [{x,y},...] (world cm). Used to keep only the actors inside a
+// user-drawn factory outline. A polygon with < 3 vertices is treated as "no region".
+function pointInPolygon(x, y, poly) {
+  if (!poly || poly.length < 3) return true;
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    const intersect = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
 // ---------- spatial clustering (per-factory breakdown) ----------
 // Group machines into "factories" by proximity. A coarse grid + union-find on 8-
 // connected non-empty cells: two machines in the same or touching cells join the same
@@ -110,7 +184,6 @@ const CELL_CM = 8000; // 80 m — a few foundations; coarse enough to bridge ais
 function clusterFactories(machines) {
   if (!machines.length) return [];
   const cellOf = (m) => Math.floor(m.x / CELL_CM) + ',' + Math.floor(m.y / CELL_CM);
-  // Bucket machine indices by cell.
   const cells = new Map();
   for (let i = 0; i < machines.length; i++) {
     const key = cellOf(machines[i]);
@@ -118,7 +191,6 @@ function clusterFactories(machines) {
     if (!arr) cells.set(key, (arr = []));
     arr.push(i);
   }
-  // Union-find over cell keys.
   const parent = new Map();
   const find = (k) => {
     while (parent.get(k) !== k) {
@@ -142,7 +214,6 @@ function clusterFactories(machines) {
       }
     }
   }
-  // Gather machine indices per connected component.
   const groups = new Map();
   for (const [key, idxs] of cells) {
     const root = find(key);
@@ -150,12 +221,11 @@ function clusterFactories(machines) {
     if (!g) groups.set(root, (g = []));
     for (const i of idxs) g.push(i);
   }
-  // Summarize each factory: count, power, centroid, top outputs by net /min.
   const factories = [];
   let fid = 0;
   for (const idxs of groups.values()) {
     let power = 0, sx = 0, sy = 0, count = 0;
-    const outNet = {}; // item -> produced /min inside this cluster
+    const outNet = {};
     for (const i of idxs) {
       const m = machines[i];
       count++;
@@ -168,36 +238,28 @@ function clusterFactories(machines) {
       .map((item) => ({ item, rate: outNet[item] }))
       .sort((a, b) => b.rate - a.rate)
       .slice(0, 3);
-    factories.push({
-      id: ++fid,
-      count,
-      power,
-      cx: sx / count,
-      cy: sy / count,
-      topOutputs,
-    });
+    factories.push({ id: ++fid, count, power, cx: sx / count, cy: sy / count, topOutputs });
   }
   factories.sort((a, b) => b.power - a.power);
   return factories;
 }
 
-// ---------- main aggregation ----------
-// computeProduction(save, DATA, opts) -> compact, render-ready summary (see README of
-// fields at the return). opts.powerMult scales draw by the game's Power Consumption
-// Multiplier (default 1 = nameplate). opts.includeIdleFactories keeps idle-only
-// machines out of factory clustering by default (they make nothing).
-function computeProduction(save, DATA, opts) {
+// ---------- phase 2: aggregate (pure, cheap, region-aware) ----------
+// aggregate(records, DATA, opts) -> render-ready summary. opts.powerMult scales draw by
+// the game's Power Consumption Multiplier (default 1). opts.region is a world-cm polygon
+// ([{x,y},...]); when it has >= 3 points, only records inside it are counted.
+function aggregate(records, DATA, opts) {
   opts = opts || {};
   const powerMult = opts.powerMult || 1;
+  const region = opts.region && opts.region.length >= 3 ? opts.region : null;
+  const inRegion = (r) => !region || pointInPolygon(r.x, r.y, region);
   const RECIPES = (DATA && DATA.recipes) || {};
   const BUILDINGS = (DATA && DATA.buildings) || {};
   const ITEMS = (DATA && DATA.items) || {};
   const EXTRACTORS = (DATA && DATA.extractors) || {};
   const POWERGEN = (DATA && DATA.powergen) || {};
   const RESOURCES = new Set((DATA && DATA.resources) || []);
-  const instIdx = indexByInstance(save);
 
-  // item class -> running tallies. Created lazily so we only list items the base touches.
   const items = {};
   const itemRec = (c) => {
     let it = items[c];
@@ -214,10 +276,10 @@ function computeProduction(save, DATA, opts) {
     return it;
   };
 
-  const buildingTotals = {}; // class -> {className,name,count,idle,power}
-  const extractionByItem = {}; // class -> {item,name,rate,count,estimated}
-  const generation = {}; // class -> {className,name,count,power}
-  const prodMachines = []; // configured manufacturing machines (for clustering)
+  const buildingTotals = {};
+  const extractionByItem = {};
+  const generation = {};
+  const prodMachines = [];
 
   let totalPower = 0,
     extractionPower = 0,
@@ -229,123 +291,97 @@ function computeProduction(save, DATA, opts) {
     over = 0,
     sloop = 0,
     sloopsInstalled = 0,
+    extractorCount = 0,
     anyEstimatedExtraction = false;
 
-  const levels = (save && save.levels) || {};
-  for (const lvl in levels) {
-    const objs = (levels[lvl] && levels[lvl].objects) || [];
-    for (let oi = 0; oi < objs.length; oi++) {
-      const o = objs[oi];
-      if (!o || typeof o.typePath !== 'string') continue;
-      const cn = classFromPath(o.typePath);
-      const props = o.properties || {};
-      const tr = o.transform && o.transform.translation;
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
+    if (!inRegion(r)) continue;
 
-      // ----- manufacturing machine -----
-      const bdef = BUILDINGS[cn];
-      if (bdef) {
-        totalMachines++;
-        const bt =
-          buildingTotals[cn] ||
-          (buildingTotals[cn] = { className: cn, name: bdef.name, count: 0, idle: 0, power: 0 });
-        bt.count++;
-        const rc = recipeClassOf(props);
-        const r = rc && RECIPES[rc];
-        const clock = floatProp(props, 'mCurrentPotential', 1) || 1;
-        const rawBoost = floatProp(props, 'mCurrentProductionBoost', 0);
-        const amp = rawBoost >= 1 ? rawBoost : 1; // mCurrentProductionBoost stores the output multiplier (2 = doubled)
-        if (!r) {
-          idle++;
-          bt.idle++;
-          continue; // no recipe -> produces/consumes nothing
-        }
-        configured++;
-        if (clock < 0.999) under++;
-        else if (clock > 1.001) over++;
-        const exp = bdef.exponent || DEFAULT_EXPONENT;
-        // Power: base x clock^exp x amp^2 (Somersloop amplification roughly squares draw).
-        const power = (bdef.power || 0) * Math.pow(clock, exp) * Math.pow(amp, 2) * powerMult;
-        totalPower += power;
-        bt.power += power;
-        const per = 60 / (r.time || 1);
-        const outputs = [];
-        for (const pr of r.products || []) {
-          // Output scales with overclock AND Somersloop amplification.
-          const rate = pr.amount * per * clock * amp;
-          itemRec(pr.item).produced += rate;
-          outputs.push({ item: pr.item, rate });
-        }
-        for (const ig of r.ingredients || []) {
-          // Input scales with overclock only — Somersloop gives free output, not free input.
-          const rate = ig.amount * per * clock;
-          itemRec(ig.item).consumed += rate;
-        }
-        if (amp > 1) {
-          sloop++;
-          const max = bdef.shardSlots || 1; // amp = 1 + n/max  ->  physical sloops n = (amp-1)*max
-          sloopsInstalled += Math.round((amp - 1) * max);
-        }
-        prodMachines.push({ x: tr ? tr.x : 0, y: tr ? tr.y : 0, power, outputs });
+    if (r.k === 'm') {
+      const bdef = BUILDINGS[r.b];
+      if (!bdef) continue;
+      totalMachines++;
+      const bt =
+        buildingTotals[r.b] ||
+        (buildingTotals[r.b] = { className: r.b, name: bdef.name, count: 0, idle: 0, power: 0 });
+      bt.count++;
+      const recipe = r.rc && RECIPES[r.rc];
+      const clock = r.clock || 1;
+      const amp = r.amp >= 1 ? r.amp : 1;
+      if (!recipe) {
+        idle++;
+        bt.idle++;
         continue;
       }
-
-      // ----- extractor (miner / pump) -> raw production (best effort) -----
-      const edef = EXTRACTORS[cn];
-      if (edef) {
-        const clock = floatProp(props, 'mCurrentPotential', 1) || 1;
-        const exp = edef.exponent || DEFAULT_EXPONENT;
-        const power = (edef.power || 0) * Math.pow(clock, exp) * powerMult;
-        extractionPower += power;
-        const y = extractorYield(o, edef, instIdx);
-        const rate = (edef.ratePerMin || 0) * clock * y.purMult;
-        if (y.estimated) anyEstimatedExtraction = true;
-        if (y.resClass) {
-          itemRec(y.resClass).extraction += rate;
-          const e =
-            extractionByItem[y.resClass] ||
-            (extractionByItem[y.resClass] = {
-              item: y.resClass,
-              name: (ITEMS[y.resClass] && ITEMS[y.resClass].name) || y.resClass,
-              rate: 0,
-              count: 0,
-              estimated: false,
-            });
-          e.rate += rate;
-          e.count++;
-          if (y.estimated) e.estimated = true;
-        }
-        continue;
+      configured++;
+      if (clock < 0.999) under++;
+      else if (clock > 1.001) over++;
+      const exp = bdef.exponent || DEFAULT_EXPONENT;
+      const power = (bdef.power || 0) * Math.pow(clock, exp) * Math.pow(amp, 2) * powerMult;
+      totalPower += power;
+      bt.power += power;
+      const per = 60 / (recipe.time || 1);
+      const outputs = [];
+      for (const pr of recipe.products || []) {
+        const rate = pr.amount * per * clock * amp; // output scales with clock AND Somersloop
+        itemRec(pr.item).produced += rate;
+        outputs.push({ item: pr.item, rate });
       }
-
-      // ----- power generator -> generation capacity (nameplate) -----
-      const gdef = POWERGEN[cn];
-      if (gdef) {
-        const clock = floatProp(props, 'mCurrentPotential', 1) || 1;
-        const out = (gdef.power || 0) * clock; // generators: output scales linearly with clock
-        generationCapacity += out;
-        const g =
-          generation[cn] ||
-          (generation[cn] = { className: cn, name: gdef.name, count: 0, power: 0 });
-        g.count++;
-        g.power += out;
+      for (const ig of recipe.ingredients || []) {
+        const rate = ig.amount * per * clock; // input scales with clock only — Somersloop gives free output, not free input
+        itemRec(ig.item).consumed += rate;
       }
+      if (amp > 1) {
+        sloop++;
+        const max = bdef.shardSlots || 1; // amp = 1 + n/max -> physical sloops n = (amp-1)*max
+        sloopsInstalled += Math.round((amp - 1) * max);
+      }
+      prodMachines.push({ x: r.x, y: r.y, power, outputs });
+    } else if (r.k === 'e') {
+      const edef = EXTRACTORS[r.e];
+      if (!edef) continue;
+      extractorCount++;
+      const clock = r.clock || 1;
+      const exp = edef.exponent || DEFAULT_EXPONENT;
+      extractionPower += (edef.power || 0) * Math.pow(clock, exp) * powerMult;
+      const rate = (edef.ratePerMin || 0) * clock * (r.pur || 1);
+      if (r.est) anyEstimatedExtraction = true;
+      if (r.res) {
+        itemRec(r.res).extraction += rate;
+        const e =
+          extractionByItem[r.res] ||
+          (extractionByItem[r.res] = {
+            item: r.res,
+            name: (ITEMS[r.res] && ITEMS[r.res].name) || r.res,
+            rate: 0,
+            count: 0,
+            estimated: false,
+          });
+        e.rate += rate;
+        e.count++;
+        if (r.est) e.estimated = true;
+      }
+    } else if (r.k === 'g') {
+      const gdef = POWERGEN[r.g];
+      if (!gdef) continue;
+      const out = (gdef.power || 0) * (r.clock || 1); // generators: output scales linearly with clock
+      generationCapacity += out;
+      const g =
+        generation[r.g] || (generation[r.g] = { className: r.g, name: gdef.name, count: 0, power: 0 });
+      g.count++;
+      g.power += out;
     }
   }
 
-  // Roll up raw extraction into each item's produced total so raws net correctly.
   for (const c in items) items[c].produced += items[c].extraction;
 
   const itemList = Object.keys(items)
     .map((c) => {
       const it = items[c];
       return {
-        item: it.item,
-        name: it.name,
-        liquid: it.liquid,
-        raw: it.raw,
-        produced: it.produced,
-        consumed: it.consumed,
-        extraction: it.extraction,
+        item: it.item, name: it.name, liquid: it.liquid, raw: it.raw,
+        produced: it.produced, consumed: it.consumed, extraction: it.extraction,
         net: it.produced - it.consumed,
       };
     })
@@ -359,38 +395,37 @@ function computeProduction(save, DATA, opts) {
 
   return {
     stats: {
-      totalMachines, // every manufacturing building (incl. idle)
-      configured, // machines with a recipe set
-      idle, // machines with no recipe
-      underclocked: under,
-      overclocked: over,
-      somersloop: sloop, // machines with >=1 Somersloop
-      sloopsInstalled, // physical Somersloops across those machines
-      totalPower, // manufacturing draw (MW, at powerMult)
-      extractionPower, // miner/pump draw (MW)
-      generationCapacity, // generator nameplate output (MW)
+      totalMachines, configured, idle,
+      underclocked: under, overclocked: over,
+      somersloop: sloop, sloopsInstalled,
+      totalPower, extractionPower, generationCapacity,
       netPower: generationCapacity - (totalPower + extractionPower),
-      itemTypes: itemList.length,
-      factoryCount: factories.length,
+      itemTypes: itemList.length, factoryCount: factories.length,
+      extractorCount,
     },
     items: itemList,
     buildings: buildingList,
-    extraction: Object.keys(extractionByItem)
-      .map((c) => extractionByItem[c])
-      .sort((a, b) => b.rate - a.rate),
-    generation: Object.keys(generation)
-      .map((c) => generation[c])
-      .sort((a, b) => b.power - a.power),
+    extraction: Object.keys(extractionByItem).map((c) => extractionByItem[c]).sort((a, b) => b.rate - a.rate),
+    generation: Object.keys(generation).map((c) => generation[c]).sort((a, b) => b.power - a.power),
     factories,
+    scope: { regionUsed: !!region, machines: totalMachines },
     caveats: {
-      estimatedExtraction: anyEstimatedExtraction, // some extractor purity/resource was assumed (vanilla nodes)
-      generatorFuel: Object.keys(generation).length > 0, // generator fuel burn is NOT netted into item consumption
+      estimatedExtraction: anyEstimatedExtraction,
+      generatorFuel: Object.keys(generation).length > 0,
     },
   };
 }
 
+// Whole-base (or region-scoped) convenience: parse-pass + aggregate in one call.
+function computeProduction(save, DATA, opts) {
+  return aggregate(extractRecords(save, DATA), DATA, opts);
+}
+
 module.exports = {
+  extractRecords,
+  aggregate,
   computeProduction,
+  pointInPolygon,
   clusterFactories,
   extractorYield,
   recipeClassOf,

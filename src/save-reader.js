@@ -25,7 +25,7 @@ try { DATA = require('./data.json'); RECIPES = DATA.recipes; ITEMS = DATA.items;
 // Pure, dependency-free building extraction (operates on a parsed save).
 const { extractBuildings, summarize, extractCollectables, summarizeCollectables } = require('./factory-extract');
 // Pure, dependency-free production aggregation (DATA passed in).
-const { computeProduction } = require('./production-xray');
+const { computeProduction, extractRecords } = require('./production-xray');
 
 function defaultSaveRoot() {
   const localAppData =
@@ -275,6 +275,22 @@ function readMap(savFile) {
   };
 }
 
+// Read + parse a .sav ONCE and return the flat per-actor production records (machines,
+// extractors, generators). The renderer caches these and runs production-xray's
+// aggregate() locally, so re-scoping the X-ray to a different plan's map region never
+// re-parses the save. { ok, saveName, savedAt, records:[...], error }
+function readProductionRecords(savFile) {
+  const p = parseSaveFile(savFile);
+  if (!p.ok) return { ok: false, error: p.error };
+  if (!DATA) return { ok: false, error: 'Recipe data (data.json) is unavailable, so production cannot be computed.' };
+  let records;
+  try { records = extractRecords(p.save, DATA); }
+  catch (e) { return { ok: false, error: 'Failed to read production: ' + ((e && e.message) || String(e)) }; }
+  let savedAt = null;
+  try { savedAt = fs.statSync(savFile).mtimeMs; } catch (_) {}
+  return { ok: true, saveName: p.saveName, savedAt, records };
+}
+
 // Read + parse a .sav and compute the whole-base production X-ray (per-item net,
 // machine power, idle/overclock counts, extraction, generation, per-factory breakdown).
 // { ok, saveName, savedAt, xray:{stats,items,buildings,extraction,generation,factories,caveats}, error }
@@ -296,6 +312,7 @@ module.exports = {
   listSaves,
   parseSaveFile,
   readProduction,
+  readProductionRecords,
   extractAlternates,
   collectAlternates,
   readUnlockedAlternates,

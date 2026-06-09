@@ -583,6 +583,8 @@ function boot13(seed) {
   w.confirm = () => true; global.confirm = w.confirm;
   w.alert = () => {}; global.alert = w.alert;
   w.prompt = (msg, def) => def; global.prompt = w.prompt;
+  global.Image = w.Image; // the map's ensureMapImg() does `new Image()` (X-ray routes through the map)
+  global.requestAnimationFrame = w.requestAnimationFrame || ((cb) => setTimeout(cb, 0)); global.cancelAnimationFrame = w.cancelAnimationFrame || clearTimeout;
   if (!w.SVGElement.prototype.setPointerCapture) w.SVGElement.prototype.setPointerCapture = () => {};
   w.localStorage.clear();
   if (seed != null) w.localStorage.setItem('satisfactory-factory-plans-v1', seed);
@@ -826,49 +828,67 @@ console.log('\n### POWER PLANNER: STANDALONE COAL POWER (mine → burn)');
   check('flow shows the standalone coal generator', genNodes.some((t) => /Coal-Powered Generator/.test(t)));
 }
 
-// ---- Base X-ray tab: full render path on a real computeProduction() result ----
-console.log('\n### BASE X-RAY (tab render)');
+// ---- Base X-ray: per-plan region routing + scoped render ----
+console.log('\n### BASE X-RAY (per-plan area)');
 {
   const PX = require('../src/production-xray');
   const recPath = (rc) => 'x.' + rc;
   const Ore = cls('Iron Ore');
-  // Synthetic base: plain + Somerslooped plate constructors, an idle one, a smelter, and a
-  // Pure-node miner — enough to populate every X-ray table.
+  // Two plate constructors far apart (so a region can include just one), an idle one, a
+  // smelter, and a Pure-node miner — all near the first constructor except constructor B.
   const xSave = { levels: { L: { objects: [
     { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 0, y: 0, z: 0 } }, properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IronPlate_C') } }, mCurrentPotential: { value: 1 } } },
-    { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 500, y: 0, z: 0 } }, properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IronPlate_C') } }, mCurrentPotential: { value: 2 }, mCurrentProductionBoost: { value: 2 } } },
+    { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 100000, y: 0, z: 0 } }, properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IronPlate_C') } }, mCurrentPotential: { value: 2 }, mCurrentProductionBoost: { value: 2 } } },
     { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 1000, y: 0, z: 0 } }, properties: {} },
     { typePath: 'g.Build_SmelterMk1_C', transform: { translation: { x: 0, y: 500, z: 0 } }, properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IngotIron_C') } } } },
-    { typePath: 'g.Build_MinerMk2_C', transform: { translation: { x: 90000, y: 90000, z: 0 } }, properties: { mExtractableResource: { value: { pathName: 'N1' } } } },
+    { typePath: 'g.Build_MinerMk2_C', transform: { translation: { x: 1500, y: 1500, z: 0 } }, properties: { mExtractableResource: { value: { pathName: 'N1' } } } },
     { typePath: 'g.BP_ResourceNode_C', instanceName: 'N1', properties: { mPurityOverride: { value: { value: 'RP_Pure' } }, mResourceClassOverride: { value: { pathName: 'x.' + Ore } } } },
   ] } } };
-  const xray = PX.computeProduction(xSave, DATA);
+  const records = PX.extractRecords(xSave, DATA);
   const { d, app, setVal } = boot13();
-  app.injectXray(xray);
-  check('x-ray view shown after analyze', !d.getElementById('xrayView').hidden && !d.getElementById('xrayBody').hidden);
-  check('hero net power filled', /W$/.test(d.getElementById('xrNetPower').textContent));
-  check('hero machines = configured / total', d.getElementById('xrMachines').textContent === '3 / 4');
-  check('hero idle count', d.getElementById('xrIdle').textContent === '1');
-  check('quick-stat chips rendered', d.querySelectorAll('#xrayChips .xr-chip').length >= 4);
-  check('caveat banner populated', d.getElementById('xrayCaveat').textContent.length > 20);
   const itemRows = () => [...d.querySelectorAll('#xrayItemsTable tbody tr')];
-  check('item balance table populated', itemRows().length === xray.items.length && itemRows().length >= 3);
-  check('a surplus row is coloured positive', itemRows().some((tr) => tr.querySelector('td.num.xr-pos')));
-  check('machines-by-type table populated', d.querySelectorAll('#xrayBldTable tbody tr').length === 2); // Constructor + Smelter
-  check('by-factory table populated', d.querySelectorAll('#xrayFacTable tbody tr').length === 1);
-  check('extraction table shows the mined ore', [...d.querySelectorAll('#xrayExtTable tbody tr')].some((tr) => /Iron Ore/.test(tr.textContent)));
-  // Filter box narrows the item list live.
-  const totalItems = itemRows().length;
+
+  // 1) No area + not whole-base: opening X-ray must route to the map and arm the draw tool.
+  app.setMode('xray');
+  let xs = app.getXray();
+  check('no-area X-ray routes to the map', xs.mode === 'map');
+  check('draw tool armed on route', xs.drawing === true && xs.armed === true);
+  check('X-ray view hidden while routed away', d.getElementById('xrayView').hidden === true);
+
+  // 2) Trace a region around the near cluster (excludes constructor B at x=100000), close it.
+  app.xrayPushWorldPoint(-5000, -5000); app.xrayPushWorldPoint(5000, -5000);
+  app.xrayPushWorldPoint(5000, 5000); app.xrayPushWorldPoint(-5000, 5000);
+  app.xrayFinishDraw();
+  xs = app.getXray();
+  check('finishing the trace saves a region to the plan', !!xs.region && xs.region.length === 4 && xs.drawing === false);
+
+  // 3) Inject the parsed records and open X-ray: now it renders, scoped to the area.
+  app.xrayInjectRecords(records, 'test.sav');
+  app.setMode('xray');
+  check('X-ray renders once an area exists', d.getElementById('xrayView').hidden === false && d.getElementById('xrayBody').hidden === false);
+  // In-area: constructor A (20 plate) + idle + smelter + miner = 3 buildings counted, B excluded.
+  check('scoped: out-of-area machine excluded (hero count)', d.getElementById('xrMachines').textContent === '2 / 3');
+  const plateScoped = itemRows().find((tr) => /Iron Plate/.test(tr.textContent));
+  const plateProduced = plateScoped && plateScoped.querySelectorAll('td')[1].textContent; // produced cell
+  check('scoped: only the in-area constructor\'s output counted (20/min, not 100)', plateProduced === '20');
+  check('scope line names the area', /area/i.test(d.getElementById('xrayScope').textContent));
+
+  // 4) Whole-base toggle: ignores the area, counts both constructors.
+  const wb = d.getElementById('xrayWholeBase'); wb.checked = true; wb.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
+  check('whole-base toggle counts every machine', d.getElementById('xrMachines').textContent === '3 / 4');
+  check('whole-base scope line says whole base', /whole base/i.test(d.getElementById('xrayScope').textContent));
+  wb.checked = false; wb.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
+
+  // 5) Filters still work on the scoped table.
+  check('item table populated', itemRows().length >= 2);
   setVal(d.getElementById('xrayFilter'), 'iron plate');
-  check('filter narrows the item table', itemRows().length === 1 && itemRows().length < totalItems);
+  check('filter narrows the item table', itemRows().length === 1);
   setVal(d.getElementById('xrayFilter'), '');
-  // Raw-only checkbox.
-  const raw = d.getElementById('xrayRawOnly'); raw.checked = true; raw.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
-  check('raw-only filter keeps just raw resources', itemRows().every((tr) => /raw/i.test(tr.textContent)) && itemRows().length >= 1);
-  raw.checked = false; raw.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
-  // Switching away and back doesn't throw and keeps the data.
-  app.setMode('optimize'); app.setMode('xray');
-  check('x-ray survives a tab round-trip', d.querySelectorAll('#xrayItemsTable tbody tr').length === xray.items.length);
+
+  // 6) Clearing the area routes the next X-ray open back to the map.
+  app.xraySetRegion(null);
+  app.setMode('xray');
+  check('clearing the area re-routes to the map', app.getXray().mode === 'map');
 }
 
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);

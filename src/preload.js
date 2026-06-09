@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('api', {
   readUnlockedAlternates: (file) => SAVE.readUnlockedAlternates(file),
   readMap: (file) => SAVE.readMap(file),
   readProduction: (file, opts) => SAVE.readProduction(file, opts),
+  readProductionRecords: (file) => SAVE.readProductionRecords(file),
   // Durable plan storage in userData (see main.js). loadPlans is synchronous so the
   // renderer can read it during its boot load(); savePlans is fire-and-forget.
   loadPlans: () => { try { return ipcRenderer.sendSync('plans:load'); } catch (_) { return null; } },

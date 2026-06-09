@@ -316,6 +316,32 @@ check('xray: unresolved extractor flags the estimated caveat', xr2.caveats.estim
 check('xray: water pump still attributed to Water despite no node', xr2.extraction.some((e) => DATA.items[e.item] && DATA.items[e.item].name === 'Water'));
 check('xray: a miner with no resolvable resource is not mis-attributed', !xr2.extraction.some((e) => e.item === 'undefined' || e.item == null));
 
+// ---- two-phase split + point-in-polygon + region scoping ----
+console.log('\n### X-RAY REGION SCOPING');
+// extractRecords (parse-once) then aggregate (cheap, region-aware). The composed
+// computeProduction must equal aggregate(extractRecords(...)).
+const recs = PX.extractRecords(xSave, DATA);
+check('extractRecords emits a record per machine/extractor (idle included)', recs.filter((r) => r.k === 'm').length === 4 && recs.filter((r) => r.k === 'e').length === 1);
+const agg = PX.aggregate(recs, DATA, {});
+check('aggregate(extractRecords) == computeProduction', agg.stats.totalMachines === xr.stats.totalMachines && near(agg.stats.totalPower, xr.stats.totalPower, 1e-6));
+// point-in-polygon: a unit square around the origin.
+const sq = [{ x: -100, y: -100 }, { x: 100, y: -100 }, { x: 100, y: 100 }, { x: -100, y: 100 }];
+check('pointInPolygon: inside', PX.pointInPolygon(0, 0, sq) === true);
+check('pointInPolygon: outside', PX.pointInPolygon(500, 0, sq) === false);
+check('pointInPolygon: <3 points = no region (always true)', PX.pointInPolygon(9e9, 9e9, [{ x: 0, y: 0 }]) === true);
+// Region scoping: two plate constructors far apart; a box around only the first.
+const twoSave = { levels: { L: { objects: [
+  { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 0, y: 0, z: 0 } }, properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IronPlate_C') } }, mCurrentPotential: { value: 1 } } },
+  { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 100000, y: 0, z: 0 } }, properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IronPlate_C') } }, mCurrentPotential: { value: 1 } } },
+] } } };
+const twoRecs = PX.extractRecords(twoSave, DATA);
+const whole = PX.aggregate(twoRecs, DATA, {});
+const box = [{ x: -5000, y: -5000 }, { x: 5000, y: -5000 }, { x: 5000, y: 5000 }, { x: -5000, y: 5000 }];
+const scoped = PX.aggregate(twoRecs, DATA, { region: box });
+check('region off: both constructors counted', whole.stats.totalMachines === 2 && near(whole.items.find((i) => i.item === IronPlate).produced, 40, 0.01));
+check('region on: only the in-area constructor counted', scoped.stats.totalMachines === 1 && near(scoped.items.find((i) => i.item === IronPlate).produced, 20, 0.01));
+check('region on: scope.regionUsed flagged', scoped.scope.regionUsed === true && whole.scope.regionUsed === false);
+
 // ---- projects: migration + linked inputs + cycle detection (F3) ----
 // These exercise renderer.js logic (load/migration, link resolution, cycle guard) via
 // the window.__app test hook. Booted in jsdom so the renderer's DOM wiring runs; we
