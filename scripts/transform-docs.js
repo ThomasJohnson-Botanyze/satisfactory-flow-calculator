@@ -173,8 +173,12 @@ function formOf(s) {
   if (/RF_GAS/.test(s)) return 'gas';
   return 'solid';
 }
+// FGBuildableFrackingActivator is the Resource Well Pressurizer (Build_FrackingSmasher_C):
+// the actor that POWERS a well (150 MW nominal). It extracts nothing itself — the
+// satellites (FGBuildableFrackingExtractor, power 0) carry the extraction rates — so its
+// entry comes out with ratePerMin 0 and exists purely so power accounting can see it.
 const extractors = {};
-for (const gname of ['FGBuildableResourceExtractor', 'FGBuildableWaterPump', 'FGBuildableFrackingExtractor']) {
+for (const gname of ['FGBuildableResourceExtractor', 'FGBuildableWaterPump', 'FGBuildableFrackingExtractor', 'FGBuildableFrackingActivator']) {
   for (const c of groups[gname] || []) {
     const cn = c.ClassName || '';
     const cycle = Number(c.mExtractCycleTime) || 1;

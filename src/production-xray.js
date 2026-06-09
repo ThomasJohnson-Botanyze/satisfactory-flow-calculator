@@ -346,6 +346,10 @@ function aggregate(records, DATA, opts) {
       const exp = edef.exponent || DEFAULT_EXPONENT;
       extractionPower += (edef.power || 0) * Math.pow(clock, exp) * powerMult;
       const rate = (edef.ratePerMin || 0) * clock * (r.pur || 1);
+      // Power-only well actors (Resource Well Pressurizer, ratePerMin 0) draw power above
+      // but extract nothing themselves — the satellites carry the rates. Skip the
+      // extraction attribution AND the estimated caveat for them (no rate to estimate).
+      if (!(rate > 0)) continue;
       if (r.est) anyEstimatedExtraction = true;
       if (r.res) {
         itemRec(r.res).extraction += rate;

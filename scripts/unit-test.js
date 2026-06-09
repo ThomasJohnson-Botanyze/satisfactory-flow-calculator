@@ -360,6 +360,27 @@ check('xray: unresolved extractor flags the estimated caveat', xr2.caveats.estim
 check('xray: water pump still attributed to Water despite no node', xr2.extraction.some((e) => DATA.items[e.item] && DATA.items[e.item].name === 'Water'));
 check('xray: a miner with no resolvable resource is not mis-attributed', !xr2.extraction.some((e) => e.item === 'undefined' || e.item == null));
 
+// ---- Resource Well Pressurizer (Build_FrackingSmasher_C) ----
+// The smasher is the POWERED well actor (~150 MW); its satellites
+// (Build_FrackingExtractor_C, power 0) carry the extraction rates. The data layer must
+// carry it so power accounting sees it, and the X-ray must count its draw without
+// inventing extraction rates.
+const Smasher = 'Build_FrackingSmasher_C';
+const smDef = DATA.extractors[Smasher];
+check('data: Resource Well Pressurizer present with power 150', !!smDef && near(smDef.power, 150, 1e-6));
+check('data: Pressurizer extracts nothing itself (ratePerMin 0)', !!smDef && smDef.ratePerMin === 0);
+check('data: well satellites still draw 0 MW', DATA.extractors['Build_FrackingExtractor_C'].power === 0);
+const xSave3 = { levels: { P: { objects: [
+  { typePath: 'g.Build_FrackingSmasher_C', transform: { translation: { x: 0, y: 0, z: 0 } }, properties: {} }, // 100%
+  { typePath: 'g.Build_FrackingSmasher_C', transform: { translation: { x: 100, y: 0, z: 0 } }, properties: { mCurrentPotential: { value: 2 } } }, // 200% overclock
+] } } };
+const xr3 = PX.computeProduction(xSave3, DATA);
+const smWant = smDef.power * (1 + Math.pow(2, smDef.exponent)); // 150 + 150·2^exp
+check('xray: Pressurizer power counted (incl. clock^exp overclock)', near(xr3.stats.extractionPower, smWant, 0.01));
+check('xray: Pressurizer attributes power only — no extraction rows', xr3.extraction.length === 0);
+check('xray: Pressurizer alone does not flip the estimated caveat', xr3.caveats.estimatedExtraction === false);
+check('xray: Pressurizers counted in extractorCount', xr3.stats.extractorCount === 2);
+
 // ---- two-phase split + point-in-polygon + region scoping ----
 console.log('\n### X-RAY REGION SCOPING');
 // extractRecords (parse-once) then aggregate (cheap, region-aware). The composed

@@ -3306,6 +3306,11 @@ const POWER_SOURCES = ['optimize', 'max', 'planner'];
 // Raw fluids extract from a fixed building (no miner-tier choice); solids use the chosen
 // miner tier. Nitrogen comes from a Resource Well satellite (purity applies).
 const FLUID_EXTRACTOR = { Desc_Water_C: 'Build_WaterPump_C', Desc_LiquidOil_C: 'Build_OilPump_C', Desc_NitrogenGas_C: 'Build_FrackingExtractor_C' };
+// Resource-well satellites draw 0 MW — the well's PRESSURIZER (150 MW nominal) is the
+// powered actor, and ITS overclock drives the whole well. Vanilla wells carry at most
+// this many satellites, so sizing charges one Pressurizer per 10 satellites (fully-
+// saturated wells: a best-case lower bound — real wells are often smaller).
+const WELL_MAX_SATELLITES = 10;
 
 const clampClock = (v) => Math.max(1, Math.min(250, Math.round(Number(v) || 100)));
 function ensurePower() {
@@ -3368,10 +3373,19 @@ function extractionFor(item, rate, p) {
   const frac = rem > 1e-9 ? rem / base : 0;         // last unit's clock fraction (≤ c), trims the remainder
   const count = full + (frac > 0 ? 1 : 0);
   // Power scales by clock^exponent: full units run at c, the trim unit at frac.
-  const powerBase = full * M.power * Math.pow(c, M.exponent) + (frac > 0 ? M.power * Math.pow(frac, M.exponent) : 0);
+  let powerBase = full * M.power * Math.pow(c, M.exponent) + (frac > 0 ? M.power * Math.pow(frac, M.exponent) : 0);
+  // Resource-well rows: add the Pressurizer(s) powering the satellites (see
+  // WELL_MAX_SATELLITES). The Pressurizer runs at the row's clock — in-game its
+  // overclock is what scales every satellite's output.
+  let wells = 0;
+  const S = EXTRACTORS.Build_FrackingSmasher_C;
+  if (M === EXTRACTORS.Build_FrackingExtractor_C && S && count > 0) {
+    wells = Math.ceil(count / WELL_MAX_SATELLITES);
+    powerBase += wells * (S.power || 0) * Math.pow(c, S.exponent || 1.321929);
+  }
   // Report the dominant clock: the cap c when any full unit runs there, else the trim
   // clock (a single under-target machine that already makes the whole demand).
-  return { item, rate, name: M.name, hasPurity, purity: p.purity[item] || 'normal', clock: full > 0 ? c : frac, count, powerBase };
+  return { item, rate, name: M.name, hasPurity, purity: p.purity[item] || 'normal', clock: full > 0 ? c : frac, count, powerBase, wells };
 }
 // Size generators of type G burning `avail`/min of `fuelItem` at genClock. Overclocking a
 // generator scales its fuel burn AND output together, so for a fixed fuel rate the total
@@ -3488,7 +3502,7 @@ function renderPower() {
     const bld = {};
     for (const s of r.res.recipes) { (bld[s.building] = bld[s.building] || { name: s.buildingName, count: 0, power: 0 }); bld[s.building].count += s.machines; bld[s.building].power += s.power; }
     Object.values(bld).sort((a, b) => b.power - a.power).forEach((b, i) => powerConsRow(cons, i === 0 ? 'Production' : '', b.name, b.count, b.power));
-    r.extraction.slice().sort((a, b) => b.powerBase - a.powerBase).forEach((e, i) => powerConsRow(cons, i === 0 ? 'Extraction' : '', `${e.name}${e.hasPurity ? ` · ${e.purity}` : ''}${e.clock !== 1 ? ` · ${Math.round(e.clock * 100)}%` : ''} · ${itemName(e.item)}`, e.count, e.powerBase * m));
+    r.extraction.slice().sort((a, b) => b.powerBase - a.powerBase).forEach((e, i) => powerConsRow(cons, i === 0 ? 'Extraction' : '', `${e.name}${e.wells ? ` + ${e.wells}× ${(EXTRACTORS.Build_FrackingSmasher_C && EXTRACTORS.Build_FrackingSmasher_C.name) || 'Pressurizer'}` : ''}${e.hasPurity ? ` · ${e.purity}` : ''}${e.clock !== 1 ? ` · ${Math.round(e.clock * 100)}%` : ''} · ${itemName(e.item)}`, e.count, e.powerBase * m));
     r.gens.forEach((g) => { if (g.water) powerConsRow(cons, 'Gen. water', `Water Extractor → ${g.name}`, g.water.count, g.water.powerBase * m); });
     if (!cons.children.length) cons.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No machines.</td></tr>';
   }
