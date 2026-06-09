@@ -605,6 +605,32 @@ console.log('\n### PROJECTS: SWITCHER + PLAN-BAR FILTER + ROLLUP');
   check('each plan persisted with a projectId', persisted.plans.every((p) => !!p.projectId));
 }
 
+console.log('\n### PROJECTS: CREATE + INLINE RENAME WITHOUT prompt() (Electron has none)');
+{
+  const { w, d, app, fire, click } = boot13(null);
+  // Electron's renderer defines window.prompt but THROWS when it's called
+  // ("prompt() is and will not be supported."). The +Project / ✎Rename handlers used to
+  // call prompt() first, so the throw aborted them and the buttons did nothing. Simulate
+  // that throw here so any regression reintroducing prompt() fails loudly.
+  w.prompt = () => { throw new Error('prompt() is and will not be supported.'); };
+  global.prompt = w.prompt;
+  check('starts with one project', app.projects.length === 1);
+  click(d.getElementById('projectNew'));
+  check('+Project creates without calling prompt()', app.projects.length === 2);
+  check('projectSelect intact after create (not mid-swap)',
+    !!d.getElementById('projectSelect') && d.querySelectorAll('#projectSelect option').length === 2);
+  // ✎Rename swaps the <select> for an inline text input (same UX as plan-tab rename).
+  click(d.getElementById('projectRename'));
+  const inp = d.querySelector('.project-bar input.plan-rename');
+  check('Rename swaps select for an input', !!inp && !d.getElementById('projectSelect'));
+  inp.value = 'Steel Wing';
+  fire(inp, 'blur'); // commit on blur
+  check('rename committed to active project', app.projects[1].name === 'Steel Wing');
+  check('projectSelect restored after rename', !!d.getElementById('projectSelect'));
+  check('renamed option shown in switcher',
+    [...d.querySelectorAll('#projectSelect option')].some((o) => o.textContent === 'Steel Wing'));
+}
+
 console.log('\n### PROJECTS: LINKED INPUT A -> B TRACKS A\'S OUTPUT');
 {
   const { d, app, setVal, click } = boot13(null);

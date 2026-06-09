@@ -2820,6 +2820,32 @@ function startRename(tab, lab, p) {
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); else if (e.key === 'Escape') { done = true; renderPlanBar(); } });
   inp.addEventListener('blur', commit);
 }
+// Inline rename for a project. Electron's renderer has no working prompt() (it throws
+// "prompt() is and will not be supported"), so we swap the project <select> for a text
+// input in place — same UX as the plan-tab rename. The original <select> element is
+// kept and restored before renameProject()/renderProjectBar() run, because
+// renderProjectBar() bails when #projectSelect is missing and only refills its options.
+function startProjectRename(proj) {
+  const sel = $('projectSelect');
+  if (!sel || !proj) return;
+  const parent = sel.parentNode;
+  const inp = el('input', 'plan-rename');
+  inp.value = proj.name;
+  inp.title = 'Enter to save · Esc to cancel';
+  parent.replaceChild(inp, sel);
+  inp.focus(); inp.select();
+  let done = false;
+  const restore = () => { if (inp.parentNode === parent) parent.replaceChild(sel, inp); };
+  const commit = () => {
+    if (done) return; done = true;
+    const name = inp.value.trim();
+    restore();
+    if (name && name !== proj.name) renameProject(proj.id, name); else renderProjectBar();
+  };
+  const cancel = () => { if (done) return; done = true; restore(); renderProjectBar(); };
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); else if (e.key === 'Escape') cancel(); });
+  inp.addEventListener('blur', commit);
+}
 
 // ---------- wiring ----------
 function syncSliderLabels() {
@@ -3017,15 +3043,13 @@ function init() {
   // projects
   $('projectSelect').addEventListener('change', (e) => switchProject(e.target.value));
   $('projectNew').addEventListener('click', () => {
-    const name = (typeof prompt === 'function') ? prompt('New project name:', `Project ${projects.length + 1}`) : `Project ${projects.length + 1}`;
-    if (name === null) return; // cancelled
-    newProject((name || '').trim() || `Project ${projects.length + 1}`);
+    // Create with an auto-name (no prompt() — it's unsupported in Electron's renderer and
+    // throws, which is why this button used to do nothing). Rename via the ✎ button.
+    newProject();
   });
   $('projectRename').addEventListener('click', () => {
     const proj = activeProject(); if (!proj) return;
-    const name = (typeof prompt === 'function') ? prompt('Rename project:', proj.name) : proj.name;
-    if (name === null) return;
-    renameProject(proj.id, (name || '').trim() || proj.name);
+    startProjectRename(proj);
   });
   $('projectDelete').addEventListener('click', () => deleteProject(activeProjectId));
   $('btnReset').addEventListener('click', () => { state.picks = {}; state.nodeClock = {}; save(); solveAndRender(); });
