@@ -1222,7 +1222,9 @@ function buildFlow(res, targets) {
   });
   const addEdge = (srcId, dstId, item, rate) => {
     if (!byId[srcId] || !byId[dstId]) return;
-    const e = { src: srcId, dst: dstId, label: `${itemName(item)} ${fmt(rate)}/min` };
+    // item + numeric rate are carried alongside the display label so the Sankey view can
+    // size each band by throughput (and colour it by material) without re-parsing the text.
+    const e = { src: srcId, dst: dstId, item, rate, label: `${itemName(item)} ${fmt(rate)}/min` };
     edges.push(e); byId[srcId].outs.push(e); byId[dstId].ins.push(e);
   };
   res.recipes.forEach((s) => {
@@ -1407,6 +1409,60 @@ function edgePath(e, byId) {
   return { d: `M ${sx} ${sy} C ${c1} ${c1y} ${c2} ${c2y} ${dx} ${dy}`, lx, ly: ly - 5 };
 }
 
+// ----- Sankey mode: proportional flow bands -----
+// The Sankey view reuses the exact node layout from layoutFlow; it only changes how edges
+// are drawn — each becomes a band whose thickness is its throughput (items/min). A band's
+// two ends attach to stacked slots along the facing edge of its source/target node, so the
+// bands fan out of a node in proportion to flow rather than all meeting at the centre.
+// Offsets are stored RELATIVE to the node origin (_so on the source, _di on the dest) so a
+// dragged node keeps its bands attached without recomputing the whole layout.
+const isSankey = () => state.view === 'sankey';
+// Stable per-item hue so each material reads as its own colour; fluids share the map's cyan.
+function itemHue(item) { let h = 0; const s = String(item || ''); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h % 360; }
+const bandColor = (item) => (isFluid(item) ? 'hsl(199, 82%, 60%)' : `hsl(${itemHue(item)}, 62%, 60%)`);
+function sankeyLayout(flow) {
+  const { nodes } = flow;
+  let maxStack = 0;
+  nodes.forEach((n) => {
+    n._in = n.ins.reduce((a, e) => a + (e.rate || 0), 0);
+    n._out = n.outs.reduce((a, e) => a + (e.rate || 0), 0);
+    maxStack = Math.max(maxStack, n._in, n._out);
+  });
+  // One global scale so band widths are comparable across the whole chart: the busiest
+  // node's stack spans ~SPAN px; every band is clamped to a legible [MINW, MAXW].
+  const SPAN = 150, MINW = 2.5, MAXW = 52;
+  const scale = maxStack > 0 ? SPAN / maxStack : 1;
+  flow._bandScale = scale;
+  const bw = (r) => Math.max(MINW, Math.min(MAXW, (r || 0) * scale));
+  nodes.forEach((n) => {
+    // Stack the widest bands nearest the node centre (sorted by rate) so big flows read
+    // first and thin trickles sit at the edges; centre the whole stack on the node.
+    const lay = (list, key) => {
+      const ordered = list.slice().sort((a, b) => (b.rate || 0) - (a.rate || 0));
+      const total = ordered.reduce((a, e) => a + bw(e.rate), 0);
+      let y = n.h / 2 - total / 2;
+      ordered.forEach((e) => { const w = bw(e.rate); e._bw = w; e[key] = y + w / 2; y += w; });
+    };
+    lay(n.outs, '_so'); // attach offset on the source node's right/left edge
+    lay(n.ins, '_di');  // attach offset on the dest node's facing edge
+  });
+}
+// Band centre-line for Sankey mode: a flat-handled bezier between the two stacked attach
+// points. Stroking it with width e._bw gives a constant-thickness ribbon = its throughput.
+function sankeyEdgePath(e, byId) {
+  const s = byId[e.src], d = byId[e.dst];
+  const goRight = (d.x + d.w / 2) >= (s.x + s.w / 2);
+  const sx = goRight ? s.x + s.w : s.x;
+  const dx = goRight ? d.x : d.x + d.w;
+  const ho = goRight ? 60 : -60;
+  const sy = s.y + (e._so != null ? e._so : s.h / 2);
+  const dy = d.y + (e._di != null ? e._di : d.h / 2);
+  const c1 = sx + ho, c2 = dx - ho;
+  const lx = 0.125 * sx + 0.375 * c1 + 0.375 * c2 + 0.125 * dx; // bezier midpoint (t=0.5)
+  const ly = 0.5 * sy + 0.5 * dy;
+  return { d: `M ${sx} ${sy} C ${c1} ${sy} ${c2} ${dy} ${dx} ${dy}`, lx, ly: ly - 4 };
+}
+
 function drawFlow(flow) {
   const svg = $('flowSvg');
   while (svg.firstChild) svg.removeChild(svg.firstChild);
@@ -1434,27 +1490,61 @@ function drawFlow(flow) {
   av.setAttribute('d', 'M0,0 L10,5 L0,10 z'); av.setAttribute('class', 'flow-arrow');
   marker.appendChild(av); defs.appendChild(marker); svg.insertBefore(defs, root);
 
-  // Flag anti-parallel pairs (both A->B and B->A present) so edgePath splits them apart.
-  const pk = (a, b) => a + ' ' + b;
-  const eset = new Set(flow.edges.map((e) => pk(e.src, e.dst)));
-  flow.edges.forEach((e) => { e._anti = eset.has(pk(e.dst, e.src)) ? (e.src < e.dst ? 1 : -1) : 0; });
+  const sankey = isSankey();
+  if (sankey) {
+    // Proportional bands: width = throughput, colour = material. Visuals are set as
+    // attributes (not CSS) so the PNG export captures them without extra stylesheet rules.
+    sankeyLayout(flow);
+    flow.edges.forEach((e) => {
+      const p = sankeyEdgePath(e, flow.byId);
+      const path = document.createElementNS(SVGNS, 'path');
+      path.setAttribute('class', 'sankey-band');
+      path.setAttribute('d', p.d);
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', bandColor(e.item));
+      path.setAttribute('stroke-width', e._bw);
+      path.setAttribute('stroke-linecap', 'round');
+      path.setAttribute('stroke-opacity', '0.55');
+      const tip = document.createElementNS(SVGNS, 'title');
+      tip.textContent = e.label;
+      path.appendChild(tip);
+      gEdges.appendChild(path);
+      e._path = path;
+      // Label only bands wide enough to carry text without crowding the thin ones; the
+      // rest surface their rate via the hover tooltip above.
+      if (e._bw >= 9) {
+        const t = document.createElementNS(SVGNS, 'text');
+        t.setAttribute('class', 'edge-label');
+        t.setAttribute('x', p.lx); t.setAttribute('y', p.ly);
+        t.setAttribute('text-anchor', 'middle');
+        t.textContent = e.label;
+        gEdges.appendChild(t);
+        e._label = t;
+      } else e._label = null;
+    });
+  } else {
+    // Flag anti-parallel pairs (both A->B and B->A present) so edgePath splits them apart.
+    const pk = (a, b) => a + ' ' + b;
+    const eset = new Set(flow.edges.map((e) => pk(e.src, e.dst)));
+    flow.edges.forEach((e) => { e._anti = eset.has(pk(e.dst, e.src)) ? (e.src < e.dst ? 1 : -1) : 0; });
 
-  flow.edges.forEach((e, i) => {
-    e._lt = EDGE_LABEL_TS[i % EDGE_LABEL_TS.length]; // stagger label along the curve
-    const p = edgePath(e, flow.byId);
-    const path = document.createElementNS(SVGNS, 'path');
-    path.setAttribute('class', 'edge-path');
-    path.setAttribute('d', p.d);
-    path.setAttribute('marker-end', 'url(#flowArrow)');
-    gEdges.appendChild(path);
-    const t = document.createElementNS(SVGNS, 'text');
-    t.setAttribute('class', 'edge-label');
-    t.setAttribute('x', p.lx); t.setAttribute('y', p.ly);
-    t.setAttribute('text-anchor', 'middle');
-    t.textContent = e.label;
-    gEdges.appendChild(t);
-    e._path = path; e._label = t;
-  });
+    flow.edges.forEach((e, i) => {
+      e._lt = EDGE_LABEL_TS[i % EDGE_LABEL_TS.length]; // stagger label along the curve
+      const p = edgePath(e, flow.byId);
+      const path = document.createElementNS(SVGNS, 'path');
+      path.setAttribute('class', 'edge-path');
+      path.setAttribute('d', p.d);
+      path.setAttribute('marker-end', 'url(#flowArrow)');
+      gEdges.appendChild(path);
+      const t = document.createElementNS(SVGNS, 'text');
+      t.setAttribute('class', 'edge-label');
+      t.setAttribute('x', p.lx); t.setAttribute('y', p.ly);
+      t.setAttribute('text-anchor', 'middle');
+      t.textContent = e.label;
+      gEdges.appendChild(t);
+      e._path = path; e._label = t;
+    });
+  }
 
   flow.nodes.forEach((n) => {
     const g = document.createElementNS(SVGNS, 'g');
@@ -1497,10 +1587,13 @@ function attachDrag(g, node, flow) {
     node.y += (ev.clientY - last.y) / k;
     last = { x: ev.clientX, y: ev.clientY };
     g.setAttribute('transform', `translate(${node.x},${node.y})`);
+    // In Sankey mode the bands attach at stacked offsets (fixed relative to the node), so
+    // the same path fn keeps them glued as the node moves; thin bands have no label to move.
+    const pathOf = isSankey() ? sankeyEdgePath : edgePath;
     [...node.ins, ...node.outs].forEach((e) => {
-      const p = edgePath(e, flow.byId);
-      e._path.setAttribute('d', p.d);
-      e._label.setAttribute('x', p.lx); e._label.setAttribute('y', p.ly);
+      const p = pathOf(e, flow.byId);
+      if (e._path) e._path.setAttribute('d', p.d);
+      if (e._label) { e._label.setAttribute('x', p.lx); e._label.setAttribute('y', p.ly); }
     });
   });
   const finish = (ev, isUp) => {
@@ -1822,11 +1915,17 @@ function syncFlowPowerBtn() {
   if (b) b.classList.toggle('active', !!state.flowPower);
 }
 function applyView() {
-  const flow = state.view === 'flow';
+  const sankey = state.view === 'sankey';
+  const flow = state.view === 'flow' || sankey; // both views share the flowchart plumbing
   $('flowView').hidden = !flow;
   $('tableView').hidden = flow;
-  $('viewFlow').classList.toggle('active', flow);
-  $('viewTables').classList.toggle('active', !flow);
+  $('viewFlow').classList.toggle('active', state.view === 'flow');
+  if ($('viewSankey')) $('viewSankey').classList.toggle('active', sankey);
+  $('viewTables').classList.toggle('active', state.view === 'tables');
+  const hint = $('flowHint');
+  if (hint) hint.textContent = sankey
+    ? 'Band width = items / min · colour = material (cyan = fluid). Hover a thin band for its rate · drag nodes to rearrange · scroll to zoom · drag empty space to pan.'
+    : 'Click a machine to set Overclock / Somersloop · drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output · pink = sink · blue = generator · copper = extractor.';
   syncFlowPowerBtn();
   if (flow) renderFlowView();
   else closeNodePopup(); // the popup belongs to the flowchart — drop it when leaving flow view
@@ -4018,6 +4117,266 @@ function renderProjectTotals() {
       ? `${linked} linked input${linked === 1 ? '' : 's'} across this project — linked items are netted out of the raw totals above.`
       : 'Tip: link a plan input to another plan’s output (in the Optimizer’s extra-inputs or Max-supply rows) to chain factories.';
   }
+  renderBaseBalance();
+}
+
+// ---------- whole-base balance + factory dependencies ----------
+// Solve every plan in the project headlessly and roll their item flows into one ledger:
+// how much of each item the whole base PRODUCES vs CONSUMES. A plan produces an item at
+// its declared output rate (targets) plus any surplus by-product; it consumes every
+// external input it pulls (its `raw` list). Resources (ore, water, oil…) are mined, so a
+// negative net for them is expected; a negative net for a PART is a cross-factory
+// shortfall (the base consumes more than it makes). Also returns per-plan produce/consume
+// maps and the directed factory dependency edges (explicit links + auto-detected matches)
+// the dependency graph draws.
+function computeBaseBalance() {
+  const rows = activeProjectPlans();
+  const produced = {}, consumed = {};
+  const perPlan = [];
+  const idSet = new Set(rows.map((p) => p.id));
+  for (const pl of rows) {
+    const out = computeStateResult(pl.state);
+    const info = { id: pl.id, name: pl.name, mode: pl.state.mode, feasible: out.feasible, produces: {}, consumes: {}, power: 0, machines: 0 };
+    if (out.feasible) {
+      const res = out.res, tg = out.targets || {};
+      info.power = res.totalPower || 0;
+      info.machines = res.totalMachines || 0;
+      const addProd = (it, r) => { if (r > 1e-6) { info.produces[it] = (info.produces[it] || 0) + r; produced[it] = (produced[it] || 0) + r; } };
+      const addCons = (it, r) => { if (r > 1e-6) { info.consumes[it] = (info.consumes[it] || 0) + r; consumed[it] = (consumed[it] || 0) + r; } };
+      for (const it in tg) addProd(it, tg[it]);
+      for (const s of res.surplus || []) addProd(s.item, s.rate);
+      for (const r of res.raw || []) addCons(r.item, r.rate);
+    }
+    perPlan.push(info);
+  }
+  const planById = (id) => perPlan.find((p) => p.id === id);
+  // Per-item ledger, split into parts (cross-factory balance) and mined resources.
+  const parts = [], resources = [];
+  const EPS = 1e-4;
+  for (const it of new Set([...Object.keys(produced), ...Object.keys(consumed)])) {
+    const p = produced[it] || 0, c = consumed[it] || 0;
+    (RESOURCES.has(it) ? resources : parts).push({ item: it, produced: p, consumed: c, net: p - c });
+  }
+  const byName = (a, b) => itemName(a.item).localeCompare(itemName(b.item));
+  parts.sort((a, b) => a.net - b.net || byName(a, b)); // worst shortfalls first
+  resources.sort(byName);
+  const shortfalls = parts.filter((r) => r.net < -EPS);
+  const surpluses = parts.filter((r) => r.net > EPS);
+
+  // ----- factory dependency edges -----
+  // Explicit links (a consumer declares it pulls item X from plan Y) are authoritative.
+  // A (source,item) is a BOTTLENECK when its explicit consumers' combined demand exceeds
+  // what the source makes, or when a consumer can't solve at all. Auto edges fill in
+  // producer→consumer item matches that have no explicit link yet (drawn dashed as a hint).
+  const explicit = [];
+  for (const pl of rows) {
+    for (const r of planLinkRows(pl)) {
+      if (!idSet.has(r.fromPlanId)) continue; // link points outside this project
+      const consumer = planById(pl.id);
+      explicit.push({ from: r.fromPlanId, to: pl.id, item: r.fromItem, demand: consumer ? (consumer.consumes[r.fromItem] || 0) : 0 });
+    }
+  }
+  // Per (source,item): combined declared demand AND the set of distinct consumers. The app
+  // grants EVERY linking consumer the source's FULL output (resolveLinkedCap doesn't divide
+  // it), so two consumers on one source-item are each promised the whole thing — the source
+  // is over-subscribed even before the solver's reported draw is considered.
+  const demandBySrcItem = {}, consumersBySrcItem = {};
+  for (const e of explicit) {
+    const k = e.from + '|' + e.item;
+    demandBySrcItem[k] = (demandBySrcItem[k] || 0) + e.demand;
+    (consumersBySrcItem[k] = consumersBySrcItem[k] || new Set()).add(e.to);
+  }
+  const supplyOf = (id, it) => { const q = planById(id); return q ? (q.produces[it] || 0) : 0; };
+  const depEdges = [];
+  const covered = new Set();
+  for (const e of explicit) {
+    covered.add(e.from + '>' + e.to + '|' + e.item);
+    const k = e.from + '|' + e.item;
+    const supply = supplyOf(e.from, e.item);
+    const dst = planById(e.to);
+    // Over-subscribed when 2+ factories draw the same source-item (each allotted its full
+    // output) or the combined declared draw already exceeds it; starved when the consumer
+    // can't solve at all.
+    const shared = (consumersBySrcItem[k] ? consumersBySrcItem[k].size : 1) >= 2;
+    const over = shared || (demandBySrcItem[k] || 0) > supply + EPS;
+    const rate = e.demand > EPS ? Math.min(e.demand, supply) : supply;
+    depEdges.push({ from: e.from, to: e.to, item: e.item, rate, supply, demand: e.demand, kind: 'link', bottleneck: over || (dst && !dst.feasible) });
+  }
+  for (const part of parts) {
+    const it = part.item;
+    const producers = perPlan.filter((p) => (p.produces[it] || 0) > EPS);
+    const consumers = perPlan.filter((p) => (p.consumes[it] || 0) > EPS);
+    for (const P of producers) for (const C of consumers) {
+      if (P.id === C.id || covered.has(P.id + '>' + C.id + '|' + it)) continue;
+      depEdges.push({ from: P.id, to: C.id, item: it, rate: Math.min(P.produces[it], C.consumes[it]), supply: P.produces[it], demand: C.consumes[it], kind: 'auto', bottleneck: false });
+    }
+  }
+  return { parts, resources, shortfalls, surpluses, perPlan, depEdges, count: rows.length };
+}
+
+function renderBaseBalance() {
+  const bal = computeBaseBalance();
+  // Cross-factory shortfalls callout — the headline signal (a part the base under-makes).
+  const sf = $('projShortfalls');
+  if (sf) {
+    sf.hidden = false;
+    sf.innerHTML = '';
+    sf.className = bal.shortfalls.length ? 'proj-shortfall' : 'proj-shortfall ok';
+    if (bal.shortfalls.length) {
+      sf.appendChild(el('div', 'proj-shortfall-title', `⚠ ${bal.shortfalls.length} cross-factory shortfall${bal.shortfalls.length === 1 ? '' : 's'}`));
+      sf.appendChild(el('div', 'proj-shortfall-sub', 'These parts are consumed across the base faster than they’re produced. Add a factory (or raise output) to cover the gap, or link an existing producer.'));
+      const list = el('div', 'proj-shortfall-list');
+      bal.shortfalls.forEach((r) => {
+        const chip = el('span', 'proj-shortfall-chip');
+        chip.appendChild(itemCell(r.item));
+        chip.appendChild(el('b', null, '−' + fmt(-r.net) + '/min'));
+        list.appendChild(chip);
+      });
+      sf.appendChild(list);
+    } else {
+      sf.appendChild(el('div', 'proj-shortfall-title', '✓ No cross-factory shortfalls'));
+      sf.appendChild(el('div', 'proj-shortfall-sub', 'Every part consumed across this project is produced by a factory in it (or is a mined raw resource).'));
+    }
+  }
+  // Part balance table: every produced/consumed part, shortfalls first.
+  const tb = $('projBalanceTable') && $('projBalanceTable').querySelector('tbody');
+  if (tb) {
+    tb.innerHTML = '';
+    if (!bal.parts.length) {
+      tb.innerHTML = '<tr><td colspan="5" style="color:var(--muted)">No intermediate parts yet — set targets in this project’s plans, or link a plan’s input to another plan’s output.</td></tr>';
+    } else {
+      bal.parts.forEach((r) => {
+        const tr = el('tr');
+        const td = el('td'); td.appendChild(itemCell(r.item)); tr.appendChild(td);
+        tr.appendChild(el('td', 'num', fmt(r.produced)));
+        tr.appendChild(el('td', 'num', fmt(r.consumed)));
+        const net = el('td', 'num ' + (r.net < -1e-4 ? 'bal-short' : r.net > 1e-4 ? 'bal-surplus' : ''), (r.net > 1e-4 ? '+' : '') + fmt(r.net));
+        tr.appendChild(net);
+        const status = r.net < -1e-4 ? 'Shortfall' : r.net > 1e-4 ? 'Surplus' : 'Balanced';
+        tr.appendChild(el('td', r.net < -1e-4 ? 'bal-short' : r.net > 1e-4 ? 'bal-surplus' : 'bal-even', status));
+        tb.appendChild(tr);
+      });
+    }
+  }
+  renderDepGraph(bal);
+}
+
+// Factory-level dependency graph: one box per plan, laid out in columns by dependency
+// depth (a consumer sits to the right of what feeds it). Explicit links draw solid, auto
+// matches dashed, bottlenecks/shortfalls red. Static fit-to-width SVG (no zoom/drag) — the
+// graph is small (a handful of factories), so a viewBox that scales to the panel suffices.
+function renderDepGraph(bal) {
+  const svg = $('depSvg');
+  if (!svg) return;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  const nodes = bal.perPlan;
+  const note = $('depNote');
+  if (nodes.length < 2) {
+    if (note) note.textContent = 'Add a second plan to this project (＋ New) to see how your factories feed each other.';
+    svg.removeAttribute('viewBox');
+    return;
+  }
+  // Dependency depth from explicit links only (auto edges don't force a column, so a
+  // hint can't reshuffle the layout). Cycle-safe: a back-edge into a node still on the
+  // current path is ignored (links are cycle-guarded, but stay defensive).
+  const byId = {}; nodes.forEach((n) => { byId[n.id] = n; });
+  const linkEdges = bal.depEdges.filter((e) => e.kind === 'link' && byId[e.from] && byId[e.to]);
+  const incoming = {}; nodes.forEach((n) => { incoming[n.id] = []; });
+  linkEdges.forEach((e) => incoming[e.to].push(e.from));
+  const col = {}, mark = {};
+  const depthOf = (id) => {
+    if (mark[id] === 2) return col[id];
+    if (mark[id] === 1) return 0;
+    mark[id] = 1;
+    let d = 0;
+    for (const src of incoming[id]) if (byId[src]) d = Math.max(d, depthOf(src) + 1);
+    mark[id] = 2;
+    return (col[id] = d);
+  };
+  nodes.forEach((n) => depthOf(n.id));
+  const cols = {};
+  nodes.forEach((n) => (cols[col[n.id]] = cols[col[n.id]] || []).push(n));
+  const NW = 168, NH = 50, COLW = 250, ROWH = 84, PADX = 20, PADY = 20;
+  const maxRows = Math.max(1, ...Object.values(cols).map((a) => a.length));
+  Object.keys(cols).map(Number).sort((a, b) => a - b).forEach((c) => {
+    const off = ((maxRows - cols[c].length) / 2) * ROWH;
+    cols[c].forEach((n, i) => { n._x = PADX + c * COLW; n._y = PADY + off + i * ROWH; });
+  });
+  const W = PADX + (Math.max(...Object.keys(cols).map(Number)) + 1) * COLW;
+  const H = PADY + maxRows * ROWH;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  const mk = (tag) => document.createElementNS(SVGNS, tag);
+  const gE = mk('g'), gN = mk('g');
+  svg.appendChild(gE); svg.appendChild(gN);
+  // Edges: from source's right edge to dest's left edge, curved. Stack multiple edges
+  // between the same pair by nudging their attach points so labels don't overlap.
+  const pairCount = {};
+  bal.depEdges.filter((e) => byId[e.from] && byId[e.to]).forEach((e) => {
+    const s = byId[e.from], d = byId[e.to];
+    const key = e.from + '>' + e.to;
+    const idx = (pairCount[key] = (pairCount[key] || 0) + 1) - 1;
+    const nudge = (idx - 0) * 12;
+    const sx = s._x + NW, sy = s._y + NH / 2 + nudge;
+    const dx = d._x, dy = d._y + NH / 2 + nudge;
+    const back = dx < sx; // consumer drawn left of source (rare) — bow the other way
+    const ho = back ? -50 : 50;
+    const path = mk('path');
+    path.setAttribute('d', `M ${sx} ${sy} C ${sx + ho} ${sy} ${dx - ho} ${dy} ${dx} ${dy}`);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', e.bottleneck ? '#ff5b5b' : e.kind === 'auto' ? '#5b6675' : 'var(--accent)');
+    path.setAttribute('stroke-width', e.bottleneck ? 2.4 : 1.6);
+    if (e.kind === 'auto') path.setAttribute('stroke-dasharray', '5 4');
+    path.setAttribute('marker-end', e.bottleneck ? 'url(#depArrowBad)' : e.kind === 'auto' ? 'url(#depArrowAuto)' : 'url(#depArrow)');
+    const tip = mk('title');
+    tip.textContent = `${itemName(e.item)} · ${fmt(e.rate)}/min${e.bottleneck ? ' · bottleneck (demand exceeds supply)' : ''}${e.kind === 'auto' ? ' · not linked yet' : ''}`;
+    path.appendChild(tip);
+    gE.appendChild(path);
+    // Label link edges (and any bottleneck) with item + rate; leave plain auto hints to the tooltip.
+    if (e.kind === 'link' || e.bottleneck) {
+      const t = mk('text');
+      t.setAttribute('class', 'dep-edge-label');
+      t.setAttribute('x', (sx + dx) / 2); t.setAttribute('y', (sy + dy) / 2 - 4);
+      t.setAttribute('text-anchor', 'middle');
+      t.textContent = `${itemName(e.item)} ${fmt(e.rate)}`;
+      gE.appendChild(t);
+    }
+  });
+  // Arrowhead markers (one per colour).
+  const defs = mk('defs');
+  [['depArrow', 'var(--accent)'], ['depArrowAuto', '#5b6675'], ['depArrowBad', '#ff5b5b']].forEach(([id, fill]) => {
+    const m = mk('marker');
+    m.setAttribute('id', id); m.setAttribute('viewBox', '0 0 10 10');
+    m.setAttribute('refX', '9'); m.setAttribute('refY', '5');
+    m.setAttribute('markerWidth', '7'); m.setAttribute('markerHeight', '7');
+    m.setAttribute('orient', 'auto');
+    const a = mk('path'); a.setAttribute('d', 'M0,0 L10,5 L0,10 z'); a.setAttribute('fill', fill);
+    m.appendChild(a); defs.appendChild(m);
+  });
+  svg.insertBefore(defs, gE);
+  // Nodes.
+  nodes.forEach((n) => {
+    const bottleneck = !n.feasible || bal.depEdges.some((e) => e.bottleneck && (e.from === n.id || e.to === n.id));
+    const g = mk('g');
+    g.setAttribute('transform', `translate(${n._x},${n._y})`);
+    g.setAttribute('class', 'dep-node' + (bottleneck ? ' bad' : '') + (n.feasible ? '' : ' dead'));
+    const rect = mk('rect');
+    rect.setAttribute('width', NW); rect.setAttribute('height', NH); rect.setAttribute('rx', '7');
+    g.appendChild(rect);
+    const t1 = mk('text'); t1.setAttribute('class', 'dep-name'); t1.setAttribute('x', 10); t1.setAttribute('y', 19);
+    t1.textContent = n.name.length > 22 ? n.name.slice(0, 21) + '…' : n.name;
+    g.appendChild(t1);
+    const t2 = mk('text'); t2.setAttribute('class', 'dep-sub'); t2.setAttribute('x', 10); t2.setAttribute('y', 37);
+    t2.textContent = n.feasible ? `${fmtPower(n.power)} · ${fmt(n.machines, 0)} mach` : 'no output';
+    g.appendChild(t2);
+    gN.appendChild(g);
+  });
+  if (note) {
+    const links = bal.depEdges.filter((e) => e.kind === 'link').length;
+    const autos = bal.depEdges.filter((e) => e.kind === 'auto').length;
+    const bott = bal.depEdges.filter((e) => e.bottleneck).length;
+    note.textContent = `${links} linked feed${links === 1 ? '' : 's'}, ${autos} auto-detected match${autos === 1 ? '' : 'es'}${bott ? `, ${bott} bottleneck${bott === 1 ? '' : 's'}` : ''}. Hover an arrow for its item and rate.`;
+  }
 }
 function startRename(tab, lab, p) {
   const inp = el('input', 'plan-rename');
@@ -4178,6 +4537,7 @@ function init() {
   wirePowerControls();
   $('viewTables').addEventListener('click', () => { state.view = 'tables'; save(); applyView(); });
   $('viewFlow').addEventListener('click', () => { state.view = 'flow'; save(); applyView(); });
+  if ($('viewSankey')) $('viewSankey').addEventListener('click', () => { state.view = 'sankey'; save(); applyView(); });
   $('flowReset').addEventListener('click', () => { state.flowPos = {}; state.flowView = null; save(); renderFlowView(); });
   $('flowPowerToggle').addEventListener('click', () => { state.flowPower = !state.flowPower; save(); syncFlowPowerBtn(); solveAndRender(); });
   $('flowFit').addEventListener('click', () => { fitFlow(currentFlow); save(); });
@@ -4339,7 +4699,7 @@ if (typeof window !== 'undefined') {
     activePlan, activeProject, activeProjectPlans, plansInProject,
     newProject, switchProject, deleteProject, newPlan,
     linkWouldCycle, resolveLinkedCap, planNetOutputs, recomputePlanOutputs,
-    computeProjectTotals, ensureProjects,
+    computeProjectTotals, computeBaseBalance, ensureProjects,
     setMode,
     // X-ray test surface: inject parsed records (no real save), set the plan's region /
     // whole-base scope, drive the draw lifecycle, and read live X-ray/draw state — so the

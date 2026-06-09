@@ -891,5 +891,113 @@ console.log('\n### BASE X-RAY (per-plan area)');
   check('clearing the area re-routes to the map', app.getXray().mode === 'map');
 }
 
+// ---- Sankey view: proportional flow bands as a 3rd view toggle ----
+console.log('\n### SANKEY VIEW (proportional flow bands)');
+{
+  const { w, d, setVal, click } = boot13(null);
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
+  setVal(d.getElementById('targetItem'), 'Iron Plate'); setVal(d.getElementById('targetRate'), '20');
+  check('Sankey toggle button present', !!d.getElementById('viewSankey'));
+  click(d.getElementById('viewFlow'));
+  const flowEdges = d.querySelectorAll('#flowSvg .edge-path').length;
+  check('flowchart drew thin edges', flowEdges > 0);
+  click(d.getElementById('viewSankey'));
+  const bands = [...d.querySelectorAll('#flowSvg .sankey-band')];
+  check('Sankey swaps thin edges for one band per edge', bands.length === flowEdges && d.querySelectorAll('#flowSvg .edge-path').length === 0);
+  check('every band has a positive stroke-width (∝ throughput)', bands.length > 0 && bands.every((b) => parseFloat(b.getAttribute('stroke-width')) > 0));
+  check('bands vary in width (a wider stream reads thicker)', new Set(bands.map((b) => b.getAttribute('stroke-width'))).size >= 1);
+  check('a band carries a rate tooltip', bands.some((b) => b.querySelector('title') && /\/min/.test(b.querySelector('title').textContent)));
+  const ps = JSON.parse(w.localStorage.getItem('satisfactory-factory-plans-v1'));
+  check('Sankey view persisted to the plan', ps.plans.find((p) => p.id === ps.activeId).state.view === 'sankey');
+  click(d.getElementById('viewFlow'));
+  check('switching back to Flowchart restores thin edges (no bands)',
+    d.querySelectorAll('#flowSvg .sankey-band').length === 0 && d.querySelectorAll('#flowSvg .edge-path').length === flowEdges);
+}
+
+// ---- Multi-factory: whole-base balance + dependency graph ----
+console.log('\n### MULTI-FACTORY: BASE BALANCE + DEPENDENCY GRAPH');
+{
+  const { d, app, setVal, click } = boot13(null);
+  const optTab = () => click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  // Factory A: optimizer makes 120 Iron Plate from ore.
+  optTab();
+  const aOut = d.querySelector('#optOutputs .row');
+  setVal(aOut.querySelector('.row-item'), 'Iron Plate'); setVal(aOut.querySelector('.row-rate'), '120');
+  const planA = app.activePlan();
+  // Factory B (same project): makes Reinforced Iron Plate, importing its plates from A.
+  click(d.getElementById('planNew'));
+  optTab();
+  const bOut = d.querySelector('#optOutputs .row');
+  setVal(bOut.querySelector('.row-item'), 'Reinforced Iron Plate'); setVal(bOut.querySelector('.row-rate'), '10');
+  const planB = app.activePlan();
+  click(d.getElementById('optAddInput'));
+  setVal(d.querySelector('#optExtraInputs .row .row-link'), planA.id + '|' + cls('Iron Plate'), 'change');
+
+  const bal = app.computeBaseBalance();
+  check('balance solves every factory in the project', bal.perPlan.length === 2 && bal.perPlan.every((p) => p.feasible));
+  const plate = bal.parts.find((r) => r.item === cls('Iron Plate'));
+  check('Iron Plate produced ~120 by factory A', !!plate && Math.abs(plate.produced - 120) < 0.5);
+  check('Iron Plate consumed by factory B (linked import)', !!plate && plate.consumed > 1);
+  check('surplus Iron Plate floats up as a net positive', !!plate && plate.net > 1 && bal.surpluses.some((r) => r.item === cls('Iron Plate')));
+  const linkEdge = bal.depEdges.find((e) => e.kind === 'link' && e.from === planA.id && e.to === planB.id && e.item === cls('Iron Plate'));
+  check('a dependency edge links A -> B for Iron Plate', !!linkEdge && linkEdge.bottleneck === false);
+
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'project'));
+  check('project view shows the dependency graph', !d.getElementById('projectView').hidden);
+  check('graph draws one node per factory', d.querySelectorAll('#depSvg .dep-node').length === 2);
+  check('graph draws at least one edge', d.querySelectorAll('#depSvg path[marker-end]').length >= 1);
+  check('balance table is populated', d.querySelectorAll('#projBalanceTable tbody tr').length >= 1);
+  check('dependency note reports the linked feed', /linked feed/.test(d.getElementById('depNote').textContent));
+}
+
+// ---- Multi-factory: cross-factory shortfall (a part nobody produces enough of) ----
+console.log('\n### MULTI-FACTORY: CROSS-FACTORY SHORTFALL');
+{
+  const { d, app } = boot13(null);
+  // One planner factory making Reinforced Iron Plate but IMPORTING its Iron Plate (RAW
+  // pick) — no factory in the project produces plates, so they're a shortfall.
+  const p = app.activePlan();
+  p.state.mode = 'planner';
+  p.state.targetItem = cls('Reinforced Iron Plate');
+  p.state.targetRate = 30;
+  p.state.picks = { [cls('Iron Plate')]: 'RAW' };
+  const bal = app.computeBaseBalance();
+  const plate = bal.parts.find((r) => r.item === cls('Iron Plate'));
+  check('imported part is consumed with zero base production', !!plate && plate.consumed > 0 && plate.produced < 1e-6);
+  check('it is flagged a shortfall (net < 0)', !!plate && plate.net < 0 && bal.shortfalls.some((r) => r.item === cls('Iron Plate')));
+  app.setMode('project');
+  check('shortfall callout is shown', !d.getElementById('projShortfalls').hidden && /shortfall/i.test(d.getElementById('projShortfalls').textContent));
+  check('balance table marks the part as a Shortfall',
+    [...d.querySelectorAll('#projBalanceTable tbody tr')].some((tr) => /Iron Plate/.test(tr.textContent) && /Shortfall/.test(tr.textContent)));
+}
+
+// ---- Multi-factory: bottleneck — one source over-subscribed by two consumers ----
+console.log('\n### MULTI-FACTORY: BOTTLENECK (OVER-SUBSCRIBED SOURCE)');
+{
+  const { d, app, setVal, click } = boot13(null);
+  const optTab = () => click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  const linkToA = (planAId) => { click(d.getElementById('optAddInput')); setVal(d.querySelector('#optExtraInputs .row .row-link'), planAId + '|' + cls('Iron Plate'), 'change'); };
+  // A makes only 20 Iron Plate. B and C BOTH link their plate supply to A — each is handed
+  // A's full 20/min, so their combined demand (40) outruns the 20 A actually makes: the
+  // shared source is over-subscribed and every feed off it is a bottleneck.
+  optTab();
+  const aOut = d.querySelector('#optOutputs .row');
+  setVal(aOut.querySelector('.row-item'), 'Iron Plate'); setVal(aOut.querySelector('.row-rate'), '20');
+  const planA = app.activePlan();
+  for (let i = 0; i < 2; i++) {
+    click(d.getElementById('planNew'));
+    optTab();
+    const o = d.querySelector('#optOutputs .row');
+    setVal(o.querySelector('.row-item'), 'Reinforced Iron Plate'); setVal(o.querySelector('.row-rate'), '10');
+    linkToA(planA.id);
+  }
+  const bal = app.computeBaseBalance();
+  const fed = bal.depEdges.filter((e) => e.kind === 'link' && e.from === planA.id);
+  check('both consumers draw a dependency edge from A', fed.length === 2);
+  check('the over-subscribed feeds are flagged bottlenecks', fed.length === 2 && fed.every((e) => e.bottleneck === true));
+  app.setMode('project');
+  check('a bottleneck edge is drawn in red', [...d.querySelectorAll('#depSvg path')].some((pt) => (pt.getAttribute('stroke') || '').includes('ff5b5b')));
+}
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

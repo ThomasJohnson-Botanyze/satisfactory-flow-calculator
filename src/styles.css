@@ -593,6 +593,10 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }
 .flow-arrow { fill: #4b566c; }
 .edge-label { fill: #c2cad8; font-size: 11px; paint-order: stroke; stroke: #11141a; stroke-width: 4px; }
+/* Sankey ribbons: per-band stroke/width/colour are set inline (so PNG export keeps them);
+   here we only add the hover emphasis that highlights a single flow under the cursor. */
+.sankey-band { fill: none; stroke-linejoin: round; }
+.sankey-band:hover { stroke-opacity: 0.9 !important; }
 
 /* alternate recipes: save status + manual enable/disable list */
 #saveStatus { margin-top: 8px; }
@@ -910,3 +914,47 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 #areaPanel { border-left: 2px solid var(--accent); padding-left: 10px; }
 .xray-scope-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin: 8px 0 6px; }
 #xrayScope { color: var(--accent); font-weight: 600; }
+
+/* ============ Multi-factory: balance + dependency graph (Project Totals) ============ */
+/* Cross-factory shortfall callout — red when something is under-produced, green when clear. */
+.proj-shortfall {
+  border: 1px solid var(--warn);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  background: rgba(255, 91, 91, 0.08);
+  padding: 12px 14px;
+  margin: 4px 0 6px;
+}
+.proj-shortfall.ok { border-color: var(--good); border-left-color: var(--good); background: rgba(70, 224, 106, 0.08); }
+.proj-shortfall-title { font-weight: 700; color: var(--text); font-size: 14px; }
+.proj-shortfall-sub { color: var(--muted); font-size: 12px; margin-top: 3px; line-height: 1.4; }
+.proj-shortfall-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.proj-shortfall-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 9px; font-size: 12px;
+}
+.proj-shortfall-chip b { color: var(--warn); font-variant-numeric: tabular-nums; }
+
+/* Part-balance table status colouring. */
+.bal-short { color: var(--warn); font-weight: 600; }
+.bal-surplus { color: var(--good); font-weight: 600; }
+.bal-even { color: var(--muted); }
+
+/* Dependency-graph legend + canvas. */
+.dep-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--muted); margin: -2px 0 8px; }
+.dep-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.dep-key { width: 20px; height: 0; border-top: 3px solid var(--accent); display: inline-block; }
+.dep-key.auto { border-top-style: dashed; border-top-color: #5b6675; }
+.dep-key.bad { border-top-color: var(--warn); }
+.dep-scroll {
+  border: 1px solid var(--line); border-radius: 8px; background: #11141a;
+  overflow: hidden; min-height: 200px; max-height: 460px;
+}
+#depSvg { display: block; width: 100%; height: 100%; min-height: 200px; }
+.dep-node rect { fill: #1f2530; stroke: var(--accent); stroke-width: 1.5; }
+.dep-node.bad rect { stroke: var(--warn); }
+.dep-node.dead rect { fill: #2a2024; stroke: #6b5560; stroke-dasharray: 4 3; }
+.dep-name { fill: var(--text); font-size: 12px; font-weight: 700; }
+.dep-sub { fill: var(--muted); font-size: 10px; }
+.dep-edge-label { fill: #c2cad8; font-size: 10px; paint-order: stroke; stroke: #11141a; stroke-width: 3.5px; }
