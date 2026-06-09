@@ -755,6 +755,23 @@ function effectiveSloop(rc) {
   const max = maxSloopSlots(rc);
   return max ? 1 + sloopCountOf(rc) / max : 1;
 }
+// Per-recipe Somersloop multipliers for the LP. Sloop amplifies OUTPUT only (inputs
+// per machine are unchanged), so unlike clock it does NOT cancel in the material
+// ratios — it must be solved inside the balance, not post-rescaled. Returns null
+// when no step is slooped so the solver's fast path is untouched.
+function sloopMapFor(rcs) {
+  let map = null;
+  for (const rc of rcs) {
+    const sl = effectiveSloop(rc);
+    if (sl !== 1) (map = map || {})[rc] = sl;
+  }
+  return map;
+}
+// All slooped steps recorded on the current plan (for the Optimizer, where the LP
+// picks the recipes itself — any recipe the user has tuned carries its multiplier in).
+function sloopMapAll() {
+  return sloopMapFor(Object.keys(state.nodeSloop || {}));
+}
 
 // ----- clean ratios: scale a plan so every step is a whole number of machines -----
 // Best rational p/q ≈ x with q ≤ maxDen (continued-fraction convergent). Satisfactory
@@ -878,7 +895,7 @@ function computePlanner(targets) {
   const demand = {};
   for (const it of items) if (!rawItems.has(it)) demand[it] = tg[it];
 
-  const sol = LP.planner({ targets: demand, recipes: [...usedRc], rawItems: [...rawItems], recipeCost: state.recipeCost });
+  const sol = LP.planner({ targets: demand, recipes: [...usedRc], rawItems: [...rawItems], recipeCost: state.recipeCost, sloopMult: sloopMapFor(usedRc) });
   if (!sol.feasible) return Object.assign({}, empty, { feasible: false });
 
   let totalPower = 0;
@@ -888,13 +905,13 @@ function computePlanner(targets) {
     const r = RECIPES[s.rc];
     const b = BUILDINGS[r.building] || { name: r.building, power: 0, exponent: 1.321929, speed: 1 };
     const item = chosenItemOf[s.rc] || s.item;
-    const m100 = s.machines; // machine-equivalents at 100 % clock / 1× sloop
+    const m100 = s.machines; // machine-equivalents at 100 % clock (sloop already in the LP balance)
     const ck = effectiveClock(s.rc);
     const sl = effectiveSloop(s.rc); // 1×..2× from this step's installed Somersloops
-    const machines = m100 / (ck * sl);
+    const machines = m100 / ck; // clock cancels in the ratios; sloop must NOT be divided out (it's in the balance)
     const powerPer = b.power * Math.pow(ck, b.exponent) * Math.pow(sl, 2) * state.powerMult;
     const power = machines * powerPer;
-    const rate = (LP.RC_INFO[s.rc].out[item] || 0) * m100; // gross /min of the row's item
+    const rate = (LP.RC_INFO[s.rc].out[item] || 0) * sl * m100; // gross /min of the row's item (sloop-amplified)
     const sloops = sloopCountOf(s.rc);
     const nMachines = Math.ceil(machines - 1e-9);
     totalPower += power;
@@ -915,27 +932,25 @@ function computePlanner(targets) {
   };
 }
 
-// Apply each step's Overclock + Somersloop to an Optimizer result, the same way
-// computePlanner does for the Planner. The LP solves at 100% clock / 1× sloop (both
-// cancel in the material ratios, so they don't belong in the balance); here we rescale
-// machines & power per step and tag every row interactive so the Clock / Sloops editors
-// — the table cells AND the flowchart node popup — light up in Optimizer mode too.
-// Output rate is invariant (sloop amplification keeps the produced /min fixed and trades
-// machines for power ×slot²), which is exactly the fixed-output Optimizer's contract, so
-// this is a pure post-process. NOT used for Max mode: there output is the maximand, so
-// amplification would have to live in the LP, not a post-rescale. Mutates res in place
-// and recomputes the reported totals. (computePlanner inlines the same formula — keep the
-// two in sync.)
+// Apply each step's Overclock to an Optimizer result, the same way computePlanner
+// does for the Planner. The LP solves at 100% clock (clock scales inputs and outputs
+// equally, so it cancels in the material ratios); Somersloop does NOT cancel — it is
+// already inside the LP balance via sloopMult (see sloopMapAll) — so here only the
+// clock is divided out. We rescale machines & power per step and tag every row
+// interactive so the Clock / Sloops editors — the table cells AND the flowchart node
+// popup — light up in Optimizer mode too. NOT used for Max mode: there output is the
+// maximand. Mutates res in place and recomputes the reported totals. (computePlanner
+// inlines the same formula — keep the two in sync.)
 function tuneSteps(res) {
   if (!res || !res.recipes) return res;
   let totalPower = 0, totalMachines = 0, totalSloops = 0;
   for (const s of res.recipes) {
     const r = RECIPES[s.rc];
     const b = (r && BUILDINGS[r.building]) || { power: 0, exponent: 1.321929 };
-    const m100 = s.machines; // LP machine-equivalents at 100% clock / 1× sloop
+    const m100 = s.machines; // LP machine-equivalents at 100% clock (sloop already in the balance)
     const ck = effectiveClock(s.rc);
     const sl = effectiveSloop(s.rc);
-    s.machines = m100 / (ck * sl);
+    s.machines = m100 / ck;
     s.power = s.machines * (b.power || 0) * Math.pow(ck, b.exponent || 1.321929) * Math.pow(sl, 2) * state.powerMult;
     s.clock = ck;
     s.sloops = sloopCountOf(s.rc);
@@ -1231,7 +1246,9 @@ function buildFlow(res, targets) {
     const r = RECIPES[s.rc];
     const prod = r.products.find((p) => p.item === s.item) || r.products[0];
     r.ingredients.forEach((ing) => {
-      const total = (s.rate / prod.amount) * LP.effAmount(ing.amount, state.recipeCost);
+      // s.rate is sloop-amplified gross output; inputs scale with machines (not sloop),
+      // so divide the multiplier back out to get the true ingredient draw.
+      const total = (s.rate / (prod.amount * (s.sloopMult || 1))) * LP.effAmount(ing.amount, state.recipeCost);
       const provs = (producers[ing.item] || []).filter((p) => p.step !== s); // no self-edge on by-product loops
       if (provs.length) {
         const tot = provs.reduce((a, p) => a + p.rate, 0) || 1;
@@ -2995,7 +3012,7 @@ function computeStateResult(st) {
       for (const o of st.opt.outputs) { const c = nameToClass(o.name); if (c && o.rate > 0) outputs[c] = (outputs[c] || 0) + Number(o.rate) * (isDeliverable(c) ? st.spaceMult : 1); }
       const allowedInputs = optAllowedInputs(st);
       if (!Object.keys(outputs).length || !Object.keys(allowedInputs).length) return { feasible: false };
-      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false });
+      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false, sloopMult: sloopMapAll() });
       if (!res.feasible) return { feasible: false };
       res.surplus = res.outputs.filter((o) => !outputs[o.item]);
       tuneSteps(res); // apply per-step overclock / somersloop (machines & power)
@@ -3150,11 +3167,15 @@ function renderOptimize() {
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
   const sink = state.opt.sink !== false;
-  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink });
+  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, sloopMult: sloopMapAll() });
   if (!res.feasible) {
     if (res.backup && res.backup.length) {
       const names = res.backup.map(itemName).join(', ');
       return showEmpty(`By-product would back up: ${names}. It’s a fluid with no recipe consuming it, so it can’t be sunk and would stall the line. Enable an alternate recipe that consumes it, or untick “Sink / consume by-products”.`);
+    }
+    if (res.noProducer && res.noProducer.length) {
+      const names = res.noProducer.map(itemName).join(', ');
+      return showEmpty(`No enabled recipe produces: ${names}. Every producer is disabled (recipe or building veto) or not unlocked — re-enable one in Settings, or supply it as an input.`);
     }
     const dead = blockedOrphans(Object.keys(outputs));
     if (dead.length) return showEmpty(blockedWarn(dead, 'build'));
@@ -3185,6 +3206,7 @@ function renderMax() {
   if (!Object.keys(supply).length) return showEmpty('Add at least one available input with an amount.');
   const res = LP.maxThroughput({ product, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet() });
   if (!res.feasible) {
+    if (res.unbounded) return showEmpty(`Output of ${itemName(product)} is unbounded with these inputs — a recipe pair turns matter-positive under the current Recipe Parts Cost Multiplier (its rounding makes a package/unpackage loop create matter). Set the multiplier back to 1× or remove the packaged input.`);
     if (blockedOrphans([product]).length) return showEmpty(blockedWarn([product], 'build'));
     return showEmpty(`Cannot produce ${itemName(product)} from the given inputs.`);
   }

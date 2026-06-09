@@ -87,7 +87,10 @@ function effAmount(amt, cost) {
 }
 const effInnRate = (info, item, cost) => effAmount(info.innAmt[item] || 0, cost) * info.f;
 const itemsOf = (info) => new Set([...Object.keys(info.out), ...Object.keys(info.inn)]);
-const coefOf = (info, item, cost) => (info.out[item] || 0) - effInnRate(info, item, cost);
+// `sloop` is the step's Somersloop output multiplier (1×..2×). Per the game rule it
+// amplifies OUTPUT only — inputs per machine are unchanged — so it must live in the
+// material balance (unlike clock, which scales inputs and outputs equally and cancels).
+const coefOf = (info, item, cost, sloop = 1) => (info.out[item] || 0) * sloop - effInnRate(info, item, cost);
 const rawRateOf = (info, cost) => {
   let s = 0;
   for (const it in info.innAmt) if (RES.has(it)) s += effInnRate(info, it, cost);
@@ -109,7 +112,7 @@ function recipePool(allowAlternates, unlockedAlts, blockedRecipes) {
   });
 }
 
-function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false }) {
+function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, sloopMult = null }) {
   // Keep an unpackage recipe only when its packaged input is actually supplied; otherwise
   // it can only form a degenerate package<->unpackage loop (see UNPACKAGE note above).
   const pool = recipePool(allowAlternates, unlockedAlts, blockedRecipes).filter(
@@ -121,9 +124,10 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
   const variables = {};
   for (const rc of pool) {
     const info = RC_INFO[rc];
+    const sl = (sloopMult && sloopMult[rc]) || 1;
     const v = { _power: info.power * powerMult, _machines: 1, _raw: rawRateOf(info, recipeCost) };
-    for (const it of itemsOf(info)) v[it] = coefOf(info, it, recipeCost);
-    if (maxItem) v._out = coefOf(info, maxItem, recipeCost);
+    for (const it of itemsOf(info)) v[it] = coefOf(info, it, recipeCost, sl);
+    if (maxItem) v._out = coefOf(info, maxItem, recipeCost, sl);
     variables[rc] = v;
   }
 
@@ -150,7 +154,9 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
 
   const constraints = {};
   for (const it of inPlay) {
-    if (!maxItem && outputs[it] != null) constraints[it] = { min: outputs[it] };
+    // An item can be BOTH demanded and supplied (e.g. an Optimizer plan that project-links
+    // a part it also outputs): net the supply against the demand instead of ignoring it.
+    if (!maxItem && outputs[it] != null) constraints[it] = { min: outputs[it] - (inputs[it] != null ? (isFinite(inputs[it]) ? inputs[it] : BIG) : 0) };
     else if (inputs[it] != null) constraints[it] = { min: -(isFinite(inputs[it]) ? inputs[it] : BIG) };
     else if (sinkByproducts && !maxItem) constraints[it] = { equal: 0 }; // by-product: produce == consume (no backup)
     else constraints[it] = { min: 0 };
@@ -168,7 +174,7 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
   };
 }
 
-function summarize(res, pool, recipeCost, powerMult, disposal) {
+function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
   const recipes = [];
   const net = {};
   let totalPower = 0;
@@ -178,12 +184,13 @@ function summarize(res, pool, recipeCost, powerMult, disposal) {
     const m = res[rc];
     if (!m || m < 1e-6) continue;
     const info = RC_INFO[rc];
+    const sl = (sloopMult && sloopMult[rc]) || 1;
     const power = m * info.power * powerMult;
     totalPower += power;
     totalMachines += Math.ceil(m - 1e-9);
     fracMachines += m;
-    for (const it of itemsOf(info)) net[it] = (net[it] || 0) + coefOf(info, it, recipeCost) * m;
-    recipes.push({ rc, item: info.primary, machines: m, building: info.building, buildingName: info.buildingName, rate: info.primaryRate * m, power });
+    for (const it of itemsOf(info)) net[it] = (net[it] || 0) + coefOf(info, it, recipeCost, sl) * m;
+    recipes.push({ rc, item: info.primary, machines: m, building: info.building, buildingName: info.buildingName, rate: info.primaryRate * sl * m, power });
   }
   // Fold disposal consumption back into the balance so sunk/burned by-products net to
   // zero (not reported as phantom outputs), and tally what left via each channel.
@@ -219,10 +226,20 @@ function summarize(res, pool, recipeCost, powerMult, disposal) {
   return { recipes, raw, outputs, net, totalPower, totalMachines, fracMachines, rawTotal, sunk, burned, recoveredPower };
 }
 
-function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false }) {
+function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, sloopMult = null }) {
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
-  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts });
+  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, sloopMult });
+  // A demanded item no pooled recipe produces (every producer blocked / not unlocked)
+  // would otherwise be silently dropped from the constraints — the solver would return a
+  // feasible EMPTY plan. Detect it and report infeasible with the orphaned items named,
+  // unless the demand is already covered by a supplied input (netting above handles that).
+  const noProducer = Object.keys(outputs).filter((it) => {
+    if (!(outputs[it] > 0)) return false;
+    if (inputs[it] != null && (!isFinite(inputs[it]) || inputs[it] >= outputs[it])) return false;
+    return !pool.some((rc) => (RC_INFO[rc].out[it] || 0) > 0);
+  });
+  if (noProducer.length) return { feasible: false, noProducer };
   const res = solver.Solve(model);
   if (!res.feasible) {
     // Tell "can't make the outputs at all" apart from "a by-product would back up": if
@@ -230,17 +247,17 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
     // surplus by-product that can't be sunk (a fluid with no consumer) — name it so the
     // UI can point the user at a recipe that consumes it.
     if (sinkByproducts) {
-      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts: false });
+      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts: false, sloopMult });
       const rres = solver.Solve(relaxed.model);
       if (rres.feasible) {
-        const rsum = summarize(rres, relaxed.pool, recipeCost, powerMult, relaxed.disposal);
+        const rsum = summarize(rres, relaxed.pool, recipeCost, powerMult, relaxed.disposal, sloopMult);
         const backup = rsum.outputs.filter((o) => outputs[o.item] == null && !isSinkable(o.item)).map((o) => o.item);
         if (backup.length) return { feasible: false, backup };
       }
     }
     return { feasible: false };
   }
-  const sum = summarize(res, pool, recipeCost, powerMult, disposal);
+  const sum = summarize(res, pool, recipeCost, powerMult, disposal, sloopMult);
   sum.feasible = true;
   sum.objective = objective;
   // Report the true objective, not the regularized score (res.result carries the tiny
@@ -252,6 +269,10 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
 function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null }) {
   const { model, pool } = buildModel({ inputs: supply, maxItem: product, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes });
   const res = solver.Solve(model);
+  // An unbounded objective (e.g. a cost multiplier < 1 rounding a package<->unpackage
+  // pair matter-positive) reports as feasible with result = Infinity — surface it as
+  // its own failure instead of presenting "Infinity/min" to the user.
+  if (res.feasible && !isFinite(res.result)) return { feasible: false, unbounded: true };
   if (!res.feasible || !(res.result > 1e-6)) return { feasible: false };
   const sum = summarize(res, pool, recipeCost, powerMult);
   sum.feasible = true;
@@ -274,9 +295,12 @@ function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1
 // `targets` (a {item: rate} map for one or more desired outputs); the legacy
 // single `target`/`rate` pair is still accepted. `rawItems` are treated as free
 // inputs (map resources are always free). Solved at 100 % clock; the renderer
-// rescales machines & power for clock / somersloop afterwards (those cancel in
-// the material ratios, so they don't belong in the balance).
-function planner({ target, rate, targets = null, recipes = [], rawItems = [], recipeCost = 1 }) {
+// rescales machines & power for clock afterwards (clock scales inputs and outputs
+// equally, so it cancels in the material ratios). Somersloop does NOT cancel — it
+// amplifies output only — so each step's sloop multiplier (`sloopMult`, rc -> 1..2)
+// is folded into the balance here: a slooped step needs fewer machines AND less
+// input for the same output, which correctly shrinks the upstream chain and raw.
+function planner({ target, rate, targets = null, recipes = [], rawItems = [], recipeCost = 1, sloopMult = null }) {
   const demand = targets || (target != null ? { [target]: rate } : {});
   const pool = recipes.filter((rc) => RECIPES[rc]);
   if (!pool.length) return { feasible: false };
@@ -287,8 +311,9 @@ function planner({ target, rate, targets = null, recipes = [], rawItems = [], re
   const variables = {};
   for (const rc of pool) {
     const info = RC_INFO[rc];
+    const sl = (sloopMult && sloopMult[rc]) || 1;
     const v = { _machines: 1 };
-    for (const it of itemsOf(info)) v[it] = coefOf(info, it, recipeCost);
+    for (const it of itemsOf(info)) v[it] = coefOf(info, it, recipeCost, sl);
     variables[rc] = v;
   }
   const constraints = {};
@@ -301,7 +326,7 @@ function planner({ target, rate, targets = null, recipes = [], rawItems = [], re
   // built; whatever is over-produced floats up as genuine surplus.
   const res = solver.Solve({ optimize: '_machines', opType: 'min', constraints, variables });
   if (!res.feasible) return { feasible: false };
-  const sum = summarize(res, pool, recipeCost, 1);
+  const sum = summarize(res, pool, recipeCost, 1, null, sloopMult);
   sum.feasible = true;
   return sum;
 }

@@ -108,6 +108,50 @@ check('Empty Canister comes from a real producer (not an unpackage loop)', cyc.r
 const supplied = LP.optimize({ outputs: { [cls('Fuel')]: 60 }, allowedInputs: Object.assign({ [PkgFuel]: Infinity }, allRaw), objective: 'machines', allowAlternates: true });
 check('unpackage allowed when its packaged input is supplied', supplied.feasible && supplied.recipes.some((s) => /unpackage/i.test(s.rc)));
 
+// ---- Somersloop in the material balance ----
+// Sloop amplifies OUTPUT only (inputs per machine unchanged), so a fully-slooped step
+// must shrink its machines AND its whole upstream chain — not just trade machines for
+// power. (The old post-rescale divided machines by the multiplier but left the LP
+// balance un-slooped, overstating raw by up to 2×.)
+console.log('\n### SOMERSLOOP BALANCE');
+const slPlan = LP.planner({ targets: { [IronPlate]: 20 }, recipes: [primStd(IronIngot), primStd(IronPlate)], rawItems: [], sloopMult: { [primStd(IronPlate)]: 2 } });
+check('sloop: planner feasible', slPlan.feasible === true);
+const slPlate = slPlan.recipes.find((r) => r.rc === primStd(IronPlate));
+const basePlate = plan.recipes.find((r) => r.rc === primStd(IronPlate));
+check('sloop: plate output rate unchanged (20/min)', !!slPlate && near(slPlate.rate, 20, 0.1));
+check('sloop: plate machines halved vs un-slooped', !!slPlate && !!basePlate && near(slPlate.machines, basePlate.machines / 2, 1e-6));
+const slOre = slPlan.raw.find((r) => r.item === IronOre);
+check('sloop: upstream raw halved (30 -> 15 ore)', !!slOre && near(slOre.rate, 15, 0.1));
+const slOpt = LP.optimize({ outputs: { [IronPlate]: 20 }, allowedInputs: { [IronOre]: Infinity }, objective: 'raw', allowAlternates: false, sloopMult: { [primStd(IronPlate)]: 2 } });
+check('sloop: optimizer raw halved too', slOpt.feasible === true && near(slOpt.objectiveValue, 15, 0.5));
+
+// ---- item both demanded AND supplied: supply nets against the demand ----
+console.log('\n### DEMAND + SUPPLY NETTING');
+const netFull = LP.optimize({ outputs: { [IronPlate]: 100 }, allowedInputs: { [IronPlate]: 100, [IronOre]: Infinity }, objective: 'raw', allowAlternates: false });
+check('supply covers demand: no raw pulled', netFull.feasible === true && !(netFull.raw || []).some((r) => r.item === IronOre));
+const netPart = LP.optimize({ outputs: { [IronPlate]: 100 }, allowedInputs: { [IronPlate]: 40, [IronOre]: Infinity }, objective: 'raw', allowAlternates: false });
+const netOre = (netPart.raw || []).find((r) => r.item === IronOre);
+check('partial supply netted (60 plate to build -> 90 ore)', netPart.feasible === true && !!netOre && near(netOre.rate, 90, 0.5));
+
+// ---- demanded leaf item with every producer blocked: infeasible, named ----
+// (Previously the item fell out of the constraint set entirely and the solver returned
+// a feasible EMPTY plan with no warning.)
+console.log('\n### ORPHANED DEMAND');
+const leaf = Object.keys(DATA.items).find((it) =>
+  Object.keys(DATA.recipes).some((rc) => DATA.recipes[rc].products.some((p) => p.item === it)) &&
+  !Object.keys(DATA.recipes).some((rc) => DATA.recipes[rc].ingredients.some((g) => g.item === it)));
+const leafProducers = new Set(Object.keys(DATA.recipes).filter((rc) => DATA.recipes[rc].products.some((p) => p.item === leaf)));
+const orphan = LP.optimize({ outputs: { [leaf]: 100 }, allowedInputs: allRaw, objective: 'raw', allowAlternates: true, blockedRecipes: leafProducers });
+check('all producers blocked -> infeasible (not an empty feasible plan)', orphan.feasible === false);
+check('orphaned demand named in noProducer', Array.isArray(orphan.noProducer) && orphan.noProducer.includes(leaf));
+
+// ---- unbounded max-throughput objective is reported, not shown as Infinity ----
+// Cost multiplier 0.5 rounds the package<->unpackage pair matter-positive (1 Water in,
+// 2 Water out), so maximizing Water from supplied Packaged Water is unbounded.
+console.log('\n### UNBOUNDED MAX');
+const unb = LP.maxThroughput({ product: cls('Water'), supply: { [cls('Packaged Water')]: 100 }, recipeCost: 0.5 });
+check('unbounded max -> infeasible + flagged', unb.feasible === false && unb.unbounded === true);
+
 // ---- recipe + building exclusion (F1 / F4) ----
 // blockedRecipes drops the named recipes from the pool for optimize/maxThroughput,
 // covering STANDARD recipes (the alt veto can't) and whole buildings (the renderer
