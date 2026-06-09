@@ -1281,6 +1281,17 @@ function buildFlow(res, targets) {
       (producers[item] = producers[item] || []).push({ step: s, rate: s.rate * (info.out[item] / base) });
     }
   });
+  // Water-sink (Wet Concrete): the LP diverts every step's water OUTPUT to the disposal
+  // route, so by-product water must not be offered to normal consumers — they draw fresh
+  // from the extractor (raw) node, exactly as the LP solved it. Pull water-emitting steps
+  // out of `producers` (consumers then fall through to the raw|Water edge) and remember
+  // them as the Wet Concrete node's exclusive feeders. Without this the chart split each
+  // water edge proportionally across extractor + scrap step — drawing the very backfeed
+  // loop the option exists to eliminate.
+  const wasteProducers = {};
+  (res.watered || []).forEach((w) => {
+    if (producers[w.item]) { wasteProducers[w.item] = producers[w.item]; delete producers[w.item]; }
+  });
   const addEdge = (srcId, dstId, item, rate) => {
     if (!byId[srcId] || !byId[dstId]) return;
     // item + numeric rate are carried alongside the display label so the Sankey view can
@@ -1288,6 +1299,21 @@ function buildFlow(res, targets) {
     const e = { src: srcId, dst: dstId, item, rate, label: `${itemName(item)} ${fmt(rate)}/min` };
     edges.push(e); byId[srcId].outs.push(e); byId[dstId].ins.push(e);
   };
+  // Wet Concrete (water-sink) terminals — built BEFORE any consumer edges because the
+  // route's Concrete is a real product: registering the wet node as a Concrete producer
+  // lets recipe consumers, the Awesome Sink node (sink on), or the green Concrete output
+  // (sink off) all connect to it instead of floating disconnected. Fed exclusively by
+  // the diverted water steps (wasteProducers) plus its raw Limestone draw — never by
+  // the water extractor.
+  (res.watered || []).forEach((w) => {
+    const id = 'wet|' + w.item;
+    addNode(id, 'sink', 'Wet Concrete', `${fmt(w.machines)}× → ${fmt(w.concrete)} Concrete/min`);
+    const provs = wasteProducers[w.item] || [];
+    const tot = provs.reduce((a, p) => a + p.rate, 0) || 1;
+    provs.forEach((p) => addEdge(p.step._nid, id, w.item, w.rate * (p.rate / tot)));
+    addEdge('raw|Desc_Stone_C', id, 'Desc_Stone_C', w.limestone);
+    (producers.Desc_Cement_C = producers.Desc_Cement_C || []).push({ step: { _nid: id }, rate: w.concrete });
+  });
   res.recipes.forEach((s) => {
     const r = RECIPES[s.rc];
     const prod = r.products.find((p) => p.item === s.item) || r.products[0];
@@ -1345,7 +1371,6 @@ function buildFlow(res, targets) {
   });
   drawDisposal(res.sunk, 'sink|', 'sink', () => 'Awesome Sink', (d) => `${itemName(d.item)} · ${fmt(d.points, 0)} pts/min`);
   drawDisposal(res.burned, 'gen|', 'gen', (d) => d.genName || 'Fuel Generator', (d) => `${fmt(d.machines)}× · ${fmt(d.mw, 0)} MW`);
-  drawDisposal(res.watered, 'wet|', 'sink', () => 'Wet Concrete', (d) => `${fmt(d.machines)}× → ${fmt(d.concrete)} Concrete/min`);
   // Depot / Storage terminals: outputs the user tagged to be pulled into the
   // Dimensional Depot or stashed in storage. Built like the disposal terminals (one
   // fed node per item) but a destination, not a sink — the production is still real.

@@ -918,6 +918,43 @@ console.log('\n### SANKEY VIEW (proportional flow bands)');
     d.querySelectorAll('#flowSvg .sankey-band').length === 0 && d.querySelectorAll('#flowSvg .edge-path').length === flowEdges);
 }
 
+// ---- Water sink (Wet Concrete): flowchart wiring must match the LP's diversion ----
+// The LP sends every step's water OUTPUT to the Wet Concrete route and meets water
+// INPUTS fresh from extractors. The chart must draw exactly that: no machine→machine
+// water edge (the backfeed loop the option eliminates), consumers fed by raw|Water,
+// the wet node fed only by water-emitting steps + raw Limestone, and its Concrete
+// connected onward to the Awesome Sink instead of floating.
+console.log('\n### WATER SINK (Wet Concrete) FLOWCHART WIRING');
+{
+  const { w, d, setVal, click } = boot13(null);
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  const row = d.querySelector('#optOutputs .row');
+  setVal(row.querySelector('.row-item'), 'Aluminum Ingot'); setVal(row.querySelector('.row-rate'), '100');
+  const ws = d.getElementById('optWaterSink');
+  ws.checked = true; ws.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
+  click(d.getElementById('viewFlow'));
+  const flow = w.__lastFlow;
+  const WATER = 'Desc_Water_C', CEMENT = 'Desc_Cement_C', STONE = 'Desc_Stone_C';
+  const wet = flow.nodes.find((n) => n.id === 'wet|' + WATER);
+  check('wet-concrete node drawn', !!wet);
+  const waterEdges = flow.edges.filter((e) => e.item === WATER);
+  check('no machine→machine water edge (backfeed loop gone)',
+    !waterEdges.some((e) => e.src.startsWith('mac|') && e.dst.startsWith('mac|')));
+  check('water consumers fed from the extractor (raw|Water → machine)',
+    waterEdges.some((e) => e.src === 'raw|' + WATER && e.dst.startsWith('mac|')));
+  check('water-emitting step feeds the wet node (mac → wet)',
+    waterEdges.some((e) => e.src.startsWith('mac|') && e.dst === 'wet|' + WATER));
+  check('extractor never feeds the wet node',
+    !waterEdges.some((e) => e.src === 'raw|' + WATER && e.dst === 'wet|' + WATER));
+  check('wet node draws its raw Limestone',
+    flow.edges.some((e) => e.item === STONE && e.src === 'raw|' + STONE && e.dst === 'wet|' + WATER));
+  check('wet node\'s Concrete connects onward (sink or output, not floating)',
+    flow.edges.some((e) => e.item === CEMENT && e.src === 'wet|' + WATER));
+  // Toggle off: route gone, no wet node in the rebuilt chart.
+  ws.checked = false; ws.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
+  check('toggle off removes the wet node', !w.__lastFlow.nodes.some((n) => n.id.startsWith('wet|')));
+}
+
 // ---- Multi-factory: whole-base balance + dependency graph ----
 console.log('\n### MULTI-FACTORY: BASE BALANCE + DEPENDENCY GRAPH');
 {
