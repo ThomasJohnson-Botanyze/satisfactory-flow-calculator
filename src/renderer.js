@@ -1238,6 +1238,11 @@ function buildFlow(res, targets) {
       const id = 'ext|' + e.item;
       const n = addNode(id, 'ext', e.name, `${fmt(Math.ceil(e.count - 1e-9), 0)}× · ${fmtPower(e.powerBase * mult)}${oc}`);
       n.interactive = true; n.power = { kind: 'ext', item: e.item };
+      // A standalone generator's fuel isn't in res.raw, so its raw node may not exist yet —
+      // create it. Set the sub to the merged demand so a raw fed to both the plan and a
+      // generator shows the total mined, not just the plan's share.
+      const rawNode = addNode('raw|' + e.item, 'raw', itemName(e.item), fmt(e.rate) + '/min');
+      rawNode.sub = fmt(e.rate) + '/min';
       addEdge(id, 'raw|' + e.item, e.item, e.rate);
     });
   }
@@ -1279,15 +1284,16 @@ function buildFlow(res, targets) {
     const mult = state.powerMult || 1;
     infra.gens.forEach((g) => {
       const oc = g.clock !== 1 ? ` · ${Math.round(g.clock * 100)}%` : '';
-      const gid = 'pgen|' + g.idx + '|' + g.output;
+      const key = g.standalone ? 's' + g.sidx : g.idx; // distinct id space so standalone + plan gens never collide
+      const gid = 'pgen|' + key + '|' + g.output;
       // count× generators · total MW (fractional count, matching the machine nodes)
       const gn = addNode(gid, 'gen', g.name, `${fmt(g.nGen)}× · ${fmt(g.mw, 0)} MW${oc}`);
-      gn.interactive = true; gn.power = { kind: 'gen', idx: g.idx };
+      gn.interactive = true; gn.power = g.standalone ? { kind: 'sgen', sidx: g.sidx } : { kind: 'gen', idx: g.idx };
       const provs = producers[g.output];
       if (provs && provs.length) { const tot = provs.reduce((a, pp) => a + pp.rate, 0) || 1; provs.forEach((pp) => addEdge(pp.step._nid, gid, g.output, g.avail * (pp.rate / tot))); }
       else addEdge('raw|' + g.output, gid, g.output, g.avail);
       if (g.water) {
-        const wid = 'wgen|' + g.idx;
+        const wid = 'wgen|' + key;
         addNode(wid, 'ext', EXTRACTORS.Build_WaterPump_C.name, `${fmt(g.water.count, 0)}× · ${fmtPower(g.water.powerBase * mult)}`);
         addEdge(wid, gid, WATER_ITEM, g.water.need);
       }
@@ -1653,8 +1659,10 @@ function renderPowerPopup() {
   const pw = ensurePower();
   let title, sub, curPct, note, apply;
   if (ref.kind === 'ext') {
-    const rawRow = (lastResult && lastResult.raw || []).find((r) => r.item === ref.item);
-    const e = rawRow ? extractionFor(ref.item, rawRow.rate, pw) : null;
+    // Resolve the extractor from the shared infra sizing so a standalone generator's mined
+    // fuel (not in res.raw) is found too, not just the plan's own raws.
+    const infra = lastResult ? powerInfraFor(lastResult, lastTargets) : { extraction: [] };
+    const e = infra.extraction.find((x) => x.item === ref.item);
     if (!e) { closeNodePopup(); return; }
     const exCls = FLUID_EXTRACTOR[ref.item] || pw.minerTier;
     const exponent = (EXTRACTORS[exCls] && EXTRACTORS[exCls].exponent) || 1.321929;
@@ -1663,6 +1671,16 @@ function renderPowerPopup() {
     curPct = clampClock(extClockOf(ref.item, pw));
     note = (s) => s ? `${s} shard${s > 1 ? 's' : ''} / extractor · power ×${fmt(Math.pow(curPct / 100, exponent), 2)}` : 'No shards · power ×1.00';
     apply = (pct) => { const v = clampClock(pct); if (v === clampClock(pw.minerClock)) delete pw.extClock[ref.item]; else pw.extClock[ref.item] = v; };
+  } else if (ref.kind === 'sgen') {
+    const g = pw.standalone[ref.sidx]; const G = g && POWERGEN[g.gen];
+    if (!G) { closeNodePopup(); return; }
+    const rate = +g.rate || 0;
+    const z = genSizing(G, g.fuel, rate, genClockOf(g, pw));
+    title = `${G.name} · ${itemName(g.fuel)}`;
+    sub = `${fmt(z.nGen)}× · ${fmt(z.mw, 0)} MW · burns ${fmt(rate)}/min`;
+    curPct = clampClock(genClockOf(g, pw));
+    note = (s) => s ? `${s} shard${s > 1 ? 's' : ''} / generator · runs fewer, harder (total power unchanged)` : 'No shards · 100%';
+    apply = (pct) => { const v = clampClock(pct); if (v === clampClock(pw.genClock)) delete g.clock; else g.clock = v; };
   } else {
     const g = pw.gens[ref.idx]; const G = g && POWERGEN[g.gen];
     if (!G) { closeNodePopup(); return; }
@@ -2742,6 +2760,7 @@ function ensurePower() {
   if (!p.purity || typeof p.purity !== 'object') p.purity = {};
   if (!p.extClock || typeof p.extClock !== 'object') p.extClock = {}; // per-raw OC override
   if (!Array.isArray(p.gens)) p.gens = [];
+  if (!Array.isArray(p.standalone)) p.standalone = []; // mine-a-raw-fuel-and-burn-it generators, independent of the plan
   p.minerClock = clampClock(p.minerClock);
   p.genClock = clampClock(p.genClock);
   state.power = p;
@@ -2770,6 +2789,9 @@ const outputRate = (prod, item) => planOutputs(prod).filter((o) => o.item === it
 const gensForFuel = (item) => Object.keys(POWERGEN).filter((g) => POWERGEN[g].fuels && POWERGEN[g].fuels[item] != null);
 // Plan outputs that some generator can burn.
 const burnableOutputs = (prod) => planOutputs(prod).filter((o) => o.rate > 1e-6 && gensForFuel(o.item).length);
+// Raw (minable) resources some generator burns — eligible for standalone "mine → burn" power
+// (realistically just Coal for the Coal-Powered Generator; Compacted Coal/Coke are crafted).
+const rawFuels = () => { const s = new Set(); for (const gc in POWERGEN) for (const f in (POWERGEN[gc].fuels || {})) if (RESOURCES.has(f)) s.add(f); return [...s]; };
 
 // Extractor sizing to gather `rate`/min of raw `item` at its per-resource purity. Base
 // (multiplier = 1) power; the last unit is underclocked to the exact remainder (power ∝
@@ -2829,9 +2851,8 @@ function outputsOf(res, targets) {
 function powerInfraFor(res, targets) {
   const p = ensurePower();
   const outs = outputsOf(res, targets);
-  const extraction = [];
-  for (const r of (res.raw || [])) { const e = extractionFor(r.item, r.rate, p); if (e) extraction.push(e); }
   const gens = [];
+  // Plan-output generators: burn a net output the plan already produces.
   for (let i = 0; i < p.gens.length; i++) {
     const g = p.gens[i]; const G = POWERGEN[g.gen];
     if (!G || !G.fuels || G.fuels[g.output] == null) continue;
@@ -2840,16 +2861,36 @@ function powerInfraFor(res, targets) {
     const z = genSizing(G, g.output, avail, genClockOf(g, p));
     gens.push({ idx: i, output: g.output, gen: g.gen, name: G.name, avail, nGen: z.nGen, mw: z.mw, clock: z.clock, water: z.water });
   }
+  // Raw demand = the plan's raws plus the fuel burned by standalone generators (which mine
+  // their own fuel rather than consuming a plan output). Merge per item so a single extractor
+  // array covers both — a plan that also mines the burned raw doesn't double-count.
+  const rawDemand = {};
+  for (const r of (res.raw || [])) rawDemand[r.item] = (rawDemand[r.item] || 0) + r.rate;
+  // Standalone generators: mine a raw fuel and burn it directly, independent of the plan.
+  for (let i = 0; i < p.standalone.length; i++) {
+    const g = p.standalone[i]; const G = POWERGEN[g.gen];
+    if (!G || !G.fuels || G.fuels[g.fuel] == null) continue;
+    const rate = +g.rate; if (!(rate > 1e-9)) continue;
+    const z = genSizing(G, g.fuel, rate, genClockOf(g, p));
+    gens.push({ sidx: i, standalone: true, output: g.fuel, gen: g.gen, name: G.name, avail: rate, nGen: z.nGen, mw: z.mw, clock: z.clock, water: z.water });
+    rawDemand[g.fuel] = (rawDemand[g.fuel] || 0) + rate;
+  }
+  const extraction = [];
+  for (const item in rawDemand) { const e = extractionFor(item, rawDemand[item], p); if (e) extraction.push(e); }
   return { extraction, gens };
 }
 function computeFactoryPower() {
   const p = ensurePower();
   const prod = activePlanProduction();
-  if (!prod.feasible) return { feasible: false, sourceMode: p.sourceMode };
-  const res = prod.res;
+  // Standalone "mine → burn" generators stand on their own — show the ledger even when the
+  // plan is empty/infeasible (treat production as zero), so coal power needs no production.
+  const hasStandalone = p.standalone.some((g) => POWERGEN[g.gen] && +g.rate > 1e-9);
+  if (!prod.feasible && !hasStandalone) return { feasible: false, sourceMode: p.sourceMode };
+  const res = prod.feasible ? prod.res : { recipes: [], raw: [], outputs: [], totalPower: 0, totalMachines: 0 };
+  const targets = prod.feasible ? prod.targets : {};
   const mult = state.powerMult || 1;
   const prodPowerBase = (res.totalPower || 0) / mult; // res power already carries ×mult
-  const { extraction, gens } = powerInfraFor(res, prod.targets);
+  const { extraction, gens } = powerInfraFor(res, targets);
   const extractionBase = extraction.reduce((a, e) => a + e.powerBase, 0);
   const genWaterBase = gens.reduce((a, g) => a + (g.water ? g.water.powerBase : 0), 0);
   const generated = gens.reduce((a, g) => a + g.mw, 0);
@@ -2982,6 +3023,31 @@ function buildPowerControls() {
     if (!p.gens.length) gl.appendChild(el('small', 'hint', burnable.length ? 'Add a generator to burn an output for power.' : (prod.feasible ? 'This plan makes no burnable fuel output.' : 'Set up production first.')));
     if ($('pwrAddGen')) $('pwrAddGen').disabled = !burnable.length;
   }
+  const sl = $('pwrStandaloneList');
+  if (sl) {
+    sl.innerHTML = '';
+    const fuels = rawFuels();
+    p.standalone.forEach((g, idx) => sl.appendChild(standaloneRow(g, idx, fuels)));
+    if (!p.standalone.length) sl.appendChild(el('small', 'hint', fuels.length ? 'Add coal power to mine a raw fuel and burn it directly — no plan needed.' : 'No raw-minable generator fuels.'));
+    if ($('pwrAddStandalone')) $('pwrAddStandalone').disabled = !fuels.length;
+  }
+}
+// One standalone "mine → burn" generator row: pick the raw fuel, the generator, and how much
+// fuel/min to burn. Miners + generators (+ water for coal) are sized off the rate in powerInfraFor.
+function standaloneRow(g, idx, fuels) {
+  const row = el('div', 'pwr-row');
+  const fsel = el('select', 'sel');
+  fuels.forEach((it) => { const opt = el('option', null, itemName(it)); opt.value = it; if (it === g.fuel) opt.selected = true; fsel.appendChild(opt); });
+  fsel.addEventListener('change', () => { const p = ensurePower(); p.standalone[idx].fuel = fsel.value; const gg = gensForFuel(fsel.value); if (!gg.includes(p.standalone[idx].gen)) p.standalone[idx].gen = gg[0] || ''; save(); buildPowerControls(); renderPower(); });
+  const gsel = el('select', 'sel');
+  gensForFuel(g.fuel).forEach((gc) => { const opt = el('option', null, POWERGEN[gc].name); opt.value = gc; if (gc === g.gen) opt.selected = true; gsel.appendChild(opt); });
+  gsel.addEventListener('change', () => { ensurePower().standalone[idx].gen = gsel.value; save(); renderPower(); });
+  const rin = el('input', 'clock-input'); rin.type = 'number'; rin.min = '0'; rin.step = '10'; rin.value = g.rate; rin.title = 'Fuel burned per minute';
+  rin.addEventListener('change', () => { const v = Math.max(0, parseFloat(rin.value) || 0); ensurePower().standalone[idx].rate = v; rin.value = v; save(); renderPower(); });
+  const del = el('button', 'btn mini ghost pwr-del', '✕'); del.title = 'Remove';
+  del.addEventListener('click', () => { ensurePower().standalone.splice(idx, 1); save(); buildPowerControls(); renderPower(); });
+  row.appendChild(fsel); row.appendChild(gsel); row.appendChild(rin); row.appendChild(el('span', 'np-unit', '/min')); row.appendChild(del);
+  return row;
 }
 function wirePowerControls() {
   const on = (id, ev, fn) => { const e = $(id); if (e) e.addEventListener(ev, fn); };
@@ -2995,6 +3061,15 @@ function wirePowerControls() {
     if (!burnable.length) return;
     const out = burnable[0].item;
     p.gens.push({ output: out, gen: gensForFuel(out)[0] || '' });
+    save(); buildPowerControls(); renderPower();
+  });
+  on('pwrAddStandalone', 'click', () => {
+    const p = ensurePower();
+    const fuels = rawFuels();
+    if (!fuels.length) return;
+    const fuel = fuels[0];
+    const def = (EXTRACTORS[p.minerTier] && EXTRACTORS[p.minerTier].ratePerMin) || 60; // one normal node of fuel
+    p.standalone.push({ fuel, gen: gensForFuel(fuel)[0] || '', rate: def });
     save(); buildPowerControls(); renderPower();
   });
 }

@@ -788,5 +788,43 @@ console.log('\n### FLOWCHART NODE POPUP (Overclock + Somersloop)');
   check('Escape closes the popup', !d.getElementById('nodePopup'));
 }
 
+// Standalone "mine → burn" power: mine a raw fuel (Coal) and feed a generator directly,
+// independent of the production plan — so coal power works with no plan at all. Shares the
+// powerInfraFor seam, so the same numbers drive the Power Planner tables AND the flowchart.
+console.log('\n### POWER PLANNER: STANDALONE COAL POWER (mine → burn)');
+{
+  const { w, d, setVal, click } = boot13(null);
+  const tabOf = (m) => click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === m));
+  tabOf('power'); // empty optimizer plan behind it — standalone must stand on its own
+  const addBtn = d.getElementById('pwrAddStandalone');
+  check('standalone "add coal power" button present', !!addBtn);
+  click(addBtn);
+  check('standalone row added', d.querySelectorAll('#pwrStandaloneList .pwr-row').length === 1);
+  const genTxt = () => [...d.querySelectorAll('#pwrGenTable tbody tr')].map((r) => r.textContent).join(' | ');
+  check('generation table lists the Coal-Powered Generator', /Coal-Powered Generator/.test(genTxt()));
+  check('net is positive with no plan (gen > miners + water)', /^\+/.test(d.getElementById('pwrNet').textContent));
+  // 80 coal/min → 5.33 gens · +400 MW (in-game ratio: 15 coal & 75 MW per generator)
+  const rin = d.querySelector('#pwrStandaloneList .pwr-row input[type=number]');
+  setVal(rin, '80', 'change');
+  check('80 coal/min sizes 5.33× coal generators', /5\.33/.test(genTxt()));
+  check('80 coal/min generates +400 MW', d.getElementById('pwrGenerated').textContent === '400 MW');
+  check('consumption table includes the coal miner', /Coal/.test([...d.querySelectorAll('#pwrConsTable tbody tr')].map((r) => r.textContent).join(' ')));
+  const ps = JSON.parse(w.localStorage.getItem('satisfactory-factory-plans-v1'));
+  const ap = ps.plans.find((p) => p.id === ps.activeId);
+  check('standalone persisted to state.power.standalone (rate 80)', !!(ap.state.power && ap.state.power.standalone && ap.state.power.standalone[0] && ap.state.power.standalone[0].rate === 80));
+
+  // Flowchart: with ⚡ Power infra on, the coal island appears over an UNRELATED plan.
+  tabOf('planner');
+  setVal(d.getElementById('targetItem'), 'Iron Plate'); setVal(d.getElementById('targetRate'), '20');
+  click(d.getElementById('flowPowerToggle'));
+  click(d.getElementById('viewFlow'));
+  const rawNodes = [...d.querySelectorAll('#flowSvg .node.raw')].map((n) => n.textContent);
+  check('flow creates the mined Coal raw node (not in res.raw)', rawNodes.some((t) => /Coal/.test(t)));
+  const extNodes = [...d.querySelectorAll('#flowSvg .node.ext')].map((n) => n.textContent);
+  check('flow shows a miner feeding the coal', extNodes.some((t) => /Miner/.test(t)));
+  const genNodes = [...d.querySelectorAll('#flowSvg .node.gen')].map((n) => n.textContent);
+  check('flow shows the standalone coal generator', genNodes.some((t) => /Coal-Powered Generator/.test(t)));
+}
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);
