@@ -294,7 +294,7 @@
 
           <div id="flowView" hidden>
             <div class="flow-head">
-              <span class="hint flow-hint">Drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output · pink = sink · blue = generator.</span>
+              <span class="hint flow-hint">Click a machine to set Overclock / Somersloop · drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output · pink = sink · blue = generator.</span>
               <div class="flow-tools">
                 <button id="flowZoomOut" class="btn mini ghost" aria-label="Zoom out" title="Zoom out">−</button>
                 <span id="flowZoomPct" class="flow-zoom-pct">100%</span>
@@ -409,7 +409,7 @@
             <input id="clock" type="range" min="1" max="250" step="1" value="100" />
             <small class="hint">Power per machine scales by clock^1.32</small>
           </div>
-          <small class="hint">Somersloops are set per step in the Production steps table (scarce — sloop the final or material-heavy steps, not everything). Output ×(1+n/slots), power ×that².</small>
+          <small class="hint">Overclock &amp; Somersloops are set per step — in the Production steps table, or by clicking a machine on the flowchart (Planner &amp; Optimizer). Sloops are scarce, so amplify the final or material-heavy steps, not everything. Output ×(1+n/slots), power ×that².</small>
         </section>
 
         <!-- Cost Multiplier (relocated from the controls sidebar) -->

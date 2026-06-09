@@ -724,5 +724,69 @@ console.log('\n### PROJECTS: PRE-F3 BACK-COMPAT LOAD');
   check('pre-F3: re-saved plans all have projectId', reSaved.plans.every((p) => p.projectId === reSaved.projects[0].id));
 }
 
+// ---- OPTIMIZER per-step Overclock + Somersloop ----
+// Regression for "spreadsheet can't add sloops / power shards": the default landing tab is
+// the Optimizer, whose rows used to show "—" (only the Planner was interactive). tuneSteps
+// now makes Optimizer rows tunable too.
+console.log('\n### OPTIMIZER PER-STEP OVERCLOCK + SOMERSLOOP');
+{
+  const { d, setVal, click } = boot13(null);
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  const row = d.querySelector('#optOutputs .row');
+  setVal(row.querySelector('.row-item'), 'Iron Plate'); setVal(row.querySelector('.row-rate'), '60');
+  const prod = () => d.querySelectorAll('#prodTable tbody tr').length;
+  const mw = () => parseFloat(d.getElementById('sumPower').textContent);
+  check('optimizer produces rows', prod() > 0);
+  check('optimizer rows now have a clock input (was —)', [...d.querySelectorAll('#prodTable tbody .clock-input')].length === prod());
+  check('optimizer rows now have a sloop select (was —)', [...d.querySelectorAll('#prodTable tbody .sloop-input')].length === prod());
+  const before = mw();
+  setVal([...d.querySelectorAll('#prodTable tbody .clock-input')][0], '250', 'change');
+  check('overclock one optimizer step raises total power', mw() > before);
+  setVal([...d.querySelectorAll('#prodTable tbody .clock-input')][0], '100', 'change');
+  check('clearing the overclock restores power', mw() === before);
+  const slBefore = mw();
+  const sloopSel = [...d.querySelectorAll('#prodTable tbody .sloop-input')][0];
+  setVal(sloopSel, sloopSel.options[sloopSel.options.length - 1].value, 'change');
+  check('somerslooping one optimizer step raises power', mw() > slBefore);
+  check('optimizer reports somersloops used', parseFloat(d.getElementById('sumSloops').textContent) > 0);
+  const store = JSON.parse(d.defaultView.localStorage.getItem('satisfactory-factory-plans-v1'));
+  const plan = store.plans.find((p) => p.id === store.activeId);
+  check('optimizer per-step sloop persisted to nodeSloop', plan.state.nodeSloop && Object.keys(plan.state.nodeSloop).length === 1);
+}
+
+// ---- FLOWCHART node settings popup ----
+// Click a machine node → popup with an Overclock input + power-shard chips + Somersloop
+// select. Edits write through to the same state.nodeClock / state.nodeSloop the table uses.
+console.log('\n### FLOWCHART NODE POPUP (Overclock + Somersloop)');
+{
+  const { w, d, setVal, click } = boot13(null);
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
+  setVal(d.getElementById('targetItem'), 'Reinforced Iron Plate'); setVal(d.getElementById('targetRate'), '10');
+  click(d.getElementById('viewFlow'));
+  const macNode = [...d.querySelectorAll('#flowSvg .node.machine')][0];
+  check('machine nodes are marked tunable', macNode.classList.contains('tunable'));
+  const tap = (t, x, y) => macNode.dispatchEvent(new w.MouseEvent(t, { clientX: x, clientY: y, bubbles: true }));
+  tap('pointerdown', 50, 50); tap('pointerup', 50, 50); // a no-move tap opens the popup
+  let popup = d.getElementById('nodePopup');
+  check('tapping a machine opens the node popup', !!popup);
+  check('popup has an overclock input', !!popup.querySelector('.clock-input'));
+  check('popup has a somersloop select', !!popup.querySelector('.sloop-input'));
+  check('popup has 4 power-shard chips (0..3)', popup.querySelectorAll('.np-chip').length === 4);
+  const mwB = parseFloat(d.getElementById('sumPower').textContent);
+  const sel = popup.querySelector('.sloop-input');
+  setVal(sel, sel.options[sel.options.length - 1].value, 'change');
+  check('popup somersloop raises sloops-used total', parseFloat(d.getElementById('sumSloops').textContent) > 0);
+  check('popup somersloop raises total power', parseFloat(d.getElementById('sumPower').textContent) > mwB);
+  check('popup stays open after an edit (re-rendered in place)', !!d.getElementById('nodePopup'));
+  const ns = JSON.parse(d.defaultView.localStorage.getItem('satisfactory-factory-plans-v1')).plans.find((p) => p.id === JSON.parse(d.defaultView.localStorage.getItem('satisfactory-factory-plans-v1')).activeId).state.nodeSloop;
+  check('popup sloop persisted to nodeSloop', ns && Object.keys(ns).length >= 1);
+  // power-shard chip [3] = 250% → writes a per-step overclock
+  click([...d.getElementById('nodePopup').querySelectorAll('.np-chip')][3]);
+  const nc = JSON.parse(d.defaultView.localStorage.getItem('satisfactory-factory-plans-v1')).plans.find((p) => p.id === JSON.parse(d.defaultView.localStorage.getItem('satisfactory-factory-plans-v1')).activeId).state.nodeClock;
+  check('power-shard chip sets a per-step overclock (250%)', nc && Object.values(nc).some((v) => Math.abs(v - 2.5) < 1e-9));
+  d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('Escape closes the popup', !d.getElementById('nodePopup'));
+}
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

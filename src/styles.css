@@ -190,6 +190,15 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
   font-variant-numeric: tabular-nums;
 }
 .clock-input:focus { outline: none; border-color: var(--accent); }
+.sloop-input {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.sloop-input:focus { outline: none; border-color: var(--accent); }
 
 .mach-main { font-weight: 700; }
 .mach-sub { color: var(--muted); font-size: 11px; }
@@ -505,6 +514,46 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .node.depot rect { fill: #2c2740; stroke: #8a7bd8; }
 .node .n-title { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
+/* A tunable machine node is clickable (opens the Overclock / Somersloop popup). */
+.node.tunable:hover rect { stroke-width: 2.5; filter: brightness(1.12); }
+
+/* Floating node settings popup (Overclock + Somersloop). Lives on <body>, positioned
+   in screen px next to the tapped node; sits above the flow viewport. */
+.node-popup {
+  position: fixed;
+  z-index: 60;
+  width: 248px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 14px 12px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5);
+}
+.node-popup .modal-x { top: 8px; right: 8px; }
+.np-title { font-size: 14px; font-weight: 700; color: var(--text); padding-right: 18px; line-height: 1.25; }
+.np-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.np-section { margin-top: 14px; }
+.np-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 6px; }
+.np-row { display: flex; align-items: center; gap: 6px; }
+.np-row .clock-input { width: 64px; text-align: right; }
+.np-unit { color: var(--muted); font-size: 12px; }
+.np-shards { display: flex; gap: 6px; margin-top: 8px; }
+.np-chip {
+  flex: 1 1 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  padding: 5px 0;
+  font-size: 12px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.np-chip:hover { color: var(--text); border-color: var(--accent); }
+.np-chip.on { color: #1a0a00; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+.np-section .sloop-input { width: 100%; }
+.np-note { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.35; }
+.np-foot { font-size: 10px; color: var(--muted); margin-top: 12px; text-align: center; opacity: 0.8; }
 .edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }
 .flow-arrow { fill: #4b566c; }
 .edge-label { fill: #c2cad8; font-size: 11px; paint-order: stroke; stroke: #11141a; stroke-width: 4px; }

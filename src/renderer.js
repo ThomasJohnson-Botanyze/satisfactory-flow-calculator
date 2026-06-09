@@ -526,6 +526,7 @@ function deletePlan(id) {
 }
 function renamePlan(id, name) { const p = plans.find((x) => x.id === id); if (p && name) { p.name = name; save(); renderPlanBar(); } }
 function switchPlan(id) {
+  closeNodePopup(); // a different plan's steps — drop any open node popup
   activeId = id;
   state = activePlan().state;
   save();
@@ -875,6 +876,42 @@ function computePlanner(targets) {
   };
 }
 
+// Apply each step's Overclock + Somersloop to an Optimizer result, the same way
+// computePlanner does for the Planner. The LP solves at 100% clock / 1× sloop (both
+// cancel in the material ratios, so they don't belong in the balance); here we rescale
+// machines & power per step and tag every row interactive so the Clock / Sloops editors
+// — the table cells AND the flowchart node popup — light up in Optimizer mode too.
+// Output rate is invariant (sloop amplification keeps the produced /min fixed and trades
+// machines for power ×slot²), which is exactly the fixed-output Optimizer's contract, so
+// this is a pure post-process. NOT used for Max mode: there output is the maximand, so
+// amplification would have to live in the LP, not a post-rescale. Mutates res in place
+// and recomputes the reported totals. (computePlanner inlines the same formula — keep the
+// two in sync.)
+function tuneSteps(res) {
+  if (!res || !res.recipes) return res;
+  let totalPower = 0, totalMachines = 0, totalSloops = 0;
+  for (const s of res.recipes) {
+    const r = RECIPES[s.rc];
+    const b = (r && BUILDINGS[r.building]) || { power: 0, exponent: 1.321929 };
+    const m100 = s.machines; // LP machine-equivalents at 100% clock / 1× sloop
+    const ck = effectiveClock(s.rc);
+    const sl = effectiveSloop(s.rc);
+    s.machines = m100 / (ck * sl);
+    s.power = s.machines * (b.power || 0) * Math.pow(ck, b.exponent || 1.321929) * Math.pow(sl, 2) * state.powerMult;
+    s.clock = ck;
+    s.sloops = sloopCountOf(s.rc);
+    s.maxSloops = maxSloopSlots(s.rc);
+    s.sloopMult = sl;
+    s.interactive = true;
+    const n = Math.ceil(s.machines - 1e-9);
+    totalPower += s.power; totalMachines += n; totalSloops += s.sloops * n;
+  }
+  res.totalPower = totalPower;
+  res.totalMachines = totalMachines;
+  res.totalSloops = totalSloops;
+  return res;
+}
+
 // ---------- formatting ----------
 function fmt(n, d = 2) {
   if (!isFinite(n)) return '∞';
@@ -1088,7 +1125,11 @@ function buildFlow(res, targets) {
     // when this step is overclocked away from the global slider.
     const oc = s.clock != null && Math.abs(s.clock - state.clock) > 1e-9 ? ` · ${Math.round(s.clock * 100)}%` : '';
     const sp = s.sloops ? ` · ${fmt(s.sloopMult, 2)}× sloop` : '';
-    addNode(s._nid, 'machine', title, `${fmt(s.machines)}× ${s.buildingName}${oc}${sp}`);
+    const macNode = addNode(s._nid, 'machine', title, `${fmt(s.machines)}× ${s.buildingName}${oc}${sp}`);
+    // Carry the recipe class + interactivity so a tap opens the node settings popup
+    // (Overclock / Somersloop). Only interactive steps (Planner / Optimizer) are tunable.
+    macNode.rc = s.rc;
+    macNode.interactive = !!s.interactive;
   });
   res.raw.forEach((r) => addNode('raw|' + r.item, 'raw', itemName(r.item), fmt(r.rate) + '/min'));
   // Index every step under *each* item it produces — primary product AND by-products.
@@ -1299,7 +1340,7 @@ function drawFlow(flow) {
 
   flow.nodes.forEach((n) => {
     const g = document.createElementNS(SVGNS, 'g');
-    g.setAttribute('class', 'node ' + n.kind);
+    g.setAttribute('class', 'node ' + n.kind + (n.kind === 'machine' && n.interactive ? ' tunable' : ''));
     g.setAttribute('transform', `translate(${n.x},${n.y})`);
     const rect = document.createElementNS(SVGNS, 'rect');
     rect.setAttribute('width', n.w); rect.setAttribute('height', n.h);
@@ -1321,10 +1362,18 @@ function drawFlow(flow) {
 }
 
 function attachDrag(g, node, flow) {
-  let last = null;
-  g.addEventListener('pointerdown', (ev) => { last = { x: ev.clientX, y: ev.clientY }; g.setPointerCapture(ev.pointerId); g.classList.add('dragging'); ev.preventDefault(); });
+  let last = null;   // last pointer pos while pressed (null = not pressing)
+  let down = null;   // pos at press, to tell a tap from a drag
+  let moved = false; // crossed the drag threshold since press
+  g.addEventListener('pointerdown', (ev) => {
+    last = { x: ev.clientX, y: ev.clientY };
+    down = { x: ev.clientX, y: ev.clientY };
+    moved = false;
+    g.setPointerCapture(ev.pointerId); g.classList.add('dragging'); ev.preventDefault();
+  });
   g.addEventListener('pointermove', (ev) => {
     if (!last) return;
+    if (down && (Math.abs(ev.clientX - down.x) > 4 || Math.abs(ev.clientY - down.y) > 4)) moved = true;
     const k = (state.flowView && state.flowView.k) || 1; // screen px → world units under zoom
     node.x += (ev.clientX - last.x) / k;
     node.y += (ev.clientY - last.y) / k;
@@ -1336,13 +1385,140 @@ function attachDrag(g, node, flow) {
       e._label.setAttribute('x', p.lx); e._label.setAttribute('y', p.ly);
     });
   });
-  const end = (ev) => {
-    if (last) { state.flowPos = state.flowPos || {}; state.flowPos[node.id] = { x: node.x, y: node.y }; save(); }
-    last = null; g.classList.remove('dragging');
+  const finish = (ev, isUp) => {
+    if (last && moved) { state.flowPos = state.flowPos || {}; state.flowPos[node.id] = { x: node.x, y: node.y }; save(); }
+    // A press that didn't move is a tap → open the node settings popup for a tunable
+    // machine (Overclock + Somersloop). Non-machine / non-interactive nodes do nothing.
+    else if (isUp && last && !moved && node.kind === 'machine' && node.rc && node.interactive) {
+      openNodePopup(node.rc, ev.clientX, ev.clientY);
+    }
+    last = null; down = null; g.classList.remove('dragging');
     try { g.releasePointerCapture(ev.pointerId); } catch (e) {}
   };
-  g.addEventListener('pointerup', end);
-  g.addEventListener('pointercancel', end);
+  g.addEventListener('pointerup', (ev) => finish(ev, true));
+  g.addEventListener('pointercancel', (ev) => finish(ev, false));
+}
+
+// ---------- flowchart node settings popup (Overclock + Somersloop) ----------
+// Tapping a machine node opens this. Edits write to state.nodeClock / state.nodeSloop for
+// that step's recipe class and re-solve live (mirrors the table's clockCell / sloopCell).
+// It floats on <body> — not inside the SVG — so the flow viewport can't clip it and it
+// survives the re-render each edit triggers (it keys off the recipe class, re-reading the
+// fresh step from lastResult on every refresh).
+let nodePopupRc = null;
+const stepByRc = (rc) => (lastResult && lastResult.recipes ? lastResult.recipes.find((s) => s.rc === rc) : null);
+
+function onNodePopupOutside(ev) {
+  const p = $('nodePopup');
+  if (!p) return;
+  if (p.contains(ev.target)) return; // clicks inside keep it open
+  // A press on another tunable node is handled by that node (reopens) — don't fight it.
+  if (ev.target && ev.target.closest && ev.target.closest('.node.tunable')) return;
+  closeNodePopup();
+}
+function onNodePopupKey(ev) { if (ev.key === 'Escape') closeNodePopup(); }
+function closeNodePopup() {
+  nodePopupRc = null;
+  const p = $('nodePopup');
+  if (p && p.parentNode) p.parentNode.removeChild(p);
+  document.removeEventListener('pointerdown', onNodePopupOutside, true);
+  document.removeEventListener('keydown', onNodePopupKey, true);
+}
+function openNodePopup(rc, clientX, clientY) {
+  if (!stepByRc(rc)) return;
+  nodePopupRc = rc;
+  let p = $('nodePopup');
+  if (!p) {
+    p = el('div', 'node-popup'); p.id = 'nodePopup';
+    document.body.appendChild(p);
+    document.addEventListener('pointerdown', onNodePopupOutside, true);
+    document.addEventListener('keydown', onNodePopupKey, true);
+  }
+  renderNodePopup();
+  positionNodePopup(clientX, clientY);
+}
+function positionNodePopup(clientX, clientY) {
+  const p = $('nodePopup'); if (!p) return;
+  const vw = (typeof window !== 'undefined' && window.innerWidth) || 1024;
+  const vh = (typeof window !== 'undefined' && window.innerHeight) || 768;
+  const w = p.offsetWidth || 264, h = p.offsetHeight || 240;
+  let x = (clientX != null ? clientX : vw / 2) + 14;
+  let y = (clientY != null ? clientY : vh / 2) + 8;
+  if (x + w > vw - 8) x = Math.max(8, (clientX != null ? clientX : vw / 2) - w - 14);
+  if (y + h > vh - 8) y = Math.max(8, vh - h - 8);
+  p.style.left = x + 'px';
+  p.style.top = y + 'px';
+}
+function renderNodePopup() {
+  const p = $('nodePopup'); if (!p) return;
+  const rc = nodePopupRc;
+  const s = stepByRc(rc);
+  if (!s) { closeNodePopup(); return; } // step vanished (recipe changed) — nothing to tune
+  const r = RECIPES[rc] || {};
+  const b = BUILDINGS[r.building] || { exponent: 1.321929 };
+  const title = r.alternate ? '★ ' + r.name.replace(/^Alternate:\s*/, '') : itemName(s.item);
+  p.innerHTML = '';
+
+  const x = el('button', 'modal-x', '✕'); x.title = 'Close'; x.addEventListener('click', closeNodePopup); p.appendChild(x);
+  p.appendChild(el('div', 'np-title', title));
+  p.appendChild(el('div', 'np-sub', `${fmt(Math.ceil(s.machines - 1e-9), 0)}× ${s.buildingName} · ${fmt(s.rate)} ${isFluid(s.item) ? 'm³' : ''}/min`));
+
+  // ----- Overclock (power shards) -----
+  const ocSec = el('div', 'np-section');
+  ocSec.appendChild(el('div', 'np-label', 'Overclock (Power Shards)'));
+  const curPct = Math.round((s.clock || state.clock) * 100);
+  const applyClock = (pct) => {
+    let v = Math.max(1, Math.min(250, Math.round(pct)));
+    state.nodeClock = state.nodeClock || {};
+    if (v === Math.round(state.clock * 100)) delete state.nodeClock[rc]; else state.nodeClock[rc] = v / 100;
+    save(); solveAndRender(); renderNodePopup();
+  };
+  const ocRow = el('div', 'np-row');
+  const inp = el('input', 'clock-input'); inp.type = 'number'; inp.min = '1'; inp.max = '250'; inp.step = '1';
+  inp.value = curPct;
+  inp.addEventListener('change', () => applyClock(parseFloat(inp.value) || 100));
+  ocRow.appendChild(inp); ocRow.appendChild(el('span', 'np-unit', '%'));
+  ocSec.appendChild(ocRow);
+  const shardRow = el('div', 'np-shards');
+  [[0, 100], [1, 150], [2, 200], [3, 250]].forEach(([n, pct]) => {
+    const chip = el('button', 'np-chip', n + '◈');
+    chip.title = n === 0 ? 'No shards · 100%' : `${n} power shard${n > 1 ? 's' : ''} · ${pct}%`;
+    if (curPct === pct) chip.classList.add('on');
+    chip.addEventListener('click', () => applyClock(pct));
+    shardRow.appendChild(chip);
+  });
+  ocSec.appendChild(shardRow);
+  const shards = Math.max(0, Math.min(3, Math.ceil((curPct - 100) / 50)));
+  const ocMult = Math.pow((s.clock || 1), b.exponent || 1.321929);
+  ocSec.appendChild(el('div', 'np-note', shards
+    ? `${shards} power shard${shards > 1 ? 's' : ''} / machine · power ×${fmt(ocMult, 2)}`
+    : 'No shards · power ×1.00'));
+  p.appendChild(ocSec);
+
+  // ----- Somersloop -----
+  const slSec = el('div', 'np-section');
+  slSec.appendChild(el('div', 'np-label', 'Somersloop'));
+  const max = s.maxSloops || 1;
+  const sel = el('select', 'sloop-input');
+  for (let n = 0; n <= max; n++) {
+    const o = el('option', null, n === 0 ? '— none' : `${n} · ${fmt(1 + n / max, 2)}×`);
+    o.value = String(n); sel.appendChild(o);
+  }
+  sel.value = String(s.sloops || 0);
+  sel.addEventListener('change', () => {
+    const n = Math.max(0, Math.min(max, parseInt(sel.value, 10) || 0));
+    state.nodeSloop = state.nodeSloop || {};
+    if (n === 0) delete state.nodeSloop[rc]; else state.nodeSloop[rc] = n;
+    save(); solveAndRender(); renderNodePopup();
+  });
+  slSec.appendChild(sel);
+  const used = Math.ceil(s.machines - 1e-9) * (s.sloops || 0);
+  slSec.appendChild(el('div', 'np-note', s.sloops
+    ? `${s.sloops}/${max} slots · output ×${fmt(s.sloopMult, 2)} · uses ${used} sloop${used > 1 ? 's' : ''}`
+    : `0/${max} slots · no amplification`));
+  p.appendChild(slSec);
+
+  p.appendChild(el('div', 'np-foot', 'Esc or click away to close'));
 }
 
 // ---------- flowchart zoom / pan ----------
@@ -1439,6 +1615,7 @@ function applyView() {
   $('viewFlow').classList.toggle('active', flow);
   $('viewTables').classList.toggle('active', !flow);
   if (flow) renderFlowView();
+  else closeNodePopup(); // the popup belongs to the flowchart — drop it when leaving flow view
 }
 
 // ---------- resource map ----------
@@ -2138,6 +2315,7 @@ function computeStateResult(st) {
       const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false });
       if (!res.feasible) return { feasible: false };
       res.surplus = res.outputs.filter((o) => !outputs[o.item]);
+      tuneSteps(res); // apply per-step overclock / somersloop (machines & power)
       applyCleanScale(res, outputs);
       return { feasible: true, res, targets: outputs };
     }
@@ -2299,6 +2477,7 @@ function renderOptimize() {
     return showEmpty('No feasible recipe set: those outputs cannot be made from the allowed inputs. Enable more resources or alternate recipes.');
   }
   res.surplus = res.outputs.filter((o) => !outputs[o.item]);
+  tuneSteps(res); // per-step overclock / somersloop now editable in the Optimizer too
   applyCleanScale(res, outputs); // whole-machine ratios when the toggle is on (no-op otherwise)
   present(res, outputs);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
@@ -2742,6 +2921,7 @@ function clearUnlockedFilter() {
 }
 
 function setMode(mode) {
+  closeNodePopup(); // switching modes rebuilds the plan — drop any open node popup
   state.mode = mode;
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.mode === mode));
   document.querySelectorAll('.mode-panel').forEach((p) => { p.hidden = p.dataset.mode !== mode; });
@@ -3135,7 +3315,7 @@ function init() {
     startProjectRename(proj);
   });
   $('projectDelete').addEventListener('click', () => deleteProject(activeProjectId));
-  $('btnReset').addEventListener('click', () => { state.picks = {}; state.nodeClock = {}; save(); solveAndRender(); });
+  $('btnReset').addEventListener('click', () => { state.picks = {}; state.nodeClock = {}; state.nodeSloop = {}; save(); solveAndRender(); });
   $('btnClear').addEventListener('click', () => {
     // More destructive than "Reset recipes": wipes target, picks, extra outputs and
     // flow layout for this plan. Confirm first (game-save + cost globals are kept).
