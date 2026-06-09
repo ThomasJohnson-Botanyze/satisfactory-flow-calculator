@@ -44,6 +44,7 @@
       <button class="tab" data-mode="power">Power Planner</button>
       <button class="tab" data-mode="project">Project Totals</button>
       <button class="tab" data-mode="map">Resource Map</button>
+      <button class="tab" data-mode="xray" title="Whole-base production analysis from your save">Base X-ray</button>
       <button class="tab tab-secondary" data-mode="planner" title="Manual per-recipe planner">Planner</button>
     </nav>
 
@@ -264,6 +265,43 @@
           </section>
         </div>
 
+        <!-- ============ BASE X-RAY ============ -->
+        <div class="mode-panel" data-mode="xray" hidden>
+          <section class="ctl-group">
+            <h2>Base X-ray from save</h2>
+            <p class="hint" style="margin-top:-6px">Reads every machine's recipe, overclock and Somersloop from your save and totals what the whole base is configured to produce, consume and draw.</p>
+            <label class="fld">
+              <span>Game save</span>
+              <select id="xraySaveSelect" class="sel"></select>
+            </label>
+            <div class="chip-toolbar">
+              <button id="xrayLoad" class="btn mini" title="Analyze the selected save's production">Analyze base</button>
+              <button id="xrayRefresh" class="btn mini ghost" aria-label="Rescan the save folder" title="Rescan the save folder">↻</button>
+            </div>
+            <small id="xrayStatus" class="hint">Pick your save and Analyze to X-ray your base.</small>
+          </section>
+
+          <section class="ctl-group">
+            <h2>Item balance</h2>
+            <label class="fld">
+              <span>Filter items</span>
+              <input id="xrayFilter" type="text" placeholder="type an item…" autocomplete="off" />
+            </label>
+            <label class="check"><input type="checkbox" id="xrayHideBalanced" /> Hide balanced (net ≈ 0)</label>
+            <label class="check"><input type="checkbox" id="xrayRawOnly" /> Raw resources only</label>
+            <label class="fld">
+              <span>Sort by</span>
+              <select id="xraySort" class="sel">
+                <option value="netDesc">Net — surplus first</option>
+                <option value="netAsc">Net — deficit first</option>
+                <option value="absNet">Net — biggest imbalance</option>
+                <option value="name">Name (A→Z)</option>
+                <option value="produced">Most produced</option>
+              </select>
+            </label>
+          </section>
+        </div>
+
         <!-- ============ SHARED: ALTERNATE RECIPES (save unlock + manual veto) ============ -->
         <section class="ctl-group calc-only">
           <h2>Alternate recipes <small class="badge">save + manual</small></h2>
@@ -426,6 +464,61 @@
             <canvas id="mapCanvas"></canvas>
             <div id="mapEmpty" class="map-empty">Load a save (left panel) to plot resource nodes and your factory on the map.</div>
             <div id="mapTip" class="map-tip" hidden></div>
+          </div>
+        </div>
+
+        <div id="xrayView" hidden>
+          <div id="xrayEmpty" class="empty"><p>Pick your save in the left panel and <b>Analyze base</b> to X-ray your factory.</p></div>
+          <div id="xrayBody" hidden>
+            <div class="power-hero">
+              <div class="stat big"><span>Net power</span><b id="xrNetPower">—</b></div>
+              <div class="stat"><span>Total draw</span><b id="xrDraw">—</b></div>
+              <div class="stat"><span>Generation</span><b id="xrGen">—</b></div>
+              <div class="stat"><span>Production machines</span><b id="xrMachines">—</b></div>
+              <div class="stat"><span>Idle</span><b id="xrIdle">—</b></div>
+            </div>
+            <div id="xrayCaveat" class="banner xray-caveat"></div>
+
+            <div class="xray-chips" id="xrayChips"></div>
+
+            <h2 class="block-title">Item balance <small class="badge">produced vs consumed /min</small></h2>
+            <div class="table-wrap">
+              <table id="xrayItemsTable">
+                <thead><tr><th>Item</th><th class="num">Produced</th><th class="num">Consumed</th><th class="num">Net / min</th><th>Status</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <small id="xrayItemsNote" class="hint"></small>
+
+            <div class="two-col">
+              <div>
+                <h2 class="block-title">Machines by type</h2>
+                <div class="table-wrap">
+                  <table id="xrayBldTable"><thead><tr><th>Building</th><th class="num">Count</th><th class="num">Idle</th><th class="num">Power</th></tr></thead><tbody></tbody></table>
+                </div>
+              </div>
+              <div>
+                <h2 class="block-title">By factory <small class="badge">spatial clusters</small></h2>
+                <div class="table-wrap">
+                  <table id="xrayFacTable"><thead><tr><th>Factory</th><th class="num">Machines</th><th class="num">Power</th><th>Top outputs</th></tr></thead><tbody></tbody></table>
+                </div>
+              </div>
+            </div>
+
+            <div class="two-col">
+              <div>
+                <h2 class="block-title">Extraction <small class="badge">raw mining</small></h2>
+                <div class="table-wrap">
+                  <table id="xrayExtTable"><thead><tr><th>Resource</th><th class="num">Rate / min</th><th class="num">Extractors</th></tr></thead><tbody></tbody></table>
+                </div>
+              </div>
+              <div>
+                <h2 class="block-title">Power generation</h2>
+                <div class="table-wrap">
+                  <table id="xrayGenTable"><thead><tr><th>Generator</th><th class="num">Count</th><th class="num">Output</th></tr></thead><tbody></tbody></table>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 

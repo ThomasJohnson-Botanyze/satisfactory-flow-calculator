@@ -34,7 +34,7 @@ check('bundle boots without throwing', !bootError);
 if (bootError) console.error('   ' + (bootError && bootError.stack || bootError));
 
 const D = window.document;
-check('tabs rendered', D.querySelectorAll('.tab').length === 6); // Planner, Optimizer, Max, Power Planner, Project Totals, Map
+check('tabs rendered', D.querySelectorAll('.tab').length === 7); // Optimizer, Max, Power Planner, Project Totals, Map, Base X-ray, Planner
 check('item datalist populated from bundled data', D.querySelectorAll('#itemList option').length > 100);
 check('save features degrade gracefully without window.api', !!D.getElementById('saveSelect'));
 check('no Node require leaked into the page global', typeof window.require === 'undefined');

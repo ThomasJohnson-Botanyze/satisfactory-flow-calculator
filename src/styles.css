@@ -869,3 +869,36 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
   cursor: pointer;
 }
 .theme-row input[type="color"]:focus { outline: none; border-color: var(--accent); }
+
+/* ============ Base X-ray ============ */
+.xray-caveat {
+  background: linear-gradient(90deg, rgba(154, 163, 178, 0.12), transparent);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.xray-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+.xr-chip {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  font-size: 12px; color: var(--muted);
+}
+.xr-chip b { font-size: 14px; color: var(--text); font-weight: 700; }
+.xr-chip-warn { border-color: var(--warn); }
+.xr-chip-warn b { color: var(--warn); }
+.xr-chip-good { border-color: var(--good); }
+.xr-chip-good b { color: var(--good); }
+/* surplus / deficit / balanced colouring (item balance, hero net power, idle counts) */
+.xr-pos { color: var(--good); }
+.xr-neg { color: var(--warn); }
+.xr-zero { color: var(--muted); }
+#xrayItemsTable td.xr-pos, #xrayItemsTable td.xr-neg { font-weight: 600; }
+/* small inline tag e.g. "raw" / "est" */
+.xr-tag {
+  display: inline-block; margin-left: 6px; padding: 1px 6px;
+  border-radius: 4px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
+  vertical-align: middle;
+}

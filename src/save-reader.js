@@ -19,10 +19,13 @@ const os = require('os');
 // works (raw output) if the data file moves.
 let RECIPES = null;
 let ITEMS = null;
-try { const D = require('./data.json'); RECIPES = D.recipes; ITEMS = D.items; } catch (e) { RECIPES = null; ITEMS = null; }
+let DATA = null;
+try { DATA = require('./data.json'); RECIPES = DATA.recipes; ITEMS = DATA.items; } catch (e) { RECIPES = null; ITEMS = null; DATA = null; }
 
 // Pure, dependency-free building extraction (operates on a parsed save).
 const { extractBuildings, summarize, extractCollectables, summarizeCollectables } = require('./factory-extract');
+// Pure, dependency-free production aggregation (DATA passed in).
+const { computeProduction } = require('./production-xray');
 
 function defaultSaveRoot() {
   const localAppData =
@@ -272,10 +275,27 @@ function readMap(savFile) {
   };
 }
 
+// Read + parse a .sav and compute the whole-base production X-ray (per-item net,
+// machine power, idle/overclock counts, extraction, generation, per-factory breakdown).
+// { ok, saveName, savedAt, xray:{stats,items,buildings,extraction,generation,factories,caveats}, error }
+// opts.powerMult scales draw by the game's Power Consumption Multiplier (default 1).
+function readProduction(savFile, opts) {
+  const p = parseSaveFile(savFile);
+  if (!p.ok) return { ok: false, error: p.error };
+  if (!DATA) return { ok: false, error: 'Recipe data (data.json) is unavailable, so production cannot be computed.' };
+  let xray;
+  try { xray = computeProduction(p.save, DATA, opts || {}); }
+  catch (e) { return { ok: false, error: 'Failed to analyze production: ' + ((e && e.message) || String(e)) }; }
+  let savedAt = null;
+  try { savedAt = fs.statSync(savFile).mtimeMs; } catch (_) {}
+  return { ok: true, saveName: p.saveName, savedAt, xray };
+}
+
 module.exports = {
   defaultSaveRoot,
   listSaves,
   parseSaveFile,
+  readProduction,
   extractAlternates,
   collectAlternates,
   readUnlockedAlternates,

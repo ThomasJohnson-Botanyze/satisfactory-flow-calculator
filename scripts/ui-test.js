@@ -826,5 +826,50 @@ console.log('\n### POWER PLANNER: STANDALONE COAL POWER (mine → burn)');
   check('flow shows the standalone coal generator', genNodes.some((t) => /Coal-Powered Generator/.test(t)));
 }
 
+// ---- Base X-ray tab: full render path on a real computeProduction() result ----
+console.log('\n### BASE X-RAY (tab render)');
+{
+  const PX = require('../src/production-xray');
+  const recPath = (rc) => 'x.' + rc;
+  const Ore = cls('Iron Ore');
+  // Synthetic base: plain + Somerslooped plate constructors, an idle one, a smelter, and a
+  // Pure-node miner — enough to populate every X-ray table.
+  const xSave = { levels: { L: { objects: [
+    { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 0, y: 0, z: 0 } }, properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IronPlate_C') } }, mCurrentPotential: { value: 1 } } },
+    { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 500, y: 0, z: 0 } }, properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IronPlate_C') } }, mCurrentPotential: { value: 2 }, mCurrentProductionBoost: { value: 2 } } },
+    { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 1000, y: 0, z: 0 } }, properties: {} },
+    { typePath: 'g.Build_SmelterMk1_C', transform: { translation: { x: 0, y: 500, z: 0 } }, properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IngotIron_C') } } } },
+    { typePath: 'g.Build_MinerMk2_C', transform: { translation: { x: 90000, y: 90000, z: 0 } }, properties: { mExtractableResource: { value: { pathName: 'N1' } } } },
+    { typePath: 'g.BP_ResourceNode_C', instanceName: 'N1', properties: { mPurityOverride: { value: { value: 'RP_Pure' } }, mResourceClassOverride: { value: { pathName: 'x.' + Ore } } } },
+  ] } } };
+  const xray = PX.computeProduction(xSave, DATA);
+  const { d, app, setVal } = boot13();
+  app.injectXray(xray);
+  check('x-ray view shown after analyze', !d.getElementById('xrayView').hidden && !d.getElementById('xrayBody').hidden);
+  check('hero net power filled', /W$/.test(d.getElementById('xrNetPower').textContent));
+  check('hero machines = configured / total', d.getElementById('xrMachines').textContent === '3 / 4');
+  check('hero idle count', d.getElementById('xrIdle').textContent === '1');
+  check('quick-stat chips rendered', d.querySelectorAll('#xrayChips .xr-chip').length >= 4);
+  check('caveat banner populated', d.getElementById('xrayCaveat').textContent.length > 20);
+  const itemRows = () => [...d.querySelectorAll('#xrayItemsTable tbody tr')];
+  check('item balance table populated', itemRows().length === xray.items.length && itemRows().length >= 3);
+  check('a surplus row is coloured positive', itemRows().some((tr) => tr.querySelector('td.num.xr-pos')));
+  check('machines-by-type table populated', d.querySelectorAll('#xrayBldTable tbody tr').length === 2); // Constructor + Smelter
+  check('by-factory table populated', d.querySelectorAll('#xrayFacTable tbody tr').length === 1);
+  check('extraction table shows the mined ore', [...d.querySelectorAll('#xrayExtTable tbody tr')].some((tr) => /Iron Ore/.test(tr.textContent)));
+  // Filter box narrows the item list live.
+  const totalItems = itemRows().length;
+  setVal(d.getElementById('xrayFilter'), 'iron plate');
+  check('filter narrows the item table', itemRows().length === 1 && itemRows().length < totalItems);
+  setVal(d.getElementById('xrayFilter'), '');
+  // Raw-only checkbox.
+  const raw = d.getElementById('xrayRawOnly'); raw.checked = true; raw.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
+  check('raw-only filter keeps just raw resources', itemRows().every((tr) => /raw/i.test(tr.textContent)) && itemRows().length >= 1);
+  raw.checked = false; raw.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
+  // Switching away and back doesn't throw and keeps the data.
+  app.setMode('optimize'); app.setMode('xray');
+  check('x-ray survives a tab round-trip', d.querySelectorAll('#xrayItemsTable tbody tr').length === xray.items.length);
+}
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

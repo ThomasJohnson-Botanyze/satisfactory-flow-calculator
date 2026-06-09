@@ -252,6 +252,70 @@ check('foundation = foundation', BM.categoryOf('Build_Foundation_8x4_01_C') === 
 check('buildingMeta always returns a footprint+color', (() => { const m = BM.buildingMeta('Build_TotallyUnknownThing_C'); return m && m.w > 0 && m.d > 0 && /^#/.test(m.color); })());
 check('typePath form resolves via stem', BM.buildingMeta('/Game/X/Build_AssemblerMk1.Build_AssemblerMk1_C').category === 'production');
 
+// ---- production X-ray (whole-base analysis from a save) ----
+console.log('\n### PRODUCTION X-RAY');
+const PX = require('../src/production-xray');
+const recPath = (rc) => 'x.' + rc; // recipeClassOf takes the stem after the last '.'
+const stdIngotR = DATA.recipes['Recipe_IngotIron_C'];
+// Synthetic base: two Iron Plate constructors (one plain, one 200% + Somerslooped), one
+// idle constructor, one Iron Ingot smelter, and a Mk2 miner on a Pure Iron Ore node.
+const xSave = { levels: { Persistent: { objects: [
+  // M1: Constructor -> Iron Plate, 100% clock, no Somersloop
+  { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 0, y: 0, z: 0 } },
+    properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IronPlate_C') } }, mCurrentPotential: { value: 1 } } },
+  // M2: Constructor -> Iron Plate, 200% clock, Somersloop output x2 (boost stores the multiplier)
+  { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 1000, y: 0, z: 0 } },
+    properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IronPlate_C') } }, mCurrentPotential: { value: 2 }, mCurrentProductionBoost: { value: 2 } } },
+  // M3: Constructor with no recipe -> idle
+  { typePath: 'g.Build_ConstructorMk1_C', transform: { translation: { x: 2000, y: 0, z: 0 } }, properties: {} },
+  // Smelter -> Iron Ingot, 100%
+  { typePath: 'g.Build_SmelterMk1_C', transform: { translation: { x: 0, y: 1000, z: 0 } },
+    properties: { mCurrentRecipe: { value: { pathName: recPath('Recipe_IngotIron_C') } } } },
+  // Miner Mk2 on a Pure Iron Ore node (resolved via mExtractableResource -> the node's overrides)
+  { typePath: 'g.Build_MinerMk2_C', transform: { translation: { x: 50000, y: 50000, z: 0 } },
+    properties: { mExtractableResource: { value: { pathName: 'NODE1' } } } },
+  { typePath: 'g.BP_ResourceNode_C', instanceName: 'NODE1',
+    properties: { mPurityOverride: { value: { value: 'RP_Pure' } }, mResourceClassOverride: { value: { pathName: 'x.' + IronOre } } } },
+] } } };
+const xr = PX.computeProduction(xSave, DATA);
+check('xray: counts every manufacturing building (incl idle)', xr.stats.totalMachines === 4);
+check('xray: idle machine (no recipe) detected', xr.stats.idle === 1);
+check('xray: configured machine count', xr.stats.configured === 3);
+check('xray: overclocked machine counted (M2 @200%)', xr.stats.overclocked === 1 && xr.stats.underclocked === 0);
+check('xray: Somerslooped machine counted', xr.stats.somersloop === 1);
+check('xray: physical Somersloops derived from the output multiplier', xr.stats.sloopsInstalled === 1); // amp 2 on a 1-slot Constructor = 1 sloop
+const xrPlate = xr.items.find((it) => it.item === IronPlate);
+// M1 makes 2*(60/6)=20/min; M2 makes 20 * clock2 * amp2 = 80/min; total 100, none consumed.
+check('xray: Iron Plate produced (clock + Somersloop amplify output)', !!xrPlate && near(xrPlate.produced, 100, 0.01));
+check('xray: Iron Plate net is a surplus', !!xrPlate && near(xrPlate.net, 100, 0.01));
+const xrIngot = xr.items.find((it) => it.item === IronIngot);
+// Ingot consumed by the two plate machines: M1 3*(10)=30, M2 30*clock2=60 (Somersloop does NOT raise input). Total 90.
+check('xray: Iron Ingot consumed = inputs scale with clock, NOT Somersloop', !!xrIngot && near(xrIngot.consumed, 90, 0.01));
+const smeltOut = stdIngotR.products[0].amount * (60 / stdIngotR.time); // smelter Iron Ingot /min @100%
+check('xray: Iron Ingot produced by the smelter', !!xrIngot && near(xrIngot.produced, smeltOut, 0.01));
+// Power: M1 = 4; M2 = 4 * 2^exp * 2^2 (Somersloop ~squares draw); idle adds 0.
+const cExp = DATA.buildings['Build_ConstructorMk1_C'].exponent;
+const m2Power = 4 * Math.pow(2, cExp) * Math.pow(2, 2);
+check('xray: total manufacturing power (clock^exp x amp^2)', near(xr.stats.totalPower, 4 + m2Power + (stdIngotR ? DATA.buildings['Build_SmelterMk1_C'].power : 0), 0.05));
+// Extraction: Mk2 miner (120/min base) on a Pure node (x2) at 100% = 240/min, resolved exactly.
+const oreExt = xr.extraction.find((e) => e.item === IronOre);
+check('xray: extraction resolves resource + purity from the node', !!oreExt && near(oreExt.rate, 240, 0.01) && oreExt.estimated === false);
+const oreItem = xr.items.find((it) => it.item === IronOre);
+check('xray: mined raw folded into its production total', !!oreItem && near(oreItem.extraction, 240, 0.01) && oreItem.produced >= 240);
+// Clustering: the four manufacturing machines sit together (one factory); the remote miner
+// is an extractor, not part of factory clusters.
+check('xray: configured machines cluster into one nearby factory', xr.stats.factoryCount === 1 && xr.factories[0].count === 3);
+check('xray: factory reports its top output', xr.factories[0].topOutputs.some((o) => o.item === IronPlate));
+// Estimated-extraction caveat flips when a node can't be resolved (vanilla solid node).
+const xSave2 = { levels: { Persistent: { objects: [
+  { typePath: 'g.Build_MinerMk2_C', transform: { translation: { x: 0, y: 0, z: 0 } }, properties: {} }, // no node ref -> unknown solid resource
+  { typePath: 'g.Build_WaterPump_C', transform: { translation: { x: 0, y: 0, z: 0 } }, properties: {} }, // pump knows its resource (Water) but not purity
+] } } };
+const xr2 = PX.computeProduction(xSave2, DATA);
+check('xray: unresolved extractor flags the estimated caveat', xr2.caveats.estimatedExtraction === true);
+check('xray: water pump still attributed to Water despite no node', xr2.extraction.some((e) => DATA.items[e.item] && DATA.items[e.item].name === 'Water'));
+check('xray: a miner with no resolvable resource is not mis-attributed', !xr2.extraction.some((e) => e.item === 'undefined' || e.item == null));
+
 // ---- projects: migration + linked inputs + cycle detection (F3) ----
 // These exercise renderer.js logic (load/migration, link resolution, cycle guard) via
 // the window.__app test hook. Booted in jsdom so the renderer's DOM wiring runs; we

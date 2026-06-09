@@ -46,6 +46,7 @@ const SAVE = {
   listSaves: (root) => (api ? api.listSaves(root) : { exists: false, saves: [] }),
   readUnlockedAlternates: (file) => (api ? api.readUnlockedAlternates(file) : SAVE_UNAVAILABLE),
   readMap: (file) => (api ? api.readMap(file) : SAVE_UNAVAILABLE),
+  readProduction: (file, opts) => (api ? api.readProduction(file, opts) : SAVE_UNAVAILABLE),
 };
 
 // ---------- support links ----------
@@ -1862,6 +1863,13 @@ let mapDrag = null;
 let mapRAF = 0;
 let mapCw = 0, mapCh = 0;          // last canvas CSS size, for reframing on window resize
 
+// ---------- Base X-ray (production analysis from a save) ----------
+let xrayData = null;               // last computeProduction() result, or null before a load
+let xrayFilter = '';               // item-table search box
+let xraySort = 'netDesc';          // item-table sort key
+let xrayHideBalanced = false;
+let xrayRawOnly = false;
+
 // ---------- factory buildings overlay (Cartograph-style) ----------
 // Buildings are drawn as vectors every frame (not baked to an offscreen) so that
 // thin belts/wires stay one screen-pixel wide at any zoom — exactly how the node
@@ -2277,6 +2285,201 @@ function loadMapFrom(file, silent) {
 function loadMapFromSave() {
   const sel = $('mapSaveSelect');
   loadMapFrom(sel && sel.value, false);
+}
+
+// ---------- Base X-ray (whole-base production analysis) ----------
+// Parse a save and compute the production X-ray. Mirrors loadMapFrom: defers the
+// (synchronous, ~1s on a big base) parse so the "Analyzing…" line paints first.
+function loadXrayFrom(file, silent) {
+  const st = $('xrayStatus');
+  if (!file) { if (st && !silent) st.textContent = 'No save selected.'; return; }
+  if (st && !silent) { st.classList.remove('warn-text'); st.textContent = 'Analyzing save…'; }
+  state.saveFile = file; save(); // remember across sessions (shared with the other save pickers)
+  setTimeout(() => {
+    let res;
+    // Power draw is scaled by the same Power Consumption Multiplier the rest of the app uses,
+    // so the X-ray's MW matches the Power Planner and the user's game setting.
+    try { res = SAVE.readProduction(file, { powerMult: state.powerMult || 1 }); }
+    catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+    if (!res.ok) { if (st) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); } xrayData = null; renderXray(); return; }
+    xrayData = res.xray;
+    xrayData._saveName = res.saveName;
+    xrayData._savedAt = res.savedAt;
+    const s = xrayData.stats;
+    const age = relAge(res.savedAt);
+    if (st) {
+      st.classList.remove('warn-text');
+      st.textContent = `${res.saveName}: ${fmt(s.totalMachines, 0)} machines · ${fmt(s.itemTypes, 0)} item types · ${fmtPower(s.totalPower + s.extractionPower)} draw`
+        + (age ? ` · saved ${age}` : '');
+    }
+    renderXray();
+  }, 20);
+}
+function loadXrayFromSave() {
+  const sel = $('xraySaveSelect');
+  loadXrayFrom(sel && sel.value, false);
+}
+
+// Round a /min rate to a cell, colour-coded by surplus / deficit / balanced.
+const XR_EPS = 0.05;
+function xrNetCell(net) {
+  const td = el('td', 'num');
+  td.textContent = (net > 0 ? '+' : '') + fmt(net, 1);
+  td.classList.add(net > XR_EPS ? 'xr-pos' : net < -XR_EPS ? 'xr-neg' : 'xr-zero');
+  return td;
+}
+function xrStatusLabel(it) {
+  if (it.net > XR_EPS) return { txt: it.raw ? 'surplus (mined)' : 'surplus', cls: 'xr-pos' };
+  if (it.net < -XR_EPS) return { txt: it.raw ? 'deficit — mine more' : 'deficit — under-fed', cls: 'xr-neg' };
+  return { txt: 'balanced', cls: 'xr-zero' };
+}
+
+// Filter + sort the item list per the left-panel controls.
+function xrayFilteredItems() {
+  const q = xrayFilter.trim().toLowerCase();
+  let rows = xrayData.items.slice();
+  if (q) rows = rows.filter((it) => it.name.toLowerCase().includes(q));
+  if (xrayRawOnly) rows = rows.filter((it) => it.raw);
+  if (xrayHideBalanced) rows = rows.filter((it) => Math.abs(it.net) > XR_EPS);
+  const cmp = {
+    netDesc: (a, b) => b.net - a.net,
+    netAsc: (a, b) => a.net - b.net,
+    absNet: (a, b) => Math.abs(b.net) - Math.abs(a.net),
+    name: (a, b) => a.name.localeCompare(b.name),
+    produced: (a, b) => b.produced - a.produced,
+  }[xraySort] || ((a, b) => b.net - a.net);
+  rows.sort(cmp);
+  return rows;
+}
+
+function renderXrayItems() {
+  const tb = $('xrayItemsTable') && $('xrayItemsTable').querySelector('tbody');
+  if (!tb) return;
+  tb.innerHTML = '';
+  const rows = xrayFilteredItems();
+  for (const it of rows) {
+    const tr = el('tr');
+    const itemTd = el('td');
+    itemTd.appendChild(itemCell(it.item));
+    if (it.raw) { const b = el('span', 'xr-tag', 'raw'); itemTd.appendChild(b); }
+    tr.appendChild(itemTd);
+    const prod = el('td', 'num', fmt(it.produced, 1));
+    const cons = el('td', 'num', fmt(it.consumed, 1));
+    tr.appendChild(prod); tr.appendChild(cons);
+    tr.appendChild(xrNetCell(it.net));
+    const sl = xrStatusLabel(it);
+    const stTd = el('td', null, sl.txt); stTd.classList.add(sl.cls);
+    tr.appendChild(stTd);
+    tb.appendChild(tr);
+  }
+  const note = $('xrayItemsNote');
+  if (note) note.textContent = `${rows.length} of ${xrayData.items.length} items shown.`;
+}
+
+function renderXray() {
+  const body = $('xrayBody'), empty = $('xrayEmpty');
+  if (!body) return;
+  if (!xrayData) { if (empty) empty.hidden = false; body.hidden = true; return; }
+  if (empty) empty.hidden = true;
+  body.hidden = false;
+  const s = xrayData.stats;
+  const draw = s.totalPower + s.extractionPower;
+
+  // ----- hero -----
+  const net = $('xrNetPower');
+  if (net) { net.textContent = (s.netPower >= 0 ? '+' : '') + fmtPower(s.netPower); net.classList.toggle('xr-pos', s.netPower >= 0); net.classList.toggle('xr-neg', s.netPower < 0); }
+  if ($('xrDraw')) $('xrDraw').textContent = fmtPower(draw);
+  if ($('xrGen')) $('xrGen').textContent = fmtPower(s.generationCapacity);
+  if ($('xrMachines')) $('xrMachines').textContent = `${fmt(s.configured, 0)} / ${fmt(s.totalMachines, 0)}`;
+  if ($('xrIdle')) $('xrIdle').textContent = fmt(s.idle, 0);
+
+  // ----- quick-stat chips -----
+  const chips = $('xrayChips');
+  if (chips) {
+    chips.innerHTML = '';
+    const add = (label, val, cls) => { const c = el('span', 'xr-chip' + (cls ? ' ' + cls : '')); c.appendChild(el('b', null, fmt(val, 0))); c.appendChild(document.createTextNode(' ' + label)); chips.appendChild(c); };
+    add('idle', s.idle, s.idle ? 'xr-chip-warn' : '');
+    add('underclocked', s.underclocked, '');
+    add('overclocked', s.overclocked, '');
+    add('somersloop', s.somersloop, s.somersloop ? 'xr-chip-good' : '');
+    if (s.sloopsInstalled) add('sloops installed', s.sloopsInstalled, 'xr-chip-good');
+    add('factories', s.factoryCount, '');
+  }
+
+  // ----- caveat banner -----
+  const cav = $('xrayCaveat');
+  if (cav) {
+    const parts = ['Reflects each machine’s saved recipe + overclock + Somersloop at 100% feed — a static save can’t show live belt/manifold starvation.'];
+    if (xrayData.caveats.estimatedExtraction) parts.push('Some extractor rates assume Normal purity (your save doesn’t store purity for vanilla nodes).');
+    if (xrayData.caveats.generatorFuel) parts.push('Generator fuel burn is shown as capacity, not netted into the item balance above.');
+    cav.textContent = 'ℹ ' + parts.join(' ');
+  }
+
+  renderXrayItems();
+
+  // ----- machines by type -----
+  const bt = $('xrayBldTable') && $('xrayBldTable').querySelector('tbody');
+  if (bt) {
+    bt.innerHTML = '';
+    for (const b of xrayData.buildings) {
+      const tr = el('tr');
+      tr.appendChild(el('td', null, b.name));
+      tr.appendChild(el('td', 'num', fmt(b.count, 0)));
+      const idleTd = el('td', 'num', b.idle ? fmt(b.idle, 0) : '—');
+      if (b.idle) idleTd.classList.add('xr-neg');
+      tr.appendChild(idleTd);
+      tr.appendChild(el('td', 'num', fmtPower(b.power)));
+      bt.appendChild(tr);
+    }
+  }
+
+  // ----- by factory -----
+  const ft = $('xrayFacTable') && $('xrayFacTable').querySelector('tbody');
+  if (ft) {
+    ft.innerHTML = '';
+    for (const f of xrayData.factories) {
+      const tr = el('tr');
+      const lab = `#${f.id} · @X ${Math.round(f.cx / 100)} Y ${Math.round(f.cy / 100)}`;
+      tr.appendChild(el('td', null, lab));
+      tr.appendChild(el('td', 'num', fmt(f.count, 0)));
+      tr.appendChild(el('td', 'num', fmtPower(f.power)));
+      const tops = f.topOutputs.map((o) => `${itemName(o.item)} ${fmt(o.rate, 0)}`).join(', ');
+      tr.appendChild(el('td', null, tops || '—'));
+      ft.appendChild(tr);
+    }
+    if (!xrayData.factories.length) { const tr = el('tr'); const td = el('td', 'hint'); td.colSpan = 4; td.textContent = 'No configured machines.'; tr.appendChild(td); ft.appendChild(tr); }
+  }
+
+  // ----- extraction -----
+  const et = $('xrayExtTable') && $('xrayExtTable').querySelector('tbody');
+  if (et) {
+    et.innerHTML = '';
+    for (const e of xrayData.extraction) {
+      const tr = el('tr');
+      const nameTd = el('td');
+      nameTd.appendChild(itemCell(e.item));
+      if (e.estimated) { const t = el('span', 'xr-tag', 'est'); t.title = 'Purity assumed Normal — your save doesn’t store it for this node'; nameTd.appendChild(t); }
+      tr.appendChild(nameTd);
+      tr.appendChild(el('td', 'num', fmt(e.rate, 1)));
+      tr.appendChild(el('td', 'num', fmt(e.count, 0)));
+      et.appendChild(tr);
+    }
+    if (!xrayData.extraction.length) { const tr = el('tr'); const td = el('td', 'hint'); td.colSpan = 3; td.textContent = 'No miners or pumps found.'; tr.appendChild(td); et.appendChild(tr); }
+  }
+
+  // ----- generation -----
+  const gt = $('xrayGenTable') && $('xrayGenTable').querySelector('tbody');
+  if (gt) {
+    gt.innerHTML = '';
+    for (const g of xrayData.generation) {
+      const tr = el('tr');
+      tr.appendChild(el('td', null, g.name));
+      tr.appendChild(el('td', 'num', fmt(g.count, 0)));
+      tr.appendChild(el('td', 'num', fmtPower(g.power)));
+      gt.appendChild(tr);
+    }
+    if (!xrayData.generation.length) { const tr = el('tr'); const td = el('td', 'hint'); td.colSpan = 3; td.textContent = 'No power generators found.'; tr.appendChild(td); gt.appendChild(tr); }
+  }
 }
 
 function mapTipHtml(n) {
@@ -3259,14 +3462,15 @@ function buildSaveList() {
   try { info = SAVE.listSaves(); } catch (e) { info = { exists: false, saves: [] }; }
   fillSaveSelect($('saveSelect'), info);
   fillSaveSelect($('mapSaveSelect'), info);
-  applySaveSelection(); // restore the remembered save in both pickers
+  fillSaveSelect($('xraySaveSelect'), info);
+  applySaveSelection(); // restore the remembered save in every picker
 }
 // The alternates picker and the map picker point at the same save. Keep them in
 // sync and remember the choice (a world-level setting, like the unlocks it yields).
 function applySaveSelection() {
   const f = state.saveFile || '';
   if (!f) return;
-  for (const id of ['saveSelect', 'mapSaveSelect']) {
+  for (const id of ['saveSelect', 'mapSaveSelect', 'xraySaveSelect']) {
     const sel = $(id);
     if (sel && [...sel.options].some((o) => o.value === f)) sel.value = f;
   }
@@ -3453,6 +3657,7 @@ function onNewestSave(info) {
   buildSaveList(); // surface the new file in both pickers and re-select it
   loadAlternatesFrom(info.file, true);
   if (mapNodes.length || mapBuildings.length) loadMapFrom(info.file, true); // keep a loaded map fresh
+  if (xrayData) loadXrayFrom(info.file, true); // keep a loaded X-ray fresh
 }
 function clearUnlockedFilter() {
   state.unlockedAlts = null;
@@ -3473,9 +3678,11 @@ function setMode(mode) {
   const isMap = mode === 'map';
   const isProject = mode === 'project';
   const isPower = mode === 'power';
-  // Map, Project Totals and the Power Planner are not single-plan recipe calculators, so
-  // the shared calc-only panels (alternates / cost / per-plan summary) don't apply.
-  document.querySelectorAll('.calc-only').forEach((e) => { e.style.display = (isMap || isProject || isPower) ? 'none' : ''; });
+  const isXray = mode === 'xray';
+  // Map, Project Totals, Power Planner and Base X-ray are not single-plan recipe
+  // calculators, so the shared calc-only panels (alternates / cost / per-plan summary)
+  // don't apply.
+  document.querySelectorAll('.calc-only').forEach((e) => { e.style.display = (isMap || isProject || isPower || isXray) ? 'none' : ''; });
   $('btnReset').style.display = mode === 'planner' ? '' : 'none';
   // The alternate list auto-selects recipes only in Optimizer/Max. Planner builds
   // from the per-row dropdowns, so spell that out instead of letting users expect a
@@ -3487,6 +3694,7 @@ function setMode(mode) {
   $('mapView').hidden = !isMap;
   if ($('projectView')) $('projectView').hidden = !isProject;
   if ($('powerView')) $('powerView').hidden = !isPower;
+  if ($('xrayView')) $('xrayView').hidden = !isXray;
   save();
   if (isMap) {
     $('empty').hidden = true; $('output').hidden = true;
@@ -3501,6 +3709,11 @@ function setMode(mode) {
     $('empty').hidden = true; $('output').hidden = true;
     buildPowerControls(); // (re)build the dynamic purity + generator lists for this plan
     renderPower();
+  } else if (isXray) {
+    $('empty').hidden = true; $('output').hidden = true;
+    // Auto-analyze the remembered save the first time X-ray opens this session.
+    if (state.saveFile && !xrayData) loadXrayFromSave();
+    else renderXray();
   } else solveAndRender();
 }
 
@@ -3840,6 +4053,15 @@ function init() {
     cb.addEventListener('change', () => { mapCollOn[cb.dataset.coll] = cb.checked; scheduleMapDraw(); });
   });
 
+  // base x-ray
+  $('xrayLoad').addEventListener('click', loadXrayFromSave);
+  $('xrayRefresh').addEventListener('click', buildSaveList);
+  $('xraySaveSelect').addEventListener('change', (e) => selectSaveFile(e.target.value));
+  $('xrayFilter').addEventListener('input', (e) => { xrayFilter = e.target.value; if (xrayData) renderXrayItems(); });
+  $('xraySort').addEventListener('change', (e) => { xraySort = e.target.value; if (xrayData) renderXrayItems(); });
+  $('xrayHideBalanced').addEventListener('change', (e) => { xrayHideBalanced = e.target.checked; if (xrayData) renderXrayItems(); });
+  $('xrayRawOnly').addEventListener('change', (e) => { xrayRawOnly = e.target.checked; if (xrayData) renderXrayItems(); });
+
   $('optAddOutput').addEventListener('click', () => { state.opt.outputs.push({ name: '', rate: 60 }); save(); buildOptOutputs(); });
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });
   $('optAlts').addEventListener('change', (e) => { state.opt.alts = e.target.checked; save(); solveAndRender(); });
@@ -3926,6 +4148,10 @@ if (typeof window !== 'undefined') {
     newProject, switchProject, deleteProject, newPlan,
     linkWouldCycle, resolveLinkedCap, planNetOutputs, recomputePlanOutputs,
     computeProjectTotals, ensureProjects,
+    setMode,
+    // Inject a precomputed X-ray result and render it — lets the headless test exercise
+    // the full renderXray DOM path without a real save parse or the async load timer.
+    injectXray: (xray) => { xrayData = xray; setMode('xray'); if ($('xrayView')) $('xrayView').hidden = false; renderXray(); return xrayData; },
   };
 }
 window.addEventListener('DOMContentLoaded', init);
