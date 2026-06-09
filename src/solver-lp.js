@@ -53,19 +53,19 @@ for (const g in GENERATORS) {
 // they're dropped from the pool unless their packaged input is supplied as a free input.
 const UNPACKAGE = new Set(Object.keys(RECIPES).filter((rc) => /unpackage/i.test(rc) || /^Unpackage/i.test(RECIPES[rc].name || '')));
 
-// Per-recipe base rates (per machine / min), cost-multiplier applied later.
+// Per-recipe base rates (per machine / min); the cost multiplier is applied per-solve.
 const RC_INFO = {};
 for (const rc in RECIPES) {
   const r = RECIPES[rc];
   const b = BUILDINGS[r.building] || { power: 0, speed: 1, exponent: 1.321929, name: r.building };
-  const f = (60 / r.time) * (b.speed || 1);
+  const f = (60 / r.time) * (b.speed || 1); // recipe executions per machine per minute
   const out = {};
-  const inn = {};
-  for (const g of r.ingredients) inn[g.item] = (inn[g.item] || 0) + g.amount * f;
+  const inn = {};    // ingredient rate per machine/min (amount * f)
+  const innAmt = {}; // raw ingredient amount per recipe (the cost multiplier rounds THIS)
+  for (const g of r.ingredients) { inn[g.item] = (inn[g.item] || 0) + g.amount * f; innAmt[g.item] = (innAmt[g.item] || 0) + g.amount; }
   for (const p of r.products) out[p.item] = (out[p.item] || 0) + p.amount * f;
   RC_INFO[rc] = {
-    out,
-    inn,
+    out, inn, innAmt, f,
     power: b.power || 0,
     building: r.building,
     buildingName: b.name,
@@ -74,11 +74,23 @@ for (const rc in RECIPES) {
   };
 }
 
+// Recipe Parts Cost Multiplier: scale each ingredient AMOUNT then round to a whole unit —
+// mirroring the game, where part costs are integers. So a 1:1 recipe (1 ore -> 1 ingot)
+// stays at 1 under 0.5x (round(0.5)=1) and only multi-part recipes (amount >= 2) shrink.
+// cost===1 returns the exact amount, so vanilla and any fractional-fluid recipes are
+// untouched; a needed ingredient never rounds away to free (floored at 1).
+function effAmount(amt, cost) {
+  if (!amt) return 0;
+  if (cost === 1) return amt;
+  const r = Math.round(amt * cost);
+  return r < 1 ? 1 : r;
+}
+const effInnRate = (info, item, cost) => effAmount(info.innAmt[item] || 0, cost) * info.f;
 const itemsOf = (info) => new Set([...Object.keys(info.out), ...Object.keys(info.inn)]);
-const coefOf = (info, item, cost) => (info.out[item] || 0) - (info.inn[item] || 0) * cost;
+const coefOf = (info, item, cost) => (info.out[item] || 0) - effInnRate(info, item, cost);
 const rawRateOf = (info, cost) => {
   let s = 0;
-  for (const it in info.inn) if (RES.has(it)) s += info.inn[it] * cost;
+  for (const it in info.innAmt) if (RES.has(it)) s += effInnRate(info, it, cost);
   return s;
 };
 
@@ -294,4 +306,4 @@ function planner({ target, rate, targets = null, recipes = [], rawItems = [], re
   return sum;
 }
 
-module.exports = { optimize, maxThroughput, planner, RC_INFO, RES };
+module.exports = { optimize, maxThroughput, planner, RC_INFO, RES, effAmount };

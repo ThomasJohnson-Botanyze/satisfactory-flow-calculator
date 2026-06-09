@@ -506,6 +506,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .node .n-title { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
 .edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }
+.flow-arrow { fill: #4b566c; }
 .edge-label { fill: #c2cad8; font-size: 11px; paint-order: stroke; stroke: #11141a; stroke-width: 4px; }
 
 /* alternate recipes: save status + manual enable/disable list */

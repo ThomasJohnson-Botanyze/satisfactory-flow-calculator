@@ -38,6 +38,23 @@ const plateRow = plan.recipes.find((r) => r.rc === primStd(IronPlate));
 check('plate produced at ~20/min', !!plateRow && near(plateRow.rate, 20, 0.1));
 const plannerOre = plan.raw.find((r) => r.item === IronOre);
 check('planner raw ore ~30/min', !!plannerOre && near(plannerOre.rate, 30, 0.1));
+
+// ---- Recipe Parts Cost Multiplier: rounds each ingredient amount to a whole unit ----
+console.log('\n### COST MULTIPLIER (rounding)');
+check('effAmount 1x is exact (no rounding)', LP.effAmount(6, 1) === 6);
+check('effAmount 0.5x: 1-part recipe stays 1', LP.effAmount(1, 0.5) === 1);
+check('effAmount 0.5x: 2-part recipe -> 1', LP.effAmount(2, 0.5) === 1);
+check('effAmount 0.5x: 3-part recipe -> 2 (round half up)', LP.effAmount(3, 0.5) === 2);
+check('effAmount never rounds a needed part to 0', LP.effAmount(1, 0.1) === 1);
+// A 1:1 smelter is UNCHANGED at 0.5x (round(1*0.5)=1): 30 ore still makes 30 ingot.
+const ph1 = LP.planner({ targets: { [IronIngot]: 30 }, recipes: [primStd(IronIngot)], rawItems: [], recipeCost: 0.5 });
+const oreI = ph1.raw.find((r) => r.item === IronOre);
+check('0.5x: 1:1 smelter unchanged (30 ore for 30 ingot)', !!oreI && near(oreI.rate, 30, 0.1));
+// A multi-part recipe DOES shrink: Iron Plate (3 ingot -> 2 plate) rounds to 2 ingot, so
+// 20 plate needs 20 ingot -> 20 ore (was 30 at 1x).
+const ph2 = LP.planner({ targets: { [IronPlate]: 20 }, recipes: [primStd(IronIngot), primStd(IronPlate)], rawItems: [], recipeCost: 0.5 });
+const oreP = ph2.raw.find((r) => r.item === IronOre);
+check('0.5x: 3-ingot plate recipe rounds to 2 (ore 30 -> 20)', !!oreP && near(oreP.rate, 20, 0.1));
 check('planner uses 2 machines total', plan.totalMachines === 2);
 
 // Infeasible: ask for a product with no allowed inputs.

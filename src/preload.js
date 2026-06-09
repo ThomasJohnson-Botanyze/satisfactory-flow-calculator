@@ -25,4 +25,7 @@ contextBridge.exposeInMainWorld('api', {
   // Update notifier: main.js sends 'update-available' after polling GitHub Releases.
   // Forward the (cloned) payload to the renderer's callback; never expose ipcRenderer.
   onUpdateAvailable: (cb) => { if (typeof cb === 'function') ipcRenderer.on('update-available', (_e, info) => cb(info)); },
+  // Newest-save notifier: main.js watches the save folder and sends 'save-newest' when a
+  // new/updated .sav appears, so the renderer can auto-reload alternates + map.
+  onSaveNewest: (cb) => { if (typeof cb === 'function') ipcRenderer.on('save-newest', (_e, info) => cb(info)); },
 });

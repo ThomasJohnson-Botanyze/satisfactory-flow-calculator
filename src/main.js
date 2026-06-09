@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const SAVE = require('./save-reader');
 
 // ---------- durable plan storage ----------
 // Plans used to live only in the renderer's localStorage. On file:// pages Chromium
@@ -65,6 +66,31 @@ async function checkForUpdate(win) {
   }
 }
 
+// Watch the Satisfactory save folder; when a new/updated .sav lands (e.g. an autosave),
+// tell the renderer the newest save so it can auto-reload unlocked alternates + the map.
+// Debounced (a save is written over a beat) and best-effort: the folder may be absent and
+// recursive watch is platform-limited — a missed event just means a manual reload.
+let saveWatcher = null;
+function startSaveWatcher(win) {
+  let info;
+  try { info = SAVE.listSaves(); } catch (_) { return; }
+  if (!info || !info.exists || !info.root) return;
+  let timer = null;
+  try {
+    saveWatcher = fs.watch(info.root, { recursive: true }, (_evt, filename) => {
+      if (filename && !/\.sav$/i.test(String(filename))) return; // ignore non-save churn
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        try {
+          const cur = SAVE.listSaves();
+          const newest = cur && cur.saves && cur.saves[0]; // listSaves sorts newest-first
+          if (newest && !win.isDestroyed()) win.webContents.send('save-newest', newest);
+        } catch (_) { /* mid-write / folder vanished — next event retries */ }
+      }, 1500);
+    });
+  } catch (_) { /* recursive watch unsupported or root removed */ }
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
@@ -118,7 +144,7 @@ function createWindow() {
 
   win.loadFile(path.join(__dirname, 'index.html'));
   // Check for a newer release once the page is live and its IPC listener is up.
-  win.webContents.once('did-finish-load', () => checkForUpdate(win));
+  win.webContents.once('did-finish-load', () => { checkForUpdate(win); startSaveWatcher(win); });
 }
 
 app.whenReady().then(() => {

@@ -166,6 +166,8 @@ function showUpdateToast(info) {
   toast.hidden = false;
 }
 if (api && api.onUpdateAvailable) api.onUpdateAvailable((info) => showUpdateToast(info));
+// Auto-load the newest save when the game writes one (main process watches the folder).
+if (api && api.onSaveNewest) api.onSaveNewest((info) => { try { onNewestSave(info); } catch (_) {} });
 
 // ---------- indexes ----------
 const ITEMS = DATA.items;
@@ -350,6 +352,9 @@ const defaultState = () => ({
   // Last selected .sav path — shared by the alternates picker and the map picker,
   // and remembered across sessions so neither has to be re-chosen (world-level).
   saveFile: '',
+  // When on, auto-reload the newest save (alternates + any loaded map) whenever the game
+  // writes one. World-level. Main process watches the save folder; see onNewestSave.
+  autoSave: true,
   // Alternate recipe classNames the user has manually excluded from this plan's
   // calculations (independent of unlock status — vetoes even unlocked/optimal ones).
   disabledAlts: [],
@@ -406,7 +411,7 @@ const PLANS_KEY = 'satisfactory-factory-plans-v1'; // multi-plan store
 // Settings that belong to the whole game/world rather than one factory — they
 // carry over across every plan: the game-save unlocked alternates and the three
 // cost multipliers. (disabledAlts stays per-plan: a manual veto for that factory.)
-const GLOBAL_KEYS = ['recipeCost', 'powerMult', 'spaceMult', 'unlockedAlts', 'saveName', 'saveFile'];
+const GLOBAL_KEYS = ['recipeCost', 'powerMult', 'spaceMult', 'unlockedAlts', 'saveName', 'saveFile', 'autoSave'];
 const cloneVal = (v) => (Array.isArray(v) ? v.slice() : v);
 const pickGlobals = (s) => { const g = {}; for (const k of GLOBAL_KEYS) g[k] = cloneVal(s[k]); return g; };
 const applyGlobals = (s, g) => { for (const k of GLOBAL_KEYS) if (k in g) s[k] = cloneVal(g[k]); };
@@ -1112,7 +1117,7 @@ function buildFlow(res, targets) {
     const r = RECIPES[s.rc];
     const prod = r.products.find((p) => p.item === s.item) || r.products[0];
     r.ingredients.forEach((ing) => {
-      const total = (s.rate / prod.amount) * ing.amount * state.recipeCost;
+      const total = (s.rate / prod.amount) * LP.effAmount(ing.amount, state.recipeCost);
       const provs = (producers[ing.item] || []).filter((p) => p.step !== s); // no self-edge on by-product loops
       if (provs.length) {
         const tot = provs.reduce((a, p) => a + p.rate, 0) || 1;
@@ -1177,6 +1182,25 @@ function layoutFlow(flow) {
   // Vertically centre each column against the tallest so the graph reads as a balanced
   // flow left-to-right rather than top-left-anchored ragged columns.
   const maxLen = Math.max(1, ...Object.values(cols).map((a) => a.length));
+  // Crossing reduction (Sugiyama barycentre): order nodes within each column by the mean
+  // rank of their neighbours, sweeping a few times in alternating directions. Far fewer
+  // edge crossings — readable even with by-product cross-links. Deterministic (no RNG).
+  const colKeys = Object.keys(cols).map(Number).sort((a, b) => a - b);
+  const rank = {};
+  colKeys.forEach((c) => cols[c].forEach((n, i) => { rank[n.id] = i; }));
+  const adj = {};
+  nodes.forEach((n) => { adj[n.id] = []; });
+  flow.edges.forEach((e) => { if (byId[e.src] && byId[e.dst]) { adj[e.src].push(e.dst); adj[e.dst].push(e.src); } });
+  for (let sweep = 0; sweep < 8; sweep++) {
+    const seq = sweep % 2 ? colKeys.slice().reverse() : colKeys;
+    for (const c of seq) {
+      const arr = cols[c];
+      const key = {};
+      for (const n of arr) { const a = adj[n.id]; key[n.id] = a.length ? a.reduce((s, id) => s + rank[id], 0) / a.length : rank[n.id]; }
+      arr.sort((p, q) => (key[p.id] - key[q.id]) || (rank[p.id] - rank[q.id]));
+      arr.forEach((n, i) => { rank[n.id] = i; });
+    }
+  }
   Object.keys(cols).map(Number).sort((a, b) => a - b).forEach((c) => {
     const off = ((maxLen - cols[c].length) / 2) * ROWH;
     cols[c].forEach((n, i) => {
@@ -1211,12 +1235,17 @@ function edgePath(e, byId) {
   const ho = goRight ? 50 : -50; // horizontal control-handle direction
   const sy = s.y + s.h / 2, dy = d.y + d.h / 2;
   const c1 = sx + ho, c2 = dx - ho;
+  // Anti-parallel pair (both A->B and B->A exist): bow each curve to the opposite side and
+  // push its label there too, so the two lines and their rate labels don't sit on top of
+  // each other. e._anti is +1/-1 for the two directions, 0 otherwise (set in drawFlow).
+  const off = (e && e._anti ? e._anti : 0) * 16;
+  const c1y = sy + off, c2y = dy + off;
   // Place the label at parameter t along the cubic bezier (control points carry the
-  // horizontal handles). Default mid-curve; drawFlow staggers t to de-clutter.
+  // horizontal handles + the anti-parallel vertical bow). drawFlow staggers t to de-clutter.
   const t = (e && e._lt != null) ? e._lt : 0.5, mt = 1 - t;
   const lx = mt * mt * mt * sx + 3 * mt * mt * t * c1 + 3 * mt * t * t * c2 + t * t * t * dx;
-  const ly = mt * mt * mt * sy + 3 * mt * mt * t * sy + 3 * mt * t * t * dy + t * t * t * dy;
-  return { d: `M ${sx} ${sy} C ${c1} ${sy} ${c2} ${dy} ${dx} ${dy}`, lx, ly: ly - 5 };
+  const ly = mt * mt * mt * sy + 3 * mt * mt * t * c1y + 3 * mt * t * t * c2y + t * t * t * dy;
+  return { d: `M ${sx} ${sy} C ${c1} ${c1y} ${c2} ${c2y} ${dx} ${dy}`, lx, ly: ly - 5 };
 }
 
 function drawFlow(flow) {
@@ -1232,12 +1261,32 @@ function drawFlow(flow) {
   root.appendChild(gEdges); root.appendChild(gNodes);
   svg.appendChild(root);
 
+  // Arrowhead marker: a small triangle at each edge's end, pointing into the target node
+  // so flow direction is unambiguous. userSpaceOnUse so it scales with the graph (zoom),
+  // not with stroke width. orient=auto aligns it with the curve's end tangent.
+  const defs = document.createElementNS(SVGNS, 'defs');
+  const marker = document.createElementNS(SVGNS, 'marker');
+  marker.setAttribute('id', 'flowArrow');
+  marker.setAttribute('viewBox', '0 0 10 10');
+  marker.setAttribute('refX', '10'); marker.setAttribute('refY', '5');
+  marker.setAttribute('markerWidth', '7'); marker.setAttribute('markerHeight', '7');
+  marker.setAttribute('markerUnits', 'userSpaceOnUse'); marker.setAttribute('orient', 'auto');
+  const av = document.createElementNS(SVGNS, 'path');
+  av.setAttribute('d', 'M0,0 L10,5 L0,10 z'); av.setAttribute('class', 'flow-arrow');
+  marker.appendChild(av); defs.appendChild(marker); svg.insertBefore(defs, root);
+
+  // Flag anti-parallel pairs (both A->B and B->A present) so edgePath splits them apart.
+  const pk = (a, b) => a + ' ' + b;
+  const eset = new Set(flow.edges.map((e) => pk(e.src, e.dst)));
+  flow.edges.forEach((e) => { e._anti = eset.has(pk(e.dst, e.src)) ? (e.src < e.dst ? 1 : -1) : 0; });
+
   flow.edges.forEach((e, i) => {
     e._lt = EDGE_LABEL_TS[i % EDGE_LABEL_TS.length]; // stagger label along the curve
     const p = edgePath(e, flow.byId);
     const path = document.createElementNS(SVGNS, 'path');
     path.setAttribute('class', 'edge-path');
     path.setAttribute('d', p.d);
+    path.setAttribute('marker-end', 'url(#flowArrow)');
     gEdges.appendChild(path);
     const t = document.createElementNS(SVGNS, 'text');
     t.setAttribute('class', 'edge-label');
@@ -1812,18 +1861,19 @@ function relAge(ms) {
   const h = m / 60; if (h < 36) return Math.round(h) + 'h ago';
   return Math.round(h / 24) + 'd ago';
 }
-function loadMapFromSave() {
-  const sel = $('mapSaveSelect'), st = $('mapStatus');
-  if (!sel || !sel.value) { if (st) st.textContent = 'No save selected.'; return; }
-  st.classList.remove('warn-text'); st.textContent = 'Parsing save…';
-  const file = sel.value;
+// Parse a specific save and rebuild the map overlay. silent=true (auto-newest-save path)
+// drops the "Parsing…"/error chrome so a background reload doesn't flash the UI.
+function loadMapFrom(file, silent) {
+  const st = $('mapStatus');
+  if (!file) { if (st && !silent) st.textContent = 'No save selected.'; return; }
+  if (st && !silent) { st.classList.remove('warn-text'); st.textContent = 'Parsing save…'; }
   state.saveFile = file; save(); // remember across sessions
   // Defer so "Parsing…" paints before the synchronous parse blocks the thread.
   setTimeout(() => {
     let res;
     try { res = SAVE.readMap(file); }
     catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
-    if (!res.ok) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); return; }
+    if (!res.ok) { if (st && !silent) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); } return; }
     mapNodes = res.nodes; mapResOn = null;
     mapBuildings = annotateBuildings(res.buildings || []); mapCatOn = null;
     mapCollectables = res.collectables || [];
@@ -1837,12 +1887,16 @@ function loadMapFromSave() {
     // save) is obvious — reload after saving in-game to refresh it.
     const age = relAge(res.savedAt);
     const orphans = res.orphansHidden || 0;
-    st.textContent = `${res.saveName}: ${nc.node || 0} nodes · ${nc.geyser || 0} geysers · ${nc.frackingCore || 0} wells · ${bt} buildings · ${ct} collectables`
+    if (st) st.textContent = `${res.saveName}: ${nc.node || 0} nodes · ${nc.geyser || 0} geysers · ${nc.frackingCore || 0} wells · ${bt} buildings · ${ct} collectables`
       + (orphans ? ` · ${orphans} dismantled hidden` : '')
       + (age ? ` · saved ${age}` : '');
     $('mapEmpty').hidden = true;
     ensureMapImg(); fitMapView(); drawMap();
   }, 20);
+}
+function loadMapFromSave() {
+  const sel = $('mapSaveSelect');
+  loadMapFrom(sel && sel.value, false);
 }
 
 function mapTipHtml(n) {
@@ -2005,7 +2059,7 @@ function flowExportCss() {
   const accent = cssVar('--accent') || '#f9a825';
   const good = cssVar('--good') || '#66bb6a';
   return (
-    '.edge-path{fill:none;stroke:#4b566c;stroke-width:1.5}' +
+    '.edge-path{fill:none;stroke:#4b566c;stroke-width:1.5}.flow-arrow{fill:#4b566c}' +
     `.edge-label{fill:${muted};font:11px "Segoe UI",system-ui,sans-serif;paint-order:stroke;stroke:#11141a;stroke-width:4px}` +
     '.node rect{stroke-width:1.5}' +
     `.node.raw rect{fill:#2b313c;stroke:#5b6675}.node.machine rect{fill:#3a2a12;stroke:${accent}}.node.out rect{fill:#15361f;stroke:${good}}` +
@@ -2637,20 +2691,19 @@ function setAllBld(on) {
   renderBldList();
   solveAndRender();
 }
-function loadFromSelectedSave() {
-  const sel = $('saveSelect');
+// Parse a specific save for its unlocked alternates and apply them. silent=true (the
+// auto-newest-save path) skips the "Parsing…"/error chrome so a background reload is quiet.
+function loadAlternatesFrom(file, silent) {
+  if (!file) return;
   const st = $('saveStatus');
-  if (!sel || !sel.value) return;
-  st.classList.remove('warn-text');
-  st.textContent = 'Parsing save…';
-  const file = sel.value;
+  if (st && !silent) { st.classList.remove('warn-text'); st.textContent = 'Parsing save…'; }
   state.saveFile = file; save(); // remember across sessions
   // Defer so "Parsing…" paints before the synchronous parse blocks the thread.
   setTimeout(() => {
     let res;
     try { res = SAVE.readUnlockedAlternates(file); }
     catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
-    if (!res.ok) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); return; }
+    if (!res.ok) { if (st && !silent) { st.textContent = '⚠ ' + res.error; st.classList.add('warn-text'); } return; }
     state.unlockedAlts = res.recognized.map((r) => r.className);
     state.saveName = res.saveName || '';
     for (const item in state.picks) {
@@ -2659,11 +2712,26 @@ function loadFromSelectedSave() {
     }
     save();
     renderSaveStatus();
-    if (res.unknown && res.unknown.length) {
-      st.textContent += ` (+${res.unknown.length} not in app data)`;
-    }
+    if (!silent && st && res.unknown && res.unknown.length) st.textContent += ` (+${res.unknown.length} not in app data)`;
     solveAndRender();
   }, 20);
+}
+function loadFromSelectedSave() {
+  const sel = $('saveSelect');
+  loadAlternatesFrom(sel && sel.value, false);
+}
+// Auto-load on a fresh save (main process watches the folder and pushes the newest one):
+// follow it, re-read alternates, and refresh the map if one was already loaded. Guarded by
+// the Auto-load toggle and de-duped on (file, mtime) so a burst of writes acts once.
+let _autoSaveFile = '', _autoSaveMtime = 0;
+function onNewestSave(info) {
+  if (!info || !info.file || state.autoSave === false) return;
+  if (info.file === _autoSaveFile && info.mtimeMs === _autoSaveMtime) return;
+  _autoSaveFile = info.file; _autoSaveMtime = info.mtimeMs || 0;
+  state.saveFile = info.file; save();
+  buildSaveList(); // surface the new file in both pickers and re-select it
+  loadAlternatesFrom(info.file, true);
+  if (mapNodes.length || mapBuildings.length) loadMapFrom(info.file, true); // keep a loaded map fresh
 }
 function clearUnlockedFilter() {
   state.unlockedAlts = null;
@@ -2902,6 +2970,7 @@ function applyStateToControls() {
   $('targetDest').value = normDest(state.targetDest);
   $('clock').value = Math.round(state.clock * 100);
   $('cleanRatio').checked = !!state.cleanRatio;
+  if ($('autoSave')) $('autoSave').checked = state.autoSave !== false;
   $('rateUnit').textContent = state.targetItem && isFluid(state.targetItem) ? 'm³ / min' : '/ min';
   syncSliderLabels();
   $('optObjective').value = state.opt.objective;
@@ -3000,6 +3069,7 @@ function init() {
   $('saveLoad').addEventListener('click', loadFromSelectedSave);
   $('saveRefresh').addEventListener('click', buildSaveList);
   $('saveClear').addEventListener('click', clearUnlockedFilter);
+  $('autoSave').addEventListener('change', (e) => { state.autoSave = e.target.checked; save(); });
   // Picking a save in either dropdown updates the other + is remembered.
   $('saveSelect').addEventListener('change', (e) => selectSaveFile(e.target.value));
   $('mapSaveSelect').addEventListener('change', (e) => selectSaveFile(e.target.value));
