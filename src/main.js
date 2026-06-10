@@ -29,12 +29,47 @@ app.on('second-instance', () => {
 function plansPath() {
   return path.join(app.getPath('userData'), 'plans.json');
 }
+function backupPath() {
+  return path.join(app.getPath('userData'), 'plans.backup.json');
+}
+// Short blocking sleep for the boot-time retries below. sendSync already blocks the
+// renderer, so pausing the main thread here is fine and keeps the logic synchronous.
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch (_) {}
+}
 // Synchronous load (renderer calls this once at boot via sendSync); returns the raw
-// JSON string or null when the file is absent/unreadable.
+// JSON string or null only when the file genuinely does not exist. A transient
+// EBUSY/EPERM (AV / search indexer holding the file right at boot — observed in the
+// wild: a valid 8-plan plans.json on disk, yet the app booted into the blank-plan
+// fallback) must NOT read as "no plans": retry briefly, then fall back to the
+// boot-time backup copy.
 ipcMain.on('plans:load', (e) => {
-  try { e.returnValue = fs.readFileSync(plansPath(), 'utf8'); }
+  const p = plansPath();
+  for (let i = 0; i < 8; i++) {
+    try { e.returnValue = fs.readFileSync(p, 'utf8'); return; }
+    catch (err) {
+      if (err && err.code === 'ENOENT') { e.returnValue = null; return; } // real first run
+      sleepSync(125);
+    }
+  }
+  try { e.returnValue = fs.readFileSync(backupPath(), 'utf8'); }
   catch (_) { e.returnValue = null; }
 });
+// Last line of defense at the file gate: never replace a multi-plan store with a
+// fresh blank one. If a boot ever falls back to the default empty "Factory 1"
+// (store unreadable for a moment), anything saved from that session would wipe
+// real data — refuse exactly that shape: one untouched default plan over an
+// existing file holding more.
+function wouldClobber(json) {
+  try {
+    const inc = JSON.parse(json);
+    if (!inc || !Array.isArray(inc.plans) || inc.plans.length !== 1) return false;
+    const st = inc.plans[0].state || {};
+    if (st.targetItem) return false; // real work, not the blank fallback plan
+    const cur = JSON.parse(fs.readFileSync(plansPath(), 'utf8'));
+    return Array.isArray(cur.plans) && cur.plans.length > 1;
+  } catch (_) { return false; } // unreadable/absent current file — allow the save
+}
 // Asynchronous, fire-and-forget save (renderer calls on change, debounced). Write to
 // a temp file then rename, so a crash mid-write can never leave a truncated
 // plans.json. Writes are SERIALIZED through a promise chain: overlapping saves used
@@ -42,7 +77,7 @@ ipcMain.on('plans:load', (e) => {
 // Windows while the other writer held it open) and failures were silently dropped.
 let saveChain = Promise.resolve();
 ipcMain.on('plans:save', (_e, json) => {
-  if (typeof json !== 'string') return;
+  if (typeof json !== 'string' || wouldClobber(json)) return;
   saveChain = saveChain.then(() => new Promise((done) => {
     try {
       const p = plansPath();
@@ -60,7 +95,7 @@ ipcMain.on('plans:save', (_e, json) => {
 // until the bytes are on disk.
 ipcMain.on('plans:save-sync', (e, json) => {
   try {
-    if (typeof json !== 'string') { e.returnValue = false; return; }
+    if (typeof json !== 'string' || wouldClobber(json)) { e.returnValue = false; return; }
     const p = plansPath();
     const tmp = p + '.tmp-quit';
     fs.writeFileSync(tmp, json);
@@ -202,8 +237,15 @@ function createWindow() {
 app.whenReady().then(() => {
   // One-generation recovery copy: whatever plans.json held BEFORE this session
   // survives in plans.backup.json even if this session clobbers the live file.
-  try { fs.copyFileSync(plansPath(), path.join(app.getPath('userData'), 'plans.backup.json')); }
-  catch (_) { /* no plans.json yet (first run) */ }
+  // Retried like plans:load — the same boot-time AV/indexer hold that blocked a
+  // read also silently skipped this copy.
+  for (let i = 0; i < 8; i++) {
+    try { fs.copyFileSync(plansPath(), backupPath()); break; }
+    catch (err) {
+      if (err && err.code === 'ENOENT') break; // no plans.json yet (first run)
+      sleepSync(125);
+    }
+  }
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -529,7 +529,14 @@ function load() {
     const tryParse = (s) => { try { return s ? JSON.parse(s) : null; } catch (_) { return null; } };
     const pf = tryParse((api && api.loadPlans) ? api.loadPlans() : null);
     const pl = tryParse(localStorage.getItem(PLANS_KEY));
-    const raw = (pf && pl) ? (((pl.savedAt || 0) > (pf.savedAt || 0)) ? pl : pf) : (pf || pl);
+    let raw = (pf && pl) ? (((pl.savedAt || 0) > (pf.savedAt || 0)) ? pl : pf) : (pf || pl);
+    // A fresher single-blank store never outvotes a multi-plan one: a session that
+    // booted off the blank fallback (its store was unreadable at boot) stamps a
+    // newer savedAt into localStorage on its first edit — don't let that ghost
+    // beat the real plan set on the next boot.
+    const blankish = (x) => x && Array.isArray(x.plans) && x.plans.length === 1 && !((x.plans[0].state || {}).targetItem);
+    const other = raw === pf ? pl : pf;
+    if (blankish(raw) && other && Array.isArray(other.plans) && other.plans.length > 1) raw = other;
     fromFile = raw === pf && !!pf;
     if (raw && Array.isArray(raw.plans) && raw.plans.length) {
       // Keep each plan's saved projectId if present; ensureProjects() reconciles it

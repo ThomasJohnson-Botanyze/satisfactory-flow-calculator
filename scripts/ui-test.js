@@ -1040,5 +1040,59 @@ console.log('\n### MULTI-FACTORY: BOTTLENECK (OVER-SUBSCRIBED SOURCE)');
   check('a bottleneck edge is drawn in red', [...d.querySelectorAll('#depSvg path')].some((pt) => (pt.getAttribute('stroke') || '').includes('ff5b5b')));
 }
 
+// ---- Blank-store guard: a session that boots off the blank fallback (its plans.json
+// read failed transiently) stamps a NEWER savedAt single-blank store into localStorage.
+// On the next boot that ghost must not outvote the real multi-plan file. ----
+console.log('\n### BLANK-STORE GUARD (transient read failure)');
+{
+  const filePayload = JSON.stringify({
+    plans: [
+      { id: 'pA', name: 'Motors', state: { targetItem: cls('Motor'), targetRate: 10 } },
+      { id: 'pB', name: 'Turbofuel', state: { targetItem: cls('Iron Plate'), targetRate: 20 } },
+    ],
+    activeId: 'pA',
+    savedAt: 1000,
+  });
+  const blankPayload = JSON.stringify({
+    plans: [{ id: 'pX', name: 'Factory 1', state: { targetItem: '', targetRate: 60 } }],
+    activeId: 'pX',
+    savedAt: 2000, // fresher than the file — must still lose
+  });
+  const domG = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+  global.window = domG.window; global.document = domG.window.document; global.localStorage = domG.window.localStorage;
+  global.location = domG.window.location; global.Event = domG.window.Event;
+  if (!domG.window.SVGElement.prototype.setPointerCapture) domG.window.SVGElement.prototype.setPointerCapture = () => {};
+  domG.window.localStorage.setItem('satisfactory-factory-plans-v1', blankPayload);
+  domG.window.api = { loadPlans: () => filePayload, savePlans: () => {} };
+  delete require.cache[require.resolve('../src/renderer.js')];
+  require('../src/renderer.js');
+  domG.window.dispatchEvent(new domG.window.Event('DOMContentLoaded'));
+  const namesG = [...domG.window.document.querySelectorAll('#planTabs .plan-tab .plan-name')].map((s) => s.textContent);
+  check('fresher single-blank localStorage loses to the multi-plan file', namesG.length === 2);
+  check('real plan names restored', JSON.stringify(namesG) === JSON.stringify(['Motors', 'Turbofuel']));
+
+  // Control: a fresher localStorage with REAL plans still wins (the original rule).
+  const richLs = JSON.stringify({
+    plans: [
+      { id: 'pC', name: 'Edited', state: { targetItem: cls('Iron Plate'), targetRate: 5 } },
+      { id: 'pD', name: 'Second', state: { targetItem: cls('Iron Rod'), targetRate: 5 } },
+      { id: 'pE', name: 'Third', state: { targetItem: cls('Screw'), targetRate: 5 } },
+    ],
+    activeId: 'pC',
+    savedAt: 3000,
+  });
+  const domH = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+  global.window = domH.window; global.document = domH.window.document; global.localStorage = domH.window.localStorage;
+  global.location = domH.window.location; global.Event = domH.window.Event;
+  if (!domH.window.SVGElement.prototype.setPointerCapture) domH.window.SVGElement.prototype.setPointerCapture = () => {};
+  domH.window.localStorage.setItem('satisfactory-factory-plans-v1', richLs);
+  domH.window.api = { loadPlans: () => filePayload, savePlans: () => {} };
+  delete require.cache[require.resolve('../src/renderer.js')];
+  require('../src/renderer.js');
+  domH.window.dispatchEvent(new domH.window.Event('DOMContentLoaded'));
+  const namesH = [...domH.window.document.querySelectorAll('#planTabs .plan-tab .plan-name')].map((s) => s.textContent);
+  check('fresher multi-plan localStorage still wins', JSON.stringify(namesH) === JSON.stringify(['Edited', 'Second', 'Third']));
+}
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);
