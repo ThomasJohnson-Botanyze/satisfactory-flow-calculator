@@ -3,6 +3,23 @@ const path = require('path');
 const fs = require('fs');
 const SAVE = require('./save-reader');
 
+// Single instance only. Two live instances share one userData dir, which churns
+// Chromium's leveldb (observed: the Local Storage store reset to a fresh MANIFEST
+// after concurrent launches) — and the portable build re-extracts into the SAME
+// deterministic temp dir, racing a running copy's files mid-boot. A second launch
+// just focuses the existing window instead.
+let mainWin = null;
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  return;
+}
+app.on('second-instance', () => {
+  if (mainWin && !mainWin.isDestroyed()) {
+    if (mainWin.isMinimized()) mainWin.restore();
+    mainWin.focus();
+  }
+});
+
 // ---------- durable plan storage ----------
 // Plans used to live only in the renderer's localStorage. On file:// pages Chromium
 // can reset that store on repackage/relaunch (the Local Storage leveldb gets a fresh
@@ -115,7 +132,7 @@ function startSaveWatcher(win) {
 }
 
 function createWindow() {
-  const win = new BrowserWindow({
+  const win = mainWin = new BrowserWindow({
     width: 1440,
     height: 940,
     minWidth: 980,
@@ -171,6 +188,10 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // One-generation recovery copy: whatever plans.json held BEFORE this session
+  // survives in plans.backup.json even if this session clobbers the live file.
+  try { fs.copyFileSync(plansPath(), path.join(app.getPath('userData'), 'plans.backup.json')); }
+  catch (_) { /* no plans.json yet (first run) */ }
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
