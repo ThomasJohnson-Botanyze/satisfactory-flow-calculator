@@ -138,6 +138,12 @@ function createWindow() {
     minWidth: 980,
     minHeight: 640,
     backgroundColor: '#15171c',
+    // Don't show until first paint. index.html loads renderer.bundle.js with a
+    // synchronous end-of-body <script>, so first paint comes AFTER the plan bar
+    // is populated — on a cold portable start (temp extraction + AV scan) the
+    // window otherwise sits visible for seconds showing the static shell with
+    // an empty plan bar, which reads as "my factories are gone".
+    show: false,
     title: 'Satisfactory Flow Calculator',
     icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
@@ -182,6 +188,7 @@ function createWindow() {
     if (url !== win.webContents.getURL()) e.preventDefault();
   });
 
+  win.once('ready-to-show', () => win.show());
   win.loadFile(path.join(__dirname, 'index.html'));
   // Check for a newer release once the page is live and its IPC listener is up.
   win.webContents.once('did-finish-load', () => { checkForUpdate(win); startSaveWatcher(win); });
