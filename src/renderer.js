@@ -537,6 +537,28 @@ function load() {
     const blankish = (x) => x && Array.isArray(x.plans) && x.plans.length === 1 && !((x.plans[0].state || {}).targetItem);
     const other = raw === pf ? pl : pf;
     if (blankish(raw) && other && Array.isArray(other.plans) && other.plans.length > 1) raw = other;
+    // Ghost-divergence merge: a session that booted off the blank fallback diverges
+    // localStorage from plans.json, and a real edit in it (savedAt freshness) makes
+    // the fresh ghost WIN and silently drop every other factory. The ghost signature
+    // is a DISJOINT plan-id set — the chosen store did not evolve from the other
+    // (every normal session keeps both stores on the same id lineage; a legit
+    // delete-then-quick-quit leaves OVERLAPPING sets one save apart, where freshness
+    // must keep ruling so deleted plans stay deleted). On disjoint lineages, union
+    // the other store's plans in rather than discarding them; the untouched blank
+    // fallback plan itself ("Factory N", no target) stays dead.
+    let mergedGhost = false;
+    const donor = raw === pf ? pl : pf;
+    if (raw && donor && Array.isArray(raw.plans) && Array.isArray(donor.plans) && donor.plans.length) {
+      const have = new Set(raw.plans.map((p) => p && p.id));
+      const disjoint = !donor.plans.some((p) => p && have.has(p.id));
+      if (disjoint) {
+        for (const p of donor.plans) {
+          if (!p || !p.id || have.has(p.id)) continue;
+          if (!((p.state || {}).targetItem) && /^Factory \d+$/.test(p.name || '')) continue;
+          raw.plans.push(p); have.add(p.id); mergedGhost = true;
+        }
+      }
+    }
     fromFile = raw === pf && !!pf;
     if (raw && Array.isArray(raw.plans) && raw.plans.length) {
       // Keep each plan's saved projectId if present; ensureProjects() reconciles it
@@ -549,7 +571,7 @@ function load() {
       // active plan's values (first run after upgrade) and propagate to the rest.
       if (raw.globals) for (const p of plans) applyGlobals(p.state, raw.globals);
       else syncGlobals();
-      if (!fromFile || !Array.isArray(raw.projects)) save(); // seed the durable file / persist the synthesized project
+      if (!fromFile || !Array.isArray(raw.projects) || mergedGhost) save(); // seed the durable file / persist the synthesized project / persist a ghost merge
       return;
     }
   } catch (e) {}

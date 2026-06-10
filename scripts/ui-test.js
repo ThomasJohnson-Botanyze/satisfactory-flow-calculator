@@ -1071,14 +1071,16 @@ console.log('\n### BLANK-STORE GUARD (transient read failure)');
   check('fresher single-blank localStorage loses to the multi-plan file', namesG.length === 2);
   check('real plan names restored', JSON.stringify(namesG) === JSON.stringify(['Motors', 'Turbofuel']));
 
-  // Control: a fresher localStorage with REAL plans still wins (the original rule).
+  // Control: a fresher localStorage on the SAME id lineage still wins outright (the
+  // quit-race rule) — here it renamed pA, kept pB, added pC, and a merge must NOT
+  // resurrect anything (overlapping ids = same lineage, freshness decides).
   const richLs = JSON.stringify({
     plans: [
-      { id: 'pC', name: 'Edited', state: { targetItem: cls('Iron Plate'), targetRate: 5 } },
-      { id: 'pD', name: 'Second', state: { targetItem: cls('Iron Rod'), targetRate: 5 } },
-      { id: 'pE', name: 'Third', state: { targetItem: cls('Screw'), targetRate: 5 } },
+      { id: 'pA', name: 'Edited', state: { targetItem: cls('Iron Plate'), targetRate: 5 } },
+      { id: 'pB', name: 'Second', state: { targetItem: cls('Iron Rod'), targetRate: 5 } },
+      { id: 'pC', name: 'Third', state: { targetItem: cls('Screw'), targetRate: 5 } },
     ],
-    activeId: 'pC',
+    activeId: 'pA',
     savedAt: 3000,
   });
   const domH = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
@@ -1092,6 +1094,48 @@ console.log('\n### BLANK-STORE GUARD (transient read failure)');
   domH.window.dispatchEvent(new domH.window.Event('DOMContentLoaded'));
   const namesH = [...domH.window.document.querySelectorAll('#planTabs .plan-tab .plan-name')].map((s) => s.textContent);
   check('fresher multi-plan localStorage still wins', JSON.stringify(namesH) === JSON.stringify(['Edited', 'Second', 'Third']));
+
+  // Delete-then-quick-quit race: ls is one save ahead (pB deleted), file still has pB.
+  // Same lineage (pA overlaps) — freshness must rule and pB must STAY deleted.
+  const afterDelete = JSON.stringify({
+    plans: [{ id: 'pA', name: 'Motors', state: { targetItem: cls('Motor'), targetRate: 10 } }],
+    activeId: 'pA',
+    savedAt: 4000,
+  });
+  const domJ = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+  global.window = domJ.window; global.document = domJ.window.document; global.localStorage = domJ.window.localStorage;
+  global.location = domJ.window.location; global.Event = domJ.window.Event;
+  if (!domJ.window.SVGElement.prototype.setPointerCapture) domJ.window.SVGElement.prototype.setPointerCapture = () => {};
+  domJ.window.localStorage.setItem('satisfactory-factory-plans-v1', afterDelete);
+  domJ.window.api = { loadPlans: () => filePayload, savePlans: () => {} };
+  delete require.cache[require.resolve('../src/renderer.js')];
+  require('../src/renderer.js');
+  domJ.window.dispatchEvent(new domJ.window.Event('DOMContentLoaded'));
+  const namesJ = [...domJ.window.document.querySelectorAll('#planTabs .plan-tab .plan-name')].map((s) => s.textContent);
+  check('deleted plan stays deleted (overlapping lineage, no resurrection)', JSON.stringify(namesJ) === JSON.stringify(['Motors']));
+
+  // Ghost with REAL work: the user typed a target into the blank-fallback session, so
+  // the fresher 1-plan store is legitimate work — it must win the active slot, but the
+  // multi-plan file's factories must be MERGED in, not discarded.
+  const ghostEdited = JSON.stringify({
+    plans: [{ id: 'pGhost', name: 'Factory 1', state: { targetItem: cls('Iron Plate'), targetRate: 30 } }],
+    activeId: 'pGhost',
+    savedAt: 5000, // freshest
+  });
+  let savedUnion = null;
+  const domI = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+  global.window = domI.window; global.document = domI.window.document; global.localStorage = domI.window.localStorage;
+  global.location = domI.window.location; global.Event = domI.window.Event;
+  if (!domI.window.SVGElement.prototype.setPointerCapture) domI.window.SVGElement.prototype.setPointerCapture = () => {};
+  domI.window.localStorage.setItem('satisfactory-factory-plans-v1', ghostEdited);
+  domI.window.api = { loadPlans: () => filePayload, savePlans: (j) => { savedUnion = j; } };
+  delete require.cache[require.resolve('../src/renderer.js')];
+  require('../src/renderer.js');
+  domI.window.dispatchEvent(new domI.window.Event('DOMContentLoaded'));
+  const namesI = [...domI.window.document.querySelectorAll('#planTabs .plan-tab .plan-name')].map((s) => s.textContent);
+  check('edited ghost keeps its plan AND the file plans merge back in', namesI.length === 3 && namesI.includes('Motors') && namesI.includes('Turbofuel') && namesI.includes('Factory 1'));
+  const unionParsed = (() => { try { return JSON.parse(savedUnion || domI.window.localStorage.getItem('satisfactory-factory-plans-v1')); } catch (_) { return null; } })();
+  check('merged union persisted (3 plans saved)', !!unionParsed && unionParsed.plans.length === 3);
 }
 
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
