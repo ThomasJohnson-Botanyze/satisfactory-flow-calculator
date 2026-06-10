@@ -188,10 +188,15 @@ function createWindow() {
     if (url !== win.webContents.getURL()) e.preventDefault();
   });
 
-  win.once('ready-to-show', () => win.show());
   win.loadFile(path.join(__dirname, 'index.html'));
+  // Show only once the page fully loaded — ready-to-show can fire on a paint of the
+  // static shell BEFORE the end-of-body bundle has run (observed via CDP: the shell
+  // DOM exists with an empty plan bar pre-bundle); did-finish-load can't. The timer
+  // is a safety net so a stalled load never leaves the app windowless.
+  const reveal = () => { if (!win.isDestroyed() && !win.isVisible()) win.show(); };
+  setTimeout(reveal, 4000);
   // Check for a newer release once the page is live and its IPC listener is up.
-  win.webContents.once('did-finish-load', () => { checkForUpdate(win); startSaveWatcher(win); });
+  win.webContents.once('did-finish-load', () => { reveal(); checkForUpdate(win); startSaveWatcher(win); });
 }
 
 app.whenReady().then(() => {
