@@ -901,7 +901,7 @@ function applyCleanScale(res, targets) {
   mul(res.watered, 'rate', 'concrete', 'limestone', 'machines');
   if (typeof res.totalPower === 'number') res.totalPower *= scale;
   if (typeof res.recoveredPower === 'number') res.recoveredPower *= scale;
-  if (typeof res.objectiveValue === 'number') res.objectiveValue *= scale;
+  if (typeof res.objectiveValue === 'number' && res.objective !== 'recipes') res.objectiveValue *= scale; // a recipe COUNT doesn't scale with rates
   // Snap tiny float drift so ceil()/labels show exact integers.
   res.recipes.forEach((r) => { const rd = Math.round(r.machines); if (Math.abs(r.machines - rd) < 1e-4) r.machines = rd; });
   res.totalMachines = res.recipes.reduce((a, r) => a + Math.ceil(r.machines - 1e-9), 0);
@@ -3303,7 +3303,7 @@ function renderOptimize() {
   present(res, outputs);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
 
-  const labels = { raw: 'raw resources /min', power: 'MW', machines: 'machines' };
+  const labels = { raw: 'raw resources /min', power: 'MW', machines: 'machines', recipes: 'distinct recipes (build steps)' };
   const ex = el('div', 'extras-card');
   ex.appendChild(el('div', 'extras-title', '✓ Optimized recipe selection'));
   const alts = res.recipes.filter((x) => RECIPES[x.rc].alternate).length;

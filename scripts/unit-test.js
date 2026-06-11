@@ -31,6 +31,39 @@ const oreRaw = opt.raw.find((r) => r.item === IronOre);
 check('raw list reports iron ore', !!oreRaw && near(oreRaw.rate, 30, 0.5));
 check('no alternates chosen (alts off)', opt.recipes.every((r) => !DATA.recipes[r.rc].alternate));
 
+// ---- Fewest-recipes objective: minimize DISTINCT recipes (build steps) ----
+console.log('\n### FEWEST RECIPES OBJECTIVE');
+{
+  const RIP = cls('Reinforced Iron Plate');
+  const base = { outputs: { [RIP]: 30 }, allowedInputs: { [IronOre]: Infinity }, allowAlternates: true };
+  const byMachines = LP.optimize(Object.assign({}, base, { objective: 'machines' }));
+  const byRecipes = LP.optimize(Object.assign({}, base, { objective: 'recipes' }));
+  check('recipes objective feasible', byRecipes.feasible === true);
+  check('objective reported as recipes', byRecipes.objective === 'recipes');
+  check('objectiveValue == distinct recipe count', byRecipes.objectiveValue === byRecipes.recipes.length);
+  check('never more recipes than the machines plan', byMachines.feasible && byRecipes.recipes.length <= byMachines.recipes.length);
+  const ripOut = byRecipes.outputs.find((o) => o.item === RIP);
+  check('target rate still met (~30/min)', !!ripOut && near(ripOut.rate, 30, 0.1));
+  check('every step carries real machine load', byRecipes.recipes.every((r) => r.machines > 1e-6));
+
+  // Locally minimal: blocking ANY used recipe must not allow an equal-or-smaller plan
+  // (greedy stops only when no single removal helps).
+  const minimal = byRecipes.recipes.every((r) => {
+    const probe = LP.optimize(Object.assign({}, base, { objective: 'recipes', blockedRecipes: new Set([r.rc]) }));
+    return !probe.feasible || probe.recipes.length >= byRecipes.recipes.length;
+  });
+  check('locally minimal (no single recipe is droppable)', minimal);
+
+  // Simple chain collapses to the obvious 2 steps: ore -> ingot -> plate.
+  const simple = LP.optimize({ outputs: { [IronPlate]: 20 }, allowedInputs: { [IronOre]: Infinity }, objective: 'recipes', allowAlternates: false });
+  check('simple chain = exactly 2 recipes (ingot + plate)', simple.feasible && simple.recipes.length === 2);
+
+  // Infeasible demand stays infeasible (no producer for the item).
+  const blockedAll = new Set(Object.keys(DATA.recipes).filter((rc) => DATA.recipes[rc].products.some((p) => p.item === IronIngot)));
+  const inf = LP.optimize({ outputs: { [IronIngot]: 10 }, allowedInputs: {}, objective: 'recipes', allowAlternates: true, blockedRecipes: blockedAll });
+  check('blocked sole producers stay infeasible', inf.feasible === false);
+}
+
 // Planner: 20 Iron Plate/min via standard ingot+plate recipes -> 30 ore, 2 machines.
 const plan = LP.planner({ targets: { [IronPlate]: 20 }, recipes: [primStd(IronIngot), primStd(IronPlate)], rawItems: [] });
 check('planner feasible', plan.feasible === true);

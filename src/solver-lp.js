@@ -300,6 +300,9 @@ function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
 }
 
 function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, sloopMult = null }) {
+  if (objective === 'recipes') {
+    return optimizeFewestRecipes({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+  }
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
   const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
@@ -337,6 +340,42 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   // EPS_ACTIVITY tie-break added in buildModel).
   sum.objectiveValue = objective === 'raw' ? sum.rawTotal : objective === 'power' ? sum.totalPower : sum.fracMachines;
   return sum;
+}
+
+// "Fewest recipes" objective: minimize the NUMBER OF DISTINCT RECIPES (build steps),
+// not a linear rate — true cardinality minimization is a MILP (one binary per recipe),
+// far too slow for the embedded simplex solver. Greedy elimination instead: start from
+// the fewest-machines plan, then repeatedly try BLOCKING one currently-used recipe and
+// re-solving; keep any block that strictly shrinks the distinct-recipe count, restart
+// until no single block helps. Locally minimal (no one recipe can be dropped), runs in
+// at most a few dozen LP solves, and ties (same count) resolve toward fewer machines
+// because that stays the inner objective.
+function optimizeFewestRecipes(params) {
+  const inner = Object.assign({}, params, { objective: 'machines' });
+  const finish = (sum) => { sum.objective = 'recipes'; if (sum.feasible) sum.objectiveValue = sum.recipes.length; return sum; };
+  let best = optimize(inner);
+  if (!best.feasible) return finish(best);
+  const blocked = new Set(params.blockedRecipes ? [...params.blockedRecipes] : []);
+  let budget = 160; // hard cap on probe solves — keeps worst-case latency bounded
+  let progress = true;
+  while (progress && budget > 0) {
+    progress = false;
+    // Probe cheapest-contribution recipes first: a sliver of a machine is the most
+    // likely candidate to be replaceable by the recipes already in the plan.
+    const used = best.recipes.slice().sort((a, b) => a.machines - b.machines);
+    for (const cand of used) {
+      if (budget-- <= 0) break;
+      const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
+      const probe = optimize(Object.assign({}, inner, { blockedRecipes: tryBlocked }));
+      if (probe.feasible && probe.recipes.length < best.recipes.length) {
+        blocked.add(cand.rc);
+        best = probe;
+        progress = true;
+        break; // plan changed — re-rank the survivors and scan again
+      }
+    }
+  }
+  return finish(best);
 }
 
 function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null }) {
