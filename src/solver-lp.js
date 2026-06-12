@@ -232,21 +232,40 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
 function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
   const recipes = [];
   const net = {};
+  const gross = {}; // Σ production + consumption per item — sets the scale solver noise lives at
   let totalPower = 0;
   let totalMachines = 0;
   let fracMachines = 0; // un-rounded machine-equivalents, for reporting the true objective
   for (const rc of pool) {
-    const m = res[rc];
+    let m = res[rc];
     if (!m || m < 1e-6) continue;
+    // Simplex dust can land a machine count at 42.0000000001, which Math.ceil would
+    // silently inflate to 43 whole machines — snap counts that are within noise of an
+    // integer (the tolerance scales with the count, like the dust does).
+    const mr = Math.round(m);
+    if (Math.abs(m - mr) <= 1e-7 + m * 1e-9) m = mr;
+    if (!m) continue;
     const info = RC_INFO[rc];
     const sl = (sloopMult && sloopMult[rc]) || 1;
     const power = m * info.power * powerMult;
     totalPower += power;
     totalMachines += Math.ceil(m - 1e-9);
     fracMachines += m;
-    for (const it of itemsOf(info)) net[it] = (net[it] || 0) + coefOf(info, it, recipeCost, sl) * m;
+    for (const it of itemsOf(info)) {
+      const o = (info.out[it] || 0) * sl * m;
+      const i = effInnRate(info, it, recipeCost) * m;
+      net[it] = (net[it] || 0) + (o - i);
+      gross[it] = (gross[it] || 0) + o + i;
+    }
     recipes.push({ rc, item: info.primary, machines: m, building: info.building, buildingName: info.buildingName, rate: info.primaryRate * sl * m, power });
   }
+  // Float-noise cutoff for an item's net balance. The simplex residue scales with the
+  // rates flowing through the item (measured: ~2e-10 of gross, e.g. +2.4e-6 Alumina
+  // Solution on a 12,000/min balance), so a fixed absolute cutoff can't work — 1e-6 sat
+  // INSIDE the noise band of big plans and let phantom "0/min" outputs / raw inputs
+  // through. Real flows are never below ~1e-8 of gross (the smallest by-product of even
+  // a 100k/min plan is whole units/min), leaving 4+ orders of margin between the two.
+  const epsOf = (it) => Math.max(1e-6, (gross[it] || 0) * 1e-8);
   // Fold disposal consumption back into the balance so sunk/burned by-products net to
   // zero (not reported as phantom outputs), and tally what left via each channel.
   const sunk = [];
@@ -255,13 +274,13 @@ function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
   if (disposal) {
     for (const s of disposal.sinks) {
       const v = res[s.key];
-      if (!v || v < 1e-6) continue;
+      if (!v || v <= epsOf(s.item)) continue; // noise-sized sink activity: no real by-product behind it
       net[s.item] = (net[s.item] || 0) - v;
       sunk.push({ item: s.item, rate: v, points: v * sinkPointsOf(s.item) });
     }
     for (const g of disposal.gens) {
       const v = res[g.key];
-      if (!v || v < 1e-6) continue;
+      if (!v || v < 1e-6 || v * g.burn <= epsOf(g.fuel)) continue;
       net[g.fuel] = (net[g.fuel] || 0) - v * g.burn;
       const mw = v * g.power;
       recoveredPower += mw;
@@ -275,7 +294,7 @@ function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
   const watered = [];
   if (disposal && disposal.wet) {
     const v = res[disposal.wet.key];
-    if (v && v > 1e-6) {
+    if (v && v > 1e-6 && v * disposal.wet.waterIn > epsOf(WATER)) {
       const w = disposal.wet;
       // summarize rebuilds `net` from each recipe's ORIGINAL water output, so it re-credits
       // the diverted water to net[WATER]; cancel that here (it physically left as Concrete).
@@ -294,9 +313,10 @@ function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
   const outputs = [];
   let rawTotal = 0;
   for (const it in net) {
+    if (Math.abs(net[it]) <= epsOf(it)) { net[it] = 0; continue; } // snap dust to an exact zero
     const v = net[it];
-    if (v > 1e-6 && !RES.has(it)) outputs.push({ item: it, rate: v });
-    else if (v < -1e-6) { raw.push({ item: it, rate: -v }); rawTotal += -v; }
+    if (v > 0 && !RES.has(it)) outputs.push({ item: it, rate: v });
+    else if (v < 0) { raw.push({ item: it, rate: -v }); rawTotal += -v; }
   }
   return { recipes, raw, outputs, net, totalPower, totalMachines, fracMachines, rawTotal, sunk, burned, recoveredPower, watered };
 }

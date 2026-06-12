@@ -1165,7 +1165,18 @@ function tuneSteps(res) {
 // ---------- formatting ----------
 function fmt(n, d = 2) {
   if (!isFinite(n)) return '∞';
-  return (Math.round(n * 10 ** d) / 10 ** d).toLocaleString(undefined, { maximumFractionDigits: d });
+  const v = Math.round(n * 10 ** d) / 10 ** d;
+  // A real flow must never print as "0" (or "-0") just because it sits below the default
+  // 2-decimal grid — widen to the first significant digit instead, up to 6 decimals.
+  // Solver dust is snapped to an exact zero upstream (see summarize), so anything
+  // non-zero that reaches here is meant to be shown.
+  if (v === 0) {
+    if (n === 0 || Math.abs(n) < 5e-7) return '0';
+    let dd = d;
+    while (dd < 6 && Math.round(n * 10 ** dd) === 0) dd++;
+    return n.toLocaleString(undefined, { maximumFractionDigits: dd });
+  }
+  return v.toLocaleString(undefined, { maximumFractionDigits: d });
 }
 const fmtPower = (mw) => (mw >= 1000 ? fmt(mw / 1000, 2) + ' GW' : fmt(mw, 1) + ' MW');
 const $ = (id) => document.getElementById(id);
@@ -1507,6 +1518,7 @@ function buildFlow(res, targets) {
   });
   const addEdge = (srcId, dstId, item, rate) => {
     if (!byId[srcId] || !byId[dstId]) return;
+    if (!(rate > 1e-9)) return; // a zero-rate band/line is never worth drawing
     // item + numeric rate are carried alongside the display label so the Sankey view can
     // size each band by throughput (and colour it by material) without re-parsing the text.
     const e = { src: srcId, dst: dstId, item, rate, label: `${itemName(item)} ${fmt(rate)}/min` };

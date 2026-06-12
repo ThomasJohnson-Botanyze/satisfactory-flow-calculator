@@ -214,6 +214,42 @@ check('planner uses 2 machines total', plan.totalMachines === 2);
 const bad = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: {}, objective: 'raw', allowAlternates: false });
 check('optimize infeasible with no inputs', bad.feasible === false);
 
+// ---- Solver float dust: no phantom "0/min" by-products / raw inputs ----
+// Simplex residue scales with the rates flowing through an item (~2e-10 of gross), so a
+// 6,000/min aluminum plan used to leak net residues of ±1e-6..2.4e-6 past the old absolute
+// 1e-6 cutoff — rendering phantom "Aluminum Scrap 0/min" raw and "Alumina Solution 0/min"
+// output nodes. summarize() now snaps |net| below a gross-relative epsilon to exact zero.
+console.log('\n### SOLVER DUST (phantom 0/min entries)');
+{
+  const allRes = {};
+  for (const r of DATA.resources) allRes[r] = Infinity;
+  const alclad = cls('Alclad Aluminum Sheet'), casing = cls('Aluminum Casing');
+  let dust = 0, plans = 0, missing = 0;
+  for (const objective of ['raw', 'power', 'machines', 'recipes', 'edges']) {
+    for (const sloopMult of [null, { Recipe_Alternate_SloppyAlumina_C: 2 }]) {
+      const res = LP.optimize({ outputs: { [alclad]: 6000, [casing]: 6000 }, allowedInputs: allRes, objective, allowAlternates: true, sinkByproducts: true, waterSink: true, sloopMult });
+      if (!res.feasible) continue;
+      plans++;
+      for (const it in res.net) { const v = Math.abs(res.net[it]); if (v > 0 && v < 0.01) dust++; }
+      for (const r of res.raw) if (r.rate < 0.01) dust++;
+      for (const o of res.outputs) if (o.rate < 0.01) dust++;
+      for (const s of res.sunk || []) if (s.rate < 0.01) dust++;
+      // the demanded outputs themselves must survive the snap at full rate
+      for (const it of [alclad, casing]) {
+        const o = res.outputs.find((x) => x.item === it);
+        if (!o || Math.abs(o.rate - 6000) > 0.01) missing++;
+      }
+    }
+  }
+  check(`aluminum sweep solves (${plans}/10 plans feasible)`, plans === 10);
+  check('no net/raw/output/sunk entry below 0.01/min (dust snapped to 0)', dust === 0);
+  check('demanded outputs survive the snap at full rate', missing === 0);
+  // Genuinely tiny plans keep their small rates (the epsilon floor stays at 1e-6).
+  const tiny = LP.optimize({ outputs: { [IronPlate]: 0.1 }, allowedInputs: { [IronOre]: Infinity }, objective: 'raw', allowAlternates: false });
+  const tinyOut = tiny.feasible && tiny.outputs.find((o) => o.item === IronPlate);
+  check('a real 0.1/min output is NOT snapped away', !!tinyOut && near(tinyOut.rate, 0.1, 1e-4));
+}
+
 // Intermediate as a free input (what U4 surfaces in the UI): supply Iron Ingot and
 // make Iron Plate — the ingot is consumed directly, no ore pulled.
 const interm = LP.optimize({ outputs: { [IronPlate]: 20 }, allowedInputs: { [IronIngot]: Infinity }, objective: 'raw', allowAlternates: false });
