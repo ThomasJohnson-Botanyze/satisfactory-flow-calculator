@@ -218,7 +218,9 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
   // Minimization carries the chosen objective plus the tiny activity tie-break in one key
   // (`_score`), so a free package<->unpackage cycle can never spin. Max-throughput keeps a
   // pure `_out` objective (cycles there are bounded by supply and add no output anyway).
-  const objKey = '_' + objective;
+  // 'machinesLP' is the INTERNAL fractional machine objective — the public 'machines'
+  // objective is whole-machine greedy refinement over it (see optimizeWholeMachines).
+  const objKey = '_' + (objective === 'machinesLP' ? 'machines' : objective);
   if (!maxItem) for (const k in variables) variables[k]._score = (variables[k][objKey] || 0) + EPS_ACTIVITY;
 
   return {
@@ -306,6 +308,9 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   if (objective === 'inputs') {
     return optimizeFewestInputs({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
   }
+  if (objective === 'machines') {
+    return optimizeWholeMachines({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+  }
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
   const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
@@ -354,7 +359,7 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
 // at most a few dozen LP solves, and ties (same count) resolve toward fewer machines
 // because that stays the inner objective.
 function optimizeFewestRecipes(params) {
-  const inner = Object.assign({}, params, { objective: 'machines' });
+  const inner = Object.assign({}, params, { objective: 'machinesLP' });
   const finish = (sum) => { sum.objective = 'recipes'; if (sum.feasible) sum.objectiveValue = sum.recipes.length; return sum; };
   let best = optimize(inner);
   if (!best.feasible) return finish(best);
@@ -390,7 +395,7 @@ function optimizeFewestRecipes(params) {
 // removal that strictly shrinks the distinct-input count, stop when no single removal
 // helps. Ties resolve toward fewer machines (the inner objective).
 function optimizeFewestInputs(params) {
-  const inner = Object.assign({}, params, { objective: 'machines' });
+  const inner = Object.assign({}, params, { objective: 'machinesLP' });
   const finish = (sum) => { sum.objective = 'inputs'; if (sum.feasible) sum.objectiveValue = sum.raw.length; return sum; };
   let allowed = Object.assign({}, params.allowedInputs);
   let best = optimize(Object.assign({}, inner, { allowedInputs: allowed }));
@@ -410,6 +415,44 @@ function optimizeFewestInputs(params) {
         best = probe;
         progress = true;
         break; // input set changed — re-rank what's still drawn and scan again
+      }
+    }
+  }
+  return finish(best);
+}
+
+// "Fewest machines" objective, WHOLE machines: in the game you build whole machines
+// and underclock the last one, so a recipe used at 0.05 machine-equivalents still
+// costs a full machine. The LP can only minimize the fractional sum (Σ ceil is not
+// linear), so refine greedily: start from the fractional optimum, then try BLOCKING
+// each used recipe — most idle capacity (ceil − frac) first, those slivers are the
+// likely losers — re-solve, and keep any block that strictly lowers the whole-machine
+// count Σ ceil(machines). Stops when no single block helps.
+function optimizeWholeMachines(params) {
+  const inner = Object.assign({}, params, { objective: 'machinesLP' });
+  // totalMachines is summarize()'s Σ ceil across pool recipes AND disposal machinery
+  // (fuel generators, Wet Concrete refineries) — those are real buildings too; counting
+  // recipes alone would make "burn it" look free and invert the comparison.
+  const whole = (sum) => sum.totalMachines;
+  const finish = (sum) => { sum.objective = 'machines'; if (sum.feasible) sum.objectiveValue = whole(sum); return sum; };
+  let best = optimize(inner);
+  if (!best.feasible) return finish(best);
+  const blocked = new Set(params.blockedRecipes ? [...params.blockedRecipes] : []);
+  let budget = 120;
+  let progress = true;
+  while (progress && budget > 0) {
+    progress = false;
+    const waste = (r) => Math.ceil(r.machines - 1e-9) - r.machines; // idle capacity bought by the ceil
+    const used = best.recipes.slice().sort((a, b) => waste(b) - waste(a));
+    for (const cand of used) {
+      if (budget-- <= 0) break;
+      const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
+      const probe = optimize(Object.assign({}, inner, { blockedRecipes: tryBlocked }));
+      if (probe.feasible && whole(probe) < whole(best)) {
+        blocked.add(cand.rc);
+        best = probe;
+        progress = true;
+        break; // plan changed — re-rank the survivors and scan again
       }
     }
   }

@@ -1,4 +1,4 @@
-// Unit tests for the pure (non-DOM) core: the LP solver, the save -> buildings
+﻿// Unit tests for the pure (non-DOM) core: the LP solver, the save -> buildings
 // extractor, and the building-metadata lookup. Complements scripts/ui-test.js,
 // which covers the renderer/DOM. No test framework — plain asserts + a tally.
 'use strict';
@@ -36,7 +36,7 @@ console.log('\n### FEWEST RECIPES OBJECTIVE');
 {
   const RIP = cls('Reinforced Iron Plate');
   const base = { outputs: { [RIP]: 30 }, allowedInputs: { [IronOre]: Infinity }, allowAlternates: true };
-  const byMachines = LP.optimize(Object.assign({}, base, { objective: 'machines' }));
+  const byMachines = LP.optimize(Object.assign({}, base, { objective: 'machinesLP' })); // pure fractional LP baseline
   const byRecipes = LP.optimize(Object.assign({}, base, { objective: 'recipes' }));
   check('recipes objective feasible', byRecipes.feasible === true);
   check('objective reported as recipes', byRecipes.objective === 'recipes');
@@ -64,12 +64,35 @@ console.log('\n### FEWEST RECIPES OBJECTIVE');
   check('blocked sole producers stay infeasible', inf.feasible === false);
 }
 
+// ---- Whole-machines objective: Σ ceil(machines), not the fractional LP sum ----
+console.log('\n### FEWEST WHOLE MACHINES OBJECTIVE');
+{
+  const RIP = cls('Reinforced Iron Plate');
+  const base = { outputs: { [RIP]: 30 }, allowedInputs: { [IronOre]: Infinity }, allowAlternates: true };
+  const whole = (s) => s.totalMachines; // Σ ceil incl. disposal machinery (gens / wet refineries)
+  const lp = LP.optimize(Object.assign({}, base, { objective: 'machinesLP' }));
+  const wm = LP.optimize(Object.assign({}, base, { objective: 'machines' }));
+  check('whole-machines feasible', wm.feasible === true);
+  check('objective reported as machines', wm.objective === 'machines');
+  check('objectiveValue is an integer', Number.isInteger(wm.objectiveValue));
+  check('objectiveValue == sum of ceiled machine counts', wm.objectiveValue === whole(wm));
+  check('never worse than the fractional plan, whole-counted', lp.feasible && wm.objectiveValue <= whole(lp));
+  const ripOut = wm.outputs.find((o) => o.item === RIP);
+  check('target rate still met (~30/min)', !!ripOut && near(ripOut.rate, 30, 0.1));
+  // Locally minimal: blocking ANY used recipe must not allow fewer whole machines.
+  const minimal = wm.recipes.every((r) => {
+    const probe = LP.optimize(Object.assign({}, base, { objective: 'machines', blockedRecipes: new Set([r.rc]) }));
+    return !probe.feasible || probe.objectiveValue >= wm.objectiveValue;
+  });
+  check('locally minimal (no single recipe block buys a whole machine)', minimal);
+}
+
 // ---- Fewest-input-types objective: minimize DISTINCT raw resources drawn ----
 console.log('\n### FEWEST INPUT TYPES OBJECTIVE');
 {
   const Cable = cls('Cable'), CopperOre = cls('Copper Ore');
   const base = { outputs: { [Cable]: 30 }, allowedInputs: { [IronOre]: Infinity, [CopperOre]: Infinity }, allowAlternates: true };
-  const byMachines = LP.optimize(Object.assign({}, base, { objective: 'machines' }));
+  const byMachines = LP.optimize(Object.assign({}, base, { objective: 'machinesLP' })); // pure fractional LP baseline
   const byInputs = LP.optimize(Object.assign({}, base, { objective: 'inputs' }));
   check('inputs objective feasible', byInputs.feasible === true);
   check('objective reported as inputs', byInputs.objective === 'inputs');
@@ -138,7 +161,7 @@ check('no ore pulled when ingot supplied', !interm.raw.some((r) => r.item === Ir
 // (a solid) -> Awesome Sink — instead of letting it pile up and deadlock the line.
 const allRaw = Object.fromEntries(DATA.resources.map((r) => [r, Infinity]));
 const Plastic = cls('Plastic'), HOR = cls('Heavy Oil Residue'), Coke = cls('Petroleum Coke'), Fuel = cls('Fuel');
-const sinkOn = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, objective: 'machines', allowAlternates: false, sinkByproducts: true });
+const sinkOn = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, objective: 'machinesLP', allowAlternates: false, sinkByproducts: true });
 check('sink on: feasible', sinkOn.feasible === true);
 check('sink on: Heavy Oil Residue fully consumed (net ~0)', near(sinkOn.net[HOR] || 0, 0, 1e-4));
 check('sink on: no fluid left as surplus', !sinkOn.outputs.some((o) => DATA.items[o.item] && DATA.items[o.item].liquid));
@@ -146,13 +169,13 @@ check('sink on: Petroleum Coke routed to the Awesome Sink', (sinkOn.sunk || []).
 check('sink on: sink points reported', (sinkOn.sunk || []).every((s) => s.points > 0));
 
 // Legacy behaviour (toggle off): the by-product is allowed to float as surplus.
-const sinkOff = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, objective: 'machines', allowAlternates: false, sinkByproducts: false });
+const sinkOff = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, objective: 'machinesLP', allowAlternates: false, sinkByproducts: false });
 check('sink off: Heavy Oil Residue floats as surplus', sinkOff.outputs.some((o) => o.item === HOR && o.rate > 0));
 check('sink off: nothing sunk', (sinkOff.sunk || []).length === 0);
 
 // With alternates on, the solver can do better than sinking: close the loop by feeding
 // HOR back through Diluted Fuel / Recycled Plastic so only the desired output remains.
-const loop = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, objective: 'machines', allowAlternates: true, sinkByproducts: true });
+const loop = LP.optimize({ outputs: { [Plastic]: 120 }, allowedInputs: allRaw, objective: 'machinesLP', allowAlternates: true, sinkByproducts: true });
 check('alts + sink: feasible', loop.feasible === true);
 check('alts + sink: no by-product surplus at all', loop.feasible && !loop.outputs.some((o) => o.item !== Plastic));
 
@@ -196,12 +219,12 @@ check('Fuel Generator burns 20 Fuel/min', near(DATA.generators.Build_GeneratorFu
 // unpackage recipe — it would only pair with its package recipe to spin a pointless
 // Water <-> Packaged Water loop instead of using a real Empty Canister recipe.
 const PkgFuel = cls('Packaged Fuel'); // Desc_Fuel_C (legacy name — the *packaged* item)
-const cyc = LP.optimize({ outputs: { [PkgFuel]: 60 }, allowedInputs: allRaw, objective: 'machines', allowAlternates: true, sinkByproducts: true });
+const cyc = LP.optimize({ outputs: { [PkgFuel]: 60 }, allowedInputs: allRaw, objective: 'machinesLP', allowAlternates: true, sinkByproducts: true });
 check('packaged-fuel plan feasible', cyc.feasible === true);
 check('no unpackage recipe used when building from raw', !cyc.recipes.some((s) => /unpackage/i.test(s.rc)));
 check('Empty Canister comes from a real producer (not an unpackage loop)', cyc.recipes.some((s) => DATA.recipes[s.rc].products.some((p) => p.item === cls('Empty Canister'))));
 // ...but unpackaging IS allowed when the packaged item is supplied as a free input.
-const supplied = LP.optimize({ outputs: { [cls('Fuel')]: 60 }, allowedInputs: Object.assign({ [PkgFuel]: Infinity }, allRaw), objective: 'machines', allowAlternates: true });
+const supplied = LP.optimize({ outputs: { [cls('Fuel')]: 60 }, allowedInputs: Object.assign({ [PkgFuel]: Infinity }, allRaw), objective: 'machinesLP', allowAlternates: true });
 check('unpackage allowed when its packaged input is supplied', supplied.feasible && supplied.recipes.some((s) => /unpackage/i.test(s.rc)));
 
 // ---- Somersloop in the material balance ----
@@ -273,9 +296,9 @@ check('F1: blocked standard recipe is never chosen', blockStdWithAlts.feasible &
 const TimeCrystal = cls('Time Crystal');
 const converterRecipes = Object.keys(DATA.recipes).filter((rc) => DATA.recipes[rc].building === 'Build_Converter_C');
 check('fixture: >1 Converter recipe exists', converterRecipes.length > 1);
-const tcBase = LP.optimize({ outputs: { [TimeCrystal]: 10 }, allowedInputs: allRawX, objective: 'machines', allowAlternates: true });
+const tcBase = LP.optimize({ outputs: { [TimeCrystal]: 10 }, allowedInputs: allRawX, objective: 'machinesLP', allowAlternates: true });
 check('control: Time Crystal feasible with Converter on', tcBase.feasible === true);
-const tcBlocked = LP.optimize({ outputs: { [TimeCrystal]: 10 }, allowedInputs: allRawX, objective: 'machines', allowAlternates: true, blockedRecipes: new Set(converterRecipes) });
+const tcBlocked = LP.optimize({ outputs: { [TimeCrystal]: 10 }, allowedInputs: allRawX, objective: 'machinesLP', allowAlternates: true, blockedRecipes: new Set(converterRecipes) });
 check('F4: disabling the Converter (all its recipes) -> Time Crystal infeasible', tcBlocked.feasible === false);
 // And no Converter recipe is used elsewhere once the building is off.
 const ironViaConv = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: allRawX, objective: 'raw', allowAlternates: true, blockedRecipes: new Set(converterRecipes) });
@@ -471,7 +494,7 @@ const xSave3 = { levels: { P: { objects: [
   { typePath: 'g.Build_FrackingSmasher_C', transform: { translation: { x: 100, y: 0, z: 0 } }, properties: { mCurrentPotential: { value: 2 } } }, // 200% overclock
 ] } } };
 const xr3 = PX.computeProduction(xSave3, DATA);
-const smWant = smDef.power * (1 + Math.pow(2, smDef.exponent)); // 150 + 150·2^exp
+const smWant = smDef.power * (1 + Math.pow(2, smDef.exponent)); // 150 + 150Â·2^exp
 check('xray: Pressurizer power counted (incl. clock^exp overclock)', near(xr3.stats.extractionPower, smWant, 0.01));
 check('xray: Pressurizer attributes power only — no extraction rows', xr3.extraction.length === 0);
 check('xray: Pressurizer alone does not flip the estimated caveat', xr3.caveats.estimatedExtraction === false);
@@ -615,5 +638,5 @@ check('rollup: counts both plans', totals.count === 2);
 check('rollup: raw includes Iron Ore (A pulls it)', (totals.rawTotals[IronOre] || 0) > 0);
 check('rollup: internally-supplied Iron Plate netted out of raw', !(totals.rawTotals[IronPlate] > 1e-4));
 
-console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
+console.log(`\n${fail === 0 ? '✅ ALL PASS' : 'âŒ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

@@ -901,10 +901,11 @@ function applyCleanScale(res, targets) {
   mul(res.watered, 'rate', 'concrete', 'limestone', 'machines');
   if (typeof res.totalPower === 'number') res.totalPower *= scale;
   if (typeof res.recoveredPower === 'number') res.recoveredPower *= scale;
-  if (typeof res.objectiveValue === 'number' && res.objective !== 'recipes' && res.objective !== 'inputs') res.objectiveValue *= scale; // a COUNT (recipes / input types) doesn't scale with rates
+  if (typeof res.objectiveValue === 'number' && res.objective !== 'recipes' && res.objective !== 'inputs' && res.objective !== 'machines') res.objectiveValue *= scale; // a COUNT (recipes / input types / whole machines) doesn't scale linearly with rates
   // Snap tiny float drift so ceil()/labels show exact integers.
   res.recipes.forEach((r) => { const rd = Math.round(r.machines); if (Math.abs(r.machines - rd) < 1e-4) r.machines = rd; });
   res.totalMachines = res.recipes.reduce((a, r) => a + Math.ceil(r.machines - 1e-9), 0);
+  if (res.objective === 'machines') res.objectiveValue = res.totalMachines; // whole-machine count: recompute from the rescaled plan
   if (res.totalSloops != null) res.totalSloops = res.recipes.reduce((a, r) => a + (r.sloops || 0) * Math.ceil(r.machines - 1e-9), 0);
   for (const k in (res.targets || {})) res.targets[k] *= scale;
   for (const k in (targets || {})) targets[k] *= scale;
@@ -3303,7 +3304,7 @@ function renderOptimize() {
   present(res, outputs);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
 
-  const labels = { raw: 'raw resources /min', power: 'MW', machines: 'machines', recipes: 'distinct recipes (build steps)', inputs: 'distinct input resources' };
+  const labels = { raw: 'raw resources /min', power: 'MW', machines: 'whole machines', recipes: 'distinct recipes (build steps)', inputs: 'distinct input resources' };
   const ex = el('div', 'extras-card');
   ex.appendChild(el('div', 'extras-title', '✓ Optimized recipe selection'));
   const alts = res.recipes.filter((x) => RECIPES[x.rc].alternate).length;
