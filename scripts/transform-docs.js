@@ -154,10 +154,20 @@ for (const gname of ['FGBuildableGeneratorFuel', 'FGBuildableGeneratorNuclear'])
     if (!power) continue;
     const reqSupp = String(c.mRequiresSupplementalResource) === 'True';
     const ratio = Number(c.mSupplementalToPowerRatio) || 0;
+    // Burn by-products (nuclear waste): the generator's mFuel array names, per fuel, the
+    // spent item and how many units each fuel unit leaves behind (Uranium Fuel Rod -> 50
+    // Uranium Waste, Plutonium Fuel Rod -> 10 Plutonium Waste, Ficsonium -> none). Stored
+    // per fuel UNIT, so waste/min at plan time = fuel burn rate × amount (clock-invariant).
+    const waste = {};
+    for (const f of (Array.isArray(c.mFuel) ? c.mFuel : [])) {
+      const amt = Number(f.mByproductAmount) || 0;
+      if (f.mFuelClass && f.mByproduct && amt > 0) waste[f.mFuelClass] = { item: f.mByproduct, amount: amt };
+    }
     powergen[cn] = {
       className: cn, name: c.mDisplayName || cn, power,
       fuels: fuelRates(power, c),
       supplemental: (reqSupp && ratio) ? { item: SUPP_ITEM, rate: (power * ratio * 60) / 1000 } : null,
+      waste: Object.keys(waste).length ? waste : null,
     };
   }
 }

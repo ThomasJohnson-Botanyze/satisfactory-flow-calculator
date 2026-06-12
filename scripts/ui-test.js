@@ -828,6 +828,41 @@ console.log('\n### POWER PLANNER: STANDALONE COAL POWER (mine → burn)');
   check('flow shows the standalone coal generator', genNodes.some((t) => /Coal-Powered Generator/.test(t)));
 }
 
+// ---- Power Planner: NUCLEAR — plant count, water, and the waste by-product ----
+// 0.6 Uranium Fuel Rod/min = 3 plants (0.2 rods/min each) = +7.5 GW, 720 water/min,
+// and 30 Uranium Waste/min (50 waste per rod) that can't be sunk — the planner must
+// show all of it: generation table, ☢ note, and a waste terminal on the flowchart.
+console.log('\n### POWER PLANNER: NUCLEAR (plants + waste by-product)');
+{
+  const { d, setVal, click } = boot13(null);
+  const tabOf = (m) => click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === m));
+  tabOf('planner');
+  setVal(d.getElementById('targetItem'), 'Uranium Fuel Rod');
+  setVal(d.getElementById('targetRate'), '0.6');
+  check('planner solves a Uranium Fuel Rod chain', [...d.querySelectorAll('#prodTable tbody tr')].length > 3);
+  tabOf('power');
+  setVal(d.getElementById('pwrSource'), 'planner', 'change');
+  click(d.getElementById('pwrAddGen'));
+  const genTxt = [...d.querySelectorAll('#pwrGenTable tbody tr')].map((r) => r.textContent).join(' | ');
+  check('generation table lists the Nuclear Power Plant', /Nuclear Power Plant/.test(genTxt));
+  check('0.6 rods/min sizes exactly 3 plants', /3× \(3\)/.test(genTxt));
+  check('3 plants generate +7.5 GW', d.getElementById('pwrGenerated').textContent === '7.5 GW');
+  check('generator row shows the waste stream (30/min Uranium Waste)', /→ 30\/min Uranium Waste/.test(genTxt));
+  check('plant water appears in the consumption ledger', /Water Extractor → Nuclear Power Plant/.test([...d.querySelectorAll('#pwrConsTable tbody tr')].map((r) => r.textContent).join(' ')));
+  check('note warns the waste can\'t be sunk', /☢ Waste: 30\/min Uranium Waste/.test(d.getElementById('pwrNote').textContent));
+
+  // Flowchart (⚡ Power infra on): plant node, ☢ waste output terminal, water feed.
+  tabOf('planner');
+  click(d.getElementById('flowPowerToggle'));
+  click(d.getElementById('viewFlow'));
+  const genNodes = [...d.querySelectorAll('#flowSvg .node.gen')].map((n) => n.textContent);
+  check('flow shows the Nuclear Power Plant node', genNodes.some((t) => /Nuclear Power Plant/.test(t)));
+  const outNodes = [...d.querySelectorAll('#flowSvg .node.out')].map((n) => n.textContent);
+  check('flow shows the ☢ Uranium Waste terminal at 30/min', outNodes.some((t) => /Uranium Waste/.test(t) && /30\/min/.test(t)));
+  const extNodes = [...d.querySelectorAll('#flowSvg .node.ext')].map((n) => n.textContent);
+  check('flow shows the water pumps feeding the plants', extNodes.some((t) => /Water Extractor/.test(t)));
+}
+
 // ---- Base X-ray: per-plan region routing + scoped render ----
 console.log('\n### BASE X-RAY (per-plan area)');
 {

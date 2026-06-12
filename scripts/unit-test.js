@@ -210,6 +210,20 @@ const oreP = ph2.raw.find((r) => r.item === IronOre);
 check('0.5x: 3-ingot plate recipe rounds to 2 (ore 30 -> 20)', !!oreP && near(oreP.rate, 20, 0.1));
 check('planner uses 2 machines total', plan.totalMachines === 2);
 
+// ---- Nuclear power data: plant burn rates + waste by-products (from the game Docs) ----
+console.log('\n### POWERGEN NUCLEAR (burn rates + waste)');
+{
+  const NUKE = DATA.powergen && DATA.powergen.Build_GeneratorNuclear_C;
+  check('Nuclear Power Plant in powergen (2,500 MW)', !!NUKE && NUKE.power === 2500);
+  check('burn rates: 0.2 uranium / 0.1 plutonium / 1 ficsonium rods per min',
+    !!NUKE && near(NUKE.fuels.Desc_NuclearFuelRod_C, 0.2, 1e-9) && near(NUKE.fuels.Desc_PlutoniumFuelRod_C, 0.1, 1e-9) && near(NUKE.fuels.Desc_FicsoniumFuelRod_C, 1, 1e-9));
+  check('supplemental water 240/min per plant', !!NUKE && NUKE.supplemental && NUKE.supplemental.item === 'Desc_Water_C' && near(NUKE.supplemental.rate, 240, 1e-9));
+  check('uranium rod -> 50 Uranium Waste', !!NUKE && NUKE.waste && NUKE.waste.Desc_NuclearFuelRod_C && NUKE.waste.Desc_NuclearFuelRod_C.item === 'Desc_NuclearWaste_C' && NUKE.waste.Desc_NuclearFuelRod_C.amount === 50);
+  check('plutonium rod -> 10 Plutonium Waste', !!NUKE && NUKE.waste && NUKE.waste.Desc_PlutoniumFuelRod_C && NUKE.waste.Desc_PlutoniumFuelRod_C.item === 'Desc_PlutoniumWaste_C' && NUKE.waste.Desc_PlutoniumFuelRod_C.amount === 10);
+  check('ficsonium rod leaves no waste', !!NUKE && NUKE.waste && NUKE.waste.Desc_FicsoniumFuelRod_C == null);
+  check('non-nuclear generators carry no waste field', DATA.powergen.Build_GeneratorCoal_C.waste == null && DATA.powergen.Build_GeneratorFuel_C.waste == null);
+}
+
 // Infeasible: ask for a product with no allowed inputs.
 const bad = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: {}, objective: 'raw', allowAlternates: false });
 check('optimize infeasible with no inputs', bad.feasible === false);

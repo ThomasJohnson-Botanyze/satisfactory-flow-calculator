@@ -1449,7 +1449,7 @@ function renderPowerInfraTables(res) {
   gens.forEach((g) => {
     const tr = el('tr');
     const td = el('td'); td.appendChild(itemCell(g.output)); tr.appendChild(td);
-    tr.appendChild(el('td', null, g.name));
+    tr.appendChild(el('td', null, g.name + (g.waste ? ` · → ${fmt(g.waste.rate)}/min ${itemName(g.waste.item)}` : '')));
     const c = el('td', 'num'); c.innerHTML = `${fmt(Math.ceil(g.nGen - 1e-9), 0)}× <span class="mach-sub">(${fmt(g.nGen)})</span>`; tr.appendChild(c);
     tr.appendChild(el('td', 'num', `${Math.round(g.clock * 100)}%`));
     tr.appendChild(el('td', 'num', '+' + fmtPower(g.mw)));
@@ -1623,6 +1623,13 @@ function buildFlow(res, targets) {
         const wid = 'wgen|' + key;
         addNode(wid, 'ext', EXTRACTORS.Build_WaterPump_C.name, `${fmt(g.water.count, 0)}× · ${fmtPower(g.water.powerBase * mult)}`);
         addEdge(wid, gid, WATER_ITEM, g.water.need);
+      }
+      // Nuclear waste: the spent fuel leaves the generator as a real material stream —
+      // give it an output terminal so the chart shows what burning the rods costs.
+      if (g.waste) {
+        const xid = 'pwaste|' + key;
+        addNode(xid, 'out', itemName(g.waste.item), `☢ ${fmt(g.waste.rate)}/min`);
+        addEdge(gid, xid, g.waste.item, g.waste.rate);
       }
     });
   }
@@ -2117,7 +2124,7 @@ function renderPowerPopup() {
     const rate = +g.rate || 0;
     const z = genSizing(G, g.fuel, rate, genClockOf(g, pw));
     title = `${G.name} · ${itemName(g.fuel)}`;
-    sub = `${fmt(z.nGen)}× · ${fmt(z.mw, 0)} MW · burns ${fmt(rate)}/min`;
+    sub = `${fmt(z.nGen)}× · ${fmt(z.mw, 0)} MW · burns ${fmt(rate)}/min${z.waste ? ` · → ${fmt(z.waste.rate)}/min ${itemName(z.waste.item)}` : ''}`;
     curPct = clampClock(genClockOf(g, pw));
     note = (s) => s ? `${s} shard${s > 1 ? 's' : ''} / generator · runs fewer, harder (total power unchanged)` : 'No shards · 100%';
     apply = (pct) => { const v = clampClock(pct); if (v === clampClock(pw.genClock)) delete g.clock; else g.clock = v; };
@@ -2127,7 +2134,7 @@ function renderPowerPopup() {
     const avail = lastResult ? outputsOf(lastResult, lastTargets).filter((o) => o.item === g.output).reduce((a, o) => a + o.rate, 0) : 0;
     const z = genSizing(G, g.output, avail, genClockOf(g, pw));
     title = `${G.name} · ${itemName(g.output)}`;
-    sub = `${fmt(z.nGen)}× · ${fmt(z.mw, 0)} MW`;
+    sub = `${fmt(z.nGen)}× · ${fmt(z.mw, 0)} MW${z.waste ? ` · → ${fmt(z.waste.rate)}/min ${itemName(z.waste.item)}` : ''}`;
     curPct = clampClock(genClockOf(g, pw));
     note = (s) => s ? `${s} shard${s > 1 ? 's' : ''} / generator · runs fewer, harder (total power unchanged)` : 'No shards · 100%';
     apply = (pct) => { const v = clampClock(pct); if (v === clampClock(pw.genClock)) delete g.clock; else g.clock = v; };
@@ -3772,7 +3779,11 @@ function genSizing(G, fuelItem, avail, genClockPct) {
     const ck = need / (cnt * W.ratePerMin);
     water = { need, count: cnt, clock: ck, powerBase: cnt * W.power * Math.pow(ck, W.exponent) };
   }
-  return { clock: c, nGen, mw, water };
+  // Burn by-product (nuclear waste): each fuel unit leaves a fixed amount of spent
+  // material behind, so waste/min = fuel/min × amount — clock-invariant like the water.
+  const wb = G.waste && G.waste[fuelItem];
+  const waste = (wb && avail > 1e-9) ? { item: wb.item, rate: avail * wb.amount } : null;
+  return { clock: c, nGen, mw, water, waste };
 }
 
 // Net outputs of a SOLVED plan as [{item, rate}] from its result + targets.
@@ -3797,7 +3808,7 @@ function powerInfraFor(res, targets) {
     const avail = outs.filter((o) => o.item === g.output).reduce((a, o) => a + o.rate, 0);
     if (!(avail > 1e-9)) continue;
     const z = genSizing(G, g.output, avail, genClockOf(g, p));
-    gens.push({ idx: i, output: g.output, gen: g.gen, name: G.name, avail, nGen: z.nGen, mw: z.mw, clock: z.clock, water: z.water });
+    gens.push({ idx: i, output: g.output, gen: g.gen, name: G.name, avail, nGen: z.nGen, mw: z.mw, clock: z.clock, water: z.water, waste: z.waste });
   }
   // Raw demand = the plan's raws plus the fuel burned by standalone generators (which mine
   // their own fuel rather than consuming a plan output). Merge per item so a single extractor
@@ -3810,7 +3821,7 @@ function powerInfraFor(res, targets) {
     if (!G || !G.fuels || G.fuels[g.fuel] == null) continue;
     const rate = +g.rate; if (!(rate > 1e-9)) continue;
     const z = genSizing(G, g.fuel, rate, genClockOf(g, p));
-    gens.push({ sidx: i, standalone: true, output: g.fuel, gen: g.gen, name: G.name, avail: rate, nGen: z.nGen, mw: z.mw, clock: z.clock, water: z.water });
+    gens.push({ sidx: i, standalone: true, output: g.fuel, gen: g.gen, name: G.name, avail: rate, nGen: z.nGen, mw: z.mw, clock: z.clock, water: z.water, waste: z.waste });
     rawDemand[g.fuel] = (rawDemand[g.fuel] || 0) + rate;
   }
   const extraction = [];
@@ -3879,7 +3890,7 @@ function renderPower() {
     r.gens.forEach((g) => {
       const tr = el('tr');
       const td = el('td'); td.appendChild(itemCell(g.output)); tr.appendChild(td);
-      tr.appendChild(el('td', null, g.name + (g.clock !== 1 ? ` · ${Math.round(g.clock * 100)}%` : '')));
+      tr.appendChild(el('td', null, g.name + (g.clock !== 1 ? ` · ${Math.round(g.clock * 100)}%` : '') + (g.waste ? ` · → ${fmt(g.waste.rate)}/min ${itemName(g.waste.item)}` : '')));
       const c = el('td', 'num'); c.innerHTML = `${fmt(Math.ceil(g.nGen - 1e-9), 0)}× <span class="mach-sub">(${fmt(g.nGen)})</span>`; tr.appendChild(c);
       tr.appendChild(el('td', 'num', '+' + fmtPower(g.mw)));
       gtb.appendChild(tr);
@@ -3902,6 +3913,12 @@ function renderPower() {
     if (r.extractionBase > 1e-9) bits.push(`extraction ${fmtPower(r.extractionBase * m)}`);
     if (r.genWaterBase > 1e-9) bits.push(`generator water ${fmtPower(r.genWaterBase * m)}`);
     note.textContent = `Draw = ${bits.join(' + ')}. Extraction power is an estimate at the purity set per resource; generation is never scaled by the multiplier.`;
+    // Nuclear waste warning: spent fuel can't be sunk — it piles up unless reprocessed.
+    const wastes = {};
+    r.gens.forEach((g) => { if (g.waste) wastes[g.waste.item] = (wastes[g.waste.item] || 0) + g.waste.rate; });
+    if (Object.keys(wastes).length) {
+      note.textContent += ` ☢ Waste: ${Object.keys(wastes).map((it) => `${fmt(wastes[it])}/min ${itemName(it)}`).join(', ')} — it can't be sunk; reprocess it (Plutonium / Ficsonium chain) or store it forever.`;
+    }
   }
 }
 function purityRow(item, p) {
