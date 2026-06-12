@@ -130,7 +130,7 @@ function recipePool(allowAlternates, unlockedAlts, blockedRecipes) {
   });
 }
 
-function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, sloopMult = null }) {
+function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, exportWaste = false, sloopMult = null }) {
   // Keep an unpackage recipe only when its packaged input is actually supplied; otherwise
   // it can only form a degenerate package<->unpackage loop (see UNPACKAGE note above).
   const pool = recipePool(allowAlternates, unlockedAlts, blockedRecipes).filter(
@@ -214,8 +214,17 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
     // a part it also outputs): net the supply against the demand instead of ignoring it.
     if (!maxItem && outputs[it] != null) constraints[it] = { min: outputs[it] - (inputs[it] != null ? (isFinite(inputs[it]) ? inputs[it] : BIG) : 0) };
     else if (inputs[it] != null) constraints[it] = { min: -(isFinite(inputs[it]) ? inputs[it] : BIG) };
-    else if (sinkByproducts && !maxItem) constraints[it] = { equal: 0 }; // by-product: produce == consume (no backup)
-    else constraints[it] = { min: 0 };
+    else if (sinkByproducts && !maxItem) {
+      // No-backup rule: a by-product must leave through a real consumer, the sink, or a
+      // generator (produce == consume). OPT-IN EXCEPTION (exportWaste) — an UNSINKABLE
+      // SOLID (nuclear waste: zero sink points, not a fluid) can't deadlock a pipe and
+      // can be belted out to storage or a linked factory, so it floats up as exportable
+      // surplus (min 0) instead of being forced through in-plan reprocessing (or turning
+      // the plan infeasible). Off by default: the forced no-waste loop is the safer
+      // single-factory answer. Virtual items (reactor MW) stay forced either way.
+      const exportable = exportWaste && ITEMS[it] && !ITEMS[it].liquid && !ITEMS[it].virtual && !isSinkable(it);
+      constraints[it] = exportable ? { min: 0 } : { equal: 0 };
+    } else constraints[it] = { min: 0 };
   }
   if (wetAvail) constraints[WASTE_WATER] = { equal: 0 }; // all diverted water must leave via the Wet Concrete route
 
@@ -325,28 +334,28 @@ function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
   return { recipes, raw, outputs, net, totalPower, totalMachines, fracMachines, rawTotal, sunk, burned, recoveredPower, watered };
 }
 
-function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, sloopMult = null }) {
+function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, exportWaste = false, sloopMult = null }) {
   if (objective === 'recipes') {
-    return optimizeFewestRecipes({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+    return optimizeFewestRecipes({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, exportWaste, sloopMult });
   }
   if (objective === 'inputs') {
-    return optimizeFewestInputs({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+    return optimizeFewestInputs({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, exportWaste, sloopMult });
   }
   if (objective === 'machines') {
-    return optimizeWholeMachines({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+    return optimizeWholeMachines({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, exportWaste, sloopMult });
   }
   if (objective === 'edges') {
-    return optimizeFewestEdges({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+    return optimizeFewestEdges({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, exportWaste, sloopMult });
   }
   if (objective === 'loops') {
-    return optimizeFewestLoops({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+    return optimizeFewestLoops({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, exportWaste, sloopMult });
   }
   if (objective === 'clean') {
-    return optimizeCleanest({ outputs, allowedInputs, objective: 'clean', allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+    return optimizeCleanest({ outputs, allowedInputs, objective: 'clean', allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, exportWaste, sloopMult });
   }
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
-  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, exportWaste, sloopMult });
   // A demanded item no pooled recipe produces (every producer blocked / not unlocked)
   // would otherwise be silently dropped from the constraints — the solver would return a
   // feasible EMPTY plan. Detect it and report infeasible with the orphaned items named,
@@ -364,7 +373,7 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
     // surplus by-product that can't be sunk (a fluid with no consumer) — name it so the
     // UI can point the user at a recipe that consumes it.
     if (sinkByproducts) {
-      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts: false, waterSink, sloopMult });
+      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts: false, waterSink, exportWaste, sloopMult });
       const rres = solver.Solve(relaxed.model);
       if (rres.feasible) {
         const rsum = summarize(rres, relaxed.pool, recipeCost, powerMult, relaxed.disposal, sloopMult);

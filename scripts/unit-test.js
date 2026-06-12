@@ -324,6 +324,29 @@ console.log('\n### CLEAN OBJECTIVE (cleanest ratios as a mode)');
   check("asked rate still met (scaling is the renderer's job)", res.outputs.some((o) => o.item === RIP && o.rate >= 7 - 1e-6));
 }
 
+// ---- exportWaste: uranium waste as supply for a SEPARATE plutonium factory ----
+console.log('\n### EXPORT WASTE (separate plutonium factory)');
+{
+  const allRes = {};
+  for (const r of DATA.resources) allRes[r] = Infinity;
+  const MW = 'Virtual_MW_C';
+  // exportWaste ON: the machines objective happily skips in-plan reprocessing — the
+  // waste floats up as an exportable plan output instead.
+  const exp = LP.optimize({ outputs: { [MW]: 7500 }, allowedInputs: allRes, objective: 'machines', allowAlternates: true, sinkByproducts: true, exportWaste: true });
+  check('exportWaste: nuclear plan solves', exp.feasible === true);
+  const w = exp.feasible && exp.outputs.find((o) => o.item === 'Desc_NuclearWaste_C');
+  check('exportWaste: 30/min Uranium Waste floats as a plan output', !!w && near(w.rate, 30, 1e-4));
+  check('exportWaste: no in-plan reprocessing forced', exp.feasible && !exp.recipes.some((r) => r.rc === 'Recipe_NonFissileUranium_C' || r.rc === 'Recipe_Alternate_FertileUranium_C'));
+  // The separate plutonium factory consumes that waste as a capped supplied input
+  // (exactly what a Project link feeds it): 30 waste/min -> 0.15 rods/min.
+  const pluto = LP.optimize({ outputs: { Desc_PlutoniumFuelRod_C: 0.15 }, allowedInputs: Object.assign({}, allRes, { Desc_NuclearWaste_C: 30 }), objective: 'machines', allowAlternates: false, sinkByproducts: true });
+  check('plutonium factory feasible on the linked 30/min waste', pluto.feasible === true);
+  const used = pluto.feasible && pluto.raw.find((r) => r.item === 'Desc_NuclearWaste_C');
+  check('plutonium factory draws the waste as its input', !!used && used.rate > 1 && used.rate <= 30 + 1e-6);
+  // Default (exportWaste off) is unchanged: the forced no-waste loop — covered by the
+  // burn-recipe block above ('plutonium rods leave via the Awesome Sink').
+}
+
 // Infeasible: ask for a product with no allowed inputs.
 const bad = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: {}, objective: 'raw', allowAlternates: false });
 check('optimize infeasible with no inputs', bad.feasible === false);

@@ -408,6 +408,7 @@ const defaultState = () => ({
     alts: true,
     sink: true, // route surplus by-products to the Awesome Sink / Fuel Generator
     waterSink: false, // dispose excess by-product Water via Wet Concrete (off = old loop/float)
+    exportWaste: false, // let unsinkable solids (nuclear waste) float as exportable surplus instead of forcing in-plan reprocessing
   },
   // Max-supply rows are { item, amount }, optionally + { fromPlanId, fromItem } so the
   // amount tracks an upstream plan's output (same Project link as opt.extraInputs).
@@ -776,15 +777,39 @@ function pruneDanglingLinks() {
 }
 
 // ---------- linked inputs (Project feature: one plan feeds another) ----------
+// Spent-fuel streams from a plan's Power-tab generator rows (waste/min = fuel burned ×
+// per-unit amount; clock-invariant). Reads the given plan STATE directly — never the
+// module `state` — so headless recomputes of background plans see the right config.
+function genWasteOf(st, res, targets) {
+  const out = [];
+  const p = (st && st.power) || {};
+  const outs = outputsOf(res || {}, targets || {});
+  for (const g of p.gens || []) {
+    const G = POWERGEN[g.gen];
+    const wb = G && G.waste && G.fuels && G.fuels[g.output] != null ? G.waste[g.output] : null;
+    if (!wb) continue;
+    const avail = outs.filter((o) => o.item === g.output).reduce((a, o) => a + o.rate, 0);
+    if (avail > 1e-9) out.push({ item: wb.item, rate: avail * wb.amount });
+  }
+  for (const g of p.standalone || []) {
+    const G = POWERGEN[g.gen];
+    const wb = G && G.waste && G.fuels && G.fuels[g.fuel] != null ? G.waste[g.fuel] : null;
+    const rate = +g.rate || 0;
+    if (wb && rate > 1e-9) out.push({ item: wb.item, rate: rate * wb.amount });
+  }
+  return out;
+}
 // Record a plan's net outputs (itemClass -> rate/min) from its last solve so a
 // downstream plan can link an input to it. The desired-output targets ARE the net
 // outputs available downstream (what the plan is built to make available); surplus
-// by-products are added too. Stored on the plan + persisted so links resolve on load.
+// by-products are added too, and so is the spent fuel its Power-tab generators leave
+// behind (Uranium Waste is real supply for a separate plutonium factory).
 function recordNetOutputs(planObj, targets, res) {
   if (!planObj) return;
   const net = {};
   for (const c in (targets || {})) if (targets[c] > 0) net[c] = (net[c] || 0) + Number(targets[c]);
   for (const s of (res && res.surplus) || []) if (s.rate > 0) net[s.item] = (net[s.item] || 0) + s.rate;
+  for (const w of genWasteOf(planObj.state, res, targets)) net[w.item] = (net[w.item] || 0) + w.rate;
   planObj.state.netOutputs = net;
 }
 // Every (item -> rate) a plan currently offers downstream, from its recorded outputs.
@@ -3451,7 +3476,7 @@ function computeStateResult(st) {
       for (const o of st.opt.outputs) { const c = nameToClass(o.name); if (c && o.rate > 0) outputs[c] = (outputs[c] || 0) + Number(o.rate) * (isDeliverable(c) ? st.spaceMult : 1); }
       const allowedInputs = optAllowedInputs(st);
       if (!Object.keys(outputs).length || !Object.keys(allowedInputs).length) return { feasible: false };
-      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false, waterSink: !!st.opt.waterSink, sloopMult: sloopMapAll() });
+      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false, waterSink: !!st.opt.waterSink, exportWaste: !!st.opt.exportWaste, sloopMult: sloopMapAll() });
       if (!res.feasible) return { feasible: false };
       res.surplus = res.outputs.filter((o) => !outputs[o.item]);
       tuneSteps(res); // apply per-step overclock / somersloop (machines & power)
@@ -3655,7 +3680,7 @@ function renderOptimize() {
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
   const sink = state.opt.sink !== false;
-  const optArgs = { outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterSink: !!state.opt.waterSink, sloopMult: sloopMapAll() };
+  const optArgs = { outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterSink: !!state.opt.waterSink, exportWaste: !!state.opt.exportWaste, sloopMult: sloopMapAll() };
   // optimize() dispatches per objective — incl. 'clean' (cleanest-ratio recipe search,
   // snap-scaled below) and 'loops' (straightforward feed-forward chains).
   const res = LP.optimize(optArgs);
@@ -4791,6 +4816,7 @@ function computeBaseBalance() {
       const addCons = (it, r) => { if (r > 1e-6) { info.consumes[it] = (info.consumes[it] || 0) + r; consumed[it] = (consumed[it] || 0) + r; } };
       for (const it in tg) addProd(it, tg[it]);
       for (const s of res.surplus || []) addProd(s.item, s.rate);
+      for (const w of genWasteOf(pl.state, res, tg)) addProd(w.item, w.rate); // generator spent fuel is real supply
       for (const r of res.raw || []) addCons(r.item, r.rate);
     }
     perPlan.push(info);
@@ -5126,6 +5152,7 @@ function applyStateToControls() {
   $('optAlts').checked = state.opt.alts;
   $('optSink').checked = state.opt.sink !== false; // default on, incl. plans saved before this option existed
   $('optWaterSink').checked = !!state.opt.waterSink; // default off; opt-in per plan
+  if ($('optExportWaste')) $('optExportWaste').checked = !!state.opt.exportWaste;
   $('maxAlts').checked = state.max.alts;
   if ($('xrayWholeBase')) $('xrayWholeBase').checked = !!state.xrayWholeBase;
   if (mapDrawing) cancelAreaDraw(); // a plan switch mid-trace would write to the wrong plan
@@ -5279,6 +5306,7 @@ function init() {
   $('optAlts').addEventListener('change', (e) => { state.opt.alts = e.target.checked; save(); solveAndRender(); });
   $('optSink').addEventListener('change', (e) => { state.opt.sink = e.target.checked; save(); solveAndRender(); });
   $('optWaterSink').addEventListener('change', (e) => { state.opt.waterSink = e.target.checked; save(); solveAndRender(); });
+  if ($('optExportWaste')) $('optExportWaste').addEventListener('change', (e) => { state.opt.exportWaste = e.target.checked; save(); solveAndRender(); });
   $('optAllInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = true)); save(); buildOptInputs(); solveAndRender(); });
   $('optNoInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = false)); save(); buildOptInputs(); solveAndRender(); });
   $('optAddInput').addEventListener('click', () => { (state.opt.extraInputs || (state.opt.extraInputs = [])).push({ name: '', cap: '' }); save(); buildOptExtraInputs(); });

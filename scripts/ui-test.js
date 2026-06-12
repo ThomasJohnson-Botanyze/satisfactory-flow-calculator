@@ -1146,6 +1146,52 @@ console.log('\n### FLOW LAYOUT: RETURN EDGES + RAW CO-PROVIDERS');
   check('sankey return band dashed inline', dashed.length >= 1);
 }
 
+// ---- Nuclear waste as a cross-plan input: Plan A exports, Plan B links it ----
+console.log('\n### LINKED NUCLEAR WASTE → PLUTONIUM FACTORY');
+{
+  const { w, d, app, setVal, click } = boot13(null);
+  const tabOf = (m) => click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === m));
+  const fireChange = (n) => { n.dispatchEvent(new w.Event('change', { bubbles: true })); };
+  // Plan A: nuclear — 7,500 MW, waste exported instead of reprocessed in-plan.
+  tabOf('optimize');
+  const rowA = d.querySelector('#optOutputs .row');
+  setVal(rowA.querySelector('.row-item'), 'Nuclear Power (MW)');
+  setVal(rowA.querySelector('.row-rate'), '7500');
+  const ew = d.getElementById('optExportWaste');
+  check('export-waste toggle present', !!ew);
+  ew.checked = true; fireChange(ew);
+  const planA = app.activePlan();
+  const WASTE = 'Desc_NuclearWaste_C';
+  check('plan A records 30/min Uranium Waste as an output', Math.abs((planA.state.netOutputs[WASTE] || 0) - 30) < 0.01);
+  check('waste shows as exportable surplus in the by-product table', /Uranium Waste/.test(d.getElementById('byprodTable').textContent));
+  // Plan B (same project): plutonium rods, importing the waste via a Project link.
+  click(d.getElementById('planNew'));
+  tabOf('optimize');
+  const rowB = d.querySelector('#optOutputs .row');
+  setVal(rowB.querySelector('.row-item'), 'Plutonium Fuel Rod');
+  setVal(rowB.querySelector('.row-rate'), '0.15');
+  click(d.getElementById('optAddInput'));
+  const linkSel = d.querySelector('#optExtraInputs .row .row-link');
+  check('link dropdown offers plan A\'s Uranium Waste', [...linkSel.options].some((o) => o.value === planA.id + '|' + WASTE));
+  setVal(linkSel, planA.id + '|' + WASTE, 'change');
+  const planB = app.activePlan();
+  check('linked cap resolves to the exported 30/min', Math.abs(app.resolveLinkedCap(planB.state.opt.extraInputs[0]) - 30) < 0.01);
+  check('plutonium factory solves on the linked waste', d.getElementById('empty').hidden === true);
+  check('plan B consumes Uranium Waste as raw supply', /Uranium Waste/.test(d.getElementById('rawTable').textContent));
+  // Power-tab path: a rods plan whose Power-tab generators burn them exports the spent
+  // fuel too (the waste there is sized off the gen rows, not the production solve).
+  click(d.getElementById('planNew'));
+  tabOf('planner');
+  setVal(d.getElementById('targetItem'), 'Uranium Fuel Rod');
+  setVal(d.getElementById('targetRate'), '0.6');
+  tabOf('power');
+  setVal(d.getElementById('pwrSource'), 'planner', 'change');
+  click(d.getElementById('pwrAddGen'));
+  tabOf('planner'); // production re-render refreshes the recorded outputs
+  const planC = app.activePlan();
+  check('generator-burn plan exports its 30/min spent fuel too', Math.abs((planC.state.netOutputs[WASTE] || 0) - 30) < 0.01);
+}
+
 // ---- Multi-factory: whole-base balance + dependency graph ----
 console.log('\n### MULTI-FACTORY: BASE BALANCE + DEPENDENCY GRAPH');
 {
