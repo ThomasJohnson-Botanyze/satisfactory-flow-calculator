@@ -1551,6 +1551,8 @@ function buildFlow(res, targets) {
     addEdge('raw|Desc_Stone_C', id, 'Desc_Stone_C', w.limestone);
     (producers.Desc_Cement_C = producers.Desc_Cement_C || []).push({ step: { _nid: id }, rate: w.concrete });
   });
+  const rawRate = {};
+  (res.raw || []).forEach((r) => { rawRate[r.item] = (rawRate[r.item] || 0) + r.rate; });
   res.recipes.forEach((s) => {
     const r = RECIPES[s.rc];
     const prod = r.products.find((p) => p.item === s.item) || r.products[0];
@@ -1559,7 +1561,14 @@ function buildFlow(res, targets) {
       // so divide the multiplier back out to get the true ingredient draw. Burn steps are
       // exempt from the cost multiplier (physics, not crafting — matches the solver).
       const total = (s.rate / (prod.amount * (s.sloopMult || 1))) * LP.effAmount(ing.amount, r.burner ? 1 : state.recipeCost);
-      const provs = (producers[ing.item] || []).filter((p) => p.step !== s); // no self-edge on by-product loops
+      let provs = (producers[ing.item] || []).filter((p) => p.step !== s); // no self-edge on by-product loops
+      // An item can be PART by-product, PART fresh draw (Aluminum Scrap's return water
+      // covers most but not all of Alumina Solution's need; the rest is mined). The raw
+      // node is then a CO-provider for the shortfall — without it the raw node floated
+      // disconnected while the producer edge overstated its rate by the fresh share.
+      if (provs.length && rawRate[ing.item] > 1e-9 && byId['raw|' + ing.item]) {
+        provs = provs.concat([{ step: { _nid: 'raw|' + ing.item }, rate: rawRate[ing.item] }]);
+      }
       if (provs.length) {
         const tot = provs.reduce((a, p) => a + p.rate, 0) || 1;
         provs.forEach((p) => addEdge(p.step._nid, s._nid, ing.item, total * (p.rate / tot)));
@@ -1649,14 +1658,75 @@ function buildFlow(res, targets) {
   return { nodes, byId, edges };
 }
 
+// Strongly-connected components (iterative Tarjan) over node ids with the given
+// adjacency (id -> Set of successor ids). Returns id -> component index.
+function sccOf(ids, adj) {
+  const idx = new Map(ids.map((id, i) => [id, i]));
+  const N = ids.length;
+  const low = new Array(N).fill(0), num = new Array(N).fill(-1), comp = new Array(N).fill(-1), onStk = new Array(N).fill(false);
+  const stk = [];
+  let counter = 0, ncomp = 0;
+  for (let s = 0; s < N; s++) {
+    if (num[s] !== -1) continue;
+    const call = [[s, 0, null]];
+    while (call.length) {
+      const fr = call[call.length - 1];
+      const v = fr[0];
+      if (fr[1] === 0) { num[v] = low[v] = counter++; stk.push(v); onStk[v] = true; }
+      const nbrs = [...(adj.get(ids[v]) || [])];
+      if (fr[1] < nbrs.length) {
+        const w = idx.get(nbrs[fr[1]++]);
+        if (w == null) continue;
+        if (num[w] === -1) call.push([w, 0, v]);
+        else if (onStk[w]) low[v] = Math.min(low[v], num[w]);
+      } else {
+        if (low[v] === num[v]) {
+          for (;;) { const w = stk.pop(); onStk[w] = false; comp[w] = ncomp; if (w === v) break; }
+          ncomp++;
+        }
+        call.pop();
+        const parent = fr[2];
+        if (parent != null) low[parent] = Math.min(low[parent], low[v]);
+      }
+    }
+  }
+  const out = {};
+  ids.forEach((id, i) => { out[id] = comp[i]; });
+  return out;
+}
+
 function layoutFlow(flow) {
   const { nodes, byId } = flow;
-  // Column = longest path from a source, with cycles broken: a back-edge into a node
-  // still on the current DFS path is ignored. Plain Kahn's layering dumped every node
-  // caught in a recycle loop into column 0; once by-product edges made those loops common
-  // (e.g. HOR <-> recycled plastic) the whole chart collapsed into a couple of absurdly
-  // tall columns. Longest-path layering gives every node a real column, spreading the
-  // graph wide instead of stacking it sky-high.
+  // ---- Cycle breaking, done deliberately ----
+  // A recycle loop must send SOME line backwards in a left-to-right layout. Instead of
+  // letting DFS order pick that line arbitrarily (which made an arbitrary mid-chain edge
+  // run right-to-left and read as spaghetti), pick the LOWEST-RATE edge of each cycle as
+  // its designated RETURN line (e._return): the loop's cheapest leg — typically the
+  // by-product heading back upstream (Aluminum Scrap's water returning to Alumina
+  // Solution) — is the one that reads naturally as a "return pipe". Returns are ignored
+  // while layering, so the rest of the graph is a true DAG and every normal edge flows
+  // strictly left → right; drawFlow then styles returns dashed with a ↩ label.
+  flow.edges.forEach((e) => { e._return = false; });
+  const ids = nodes.map((n) => n.id);
+  for (;;) {
+    const adj = new Map(ids.map((id) => [id, new Set()]));
+    for (const e of flow.edges) if (!e._return && byId[e.src] && byId[e.dst] && e.src !== e.dst) adj.get(e.src).add(e.dst);
+    const comp = sccOf(ids, adj);
+    const compSize = {};
+    for (const id of ids) compSize[comp[id]] = (compSize[comp[id]] || 0) + 1;
+    // Edges inside a non-trivial SCC are the ones still closing a cycle.
+    const cyc = flow.edges.filter((e) => !e._return && byId[e.src] && byId[e.dst] && e.src !== e.dst && comp[e.src] === comp[e.dst] && compSize[comp[e.src]] > 1);
+    if (!cyc.length) break;
+    const byComp = {};
+    for (const e of cyc) { const k = comp[e.src]; if (!byComp[k] || (e.rate || 0) < (byComp[k].rate || 0)) byComp[k] = e; }
+    for (const k in byComp) byComp[k]._return = true;
+  }
+  // Column = longest path from a source over the now-acyclic graph (returns excluded).
+  // The DFS in-path guard stays as a belt-and-braces cycle break. Plain Kahn's layering
+  // dumped every node caught in a recycle loop into column 0; once by-product edges made
+  // those loops common (e.g. HOR <-> recycled plastic) the whole chart collapsed into a
+  // couple of absurdly tall columns. Longest-path layering gives every node a real
+  // column, spreading the graph wide instead of stacking it sky-high.
   const col = {};
   const mark = {}; // 1 = on current DFS path, 2 = finalized
   const depthOf = (id) => {
@@ -1664,7 +1734,7 @@ function layoutFlow(flow) {
     if (mark[id] === 1) return 0; // back-edge — break the cycle here
     mark[id] = 1;
     let d = 0;
-    for (const e of byId[id].ins) if (byId[e.src]) d = Math.max(d, depthOf(e.src) + 1);
+    for (const e of byId[id].ins) if (!e._return && byId[e.src]) d = Math.max(d, depthOf(e.src) + 1);
     mark[id] = 2;
     return (col[id] = d);
   };
@@ -1844,7 +1914,9 @@ function drawFlow(flow) {
       path.setAttribute('stroke', bandColor(e.item));
       path.setAttribute('stroke-width', e._bw);
       path.setAttribute('stroke-linecap', 'round');
-      path.setAttribute('stroke-opacity', '0.55');
+      path.setAttribute('stroke-opacity', e._return ? '0.4' : '0.55');
+      // Cycle returns dash inline (not CSS) so the PNG export keeps the distinction.
+      if (e._return) path.setAttribute('stroke-dasharray', '12 8');
       const tip = document.createElementNS(SVGNS, 'title');
       tip.textContent = e.label;
       path.appendChild(tip);
@@ -1856,7 +1928,7 @@ function drawFlow(flow) {
       t.setAttribute('class', 'edge-label');
       t.setAttribute('x', p.lx); t.setAttribute('y', p.ly);
       t.setAttribute('text-anchor', 'middle');
-      t.textContent = e.label;
+      t.textContent = (e._return ? '↩ ' : '') + e.label;
       gEdges.appendChild(t);
       e._label = t;
     });
@@ -1870,15 +1942,16 @@ function drawFlow(flow) {
       e._lt = EDGE_LABEL_TS[i % EDGE_LABEL_TS.length]; // stagger label along the curve
       const p = edgePath(e, flow.byId);
       const path = document.createElementNS(SVGNS, 'path');
-      path.setAttribute('class', 'edge-path');
+      // Cycle returns (see layoutFlow) read as dashed "return pipes", not normal flow.
+      path.setAttribute('class', 'edge-path' + (e._return ? ' edge-return' : ''));
       path.setAttribute('d', p.d);
       path.setAttribute('marker-end', 'url(#flowArrow)');
       gEdges.appendChild(path);
       const t = document.createElementNS(SVGNS, 'text');
-      t.setAttribute('class', 'edge-label');
+      t.setAttribute('class', 'edge-label' + (e._return ? ' edge-return-label' : ''));
       t.setAttribute('x', p.lx); t.setAttribute('y', p.ly);
       t.setAttribute('text-anchor', 'middle');
-      t.textContent = e.label;
+      t.textContent = (e._return ? '↩ ' : '') + e.label;
       gEdges.appendChild(t);
       e._path = path; e._label = t;
     });
@@ -3289,7 +3362,9 @@ function flowExportCss() {
   const good = cssVar('--good') || '#66bb6a';
   return (
     '.edge-path{fill:none;stroke:#4b566c;stroke-width:1.5}.flow-arrow{fill:#4b566c}' +
+    `.edge-path.edge-return{stroke-dasharray:7 5;stroke:${accent};opacity:.8}` +
     `.edge-label{fill:${muted};font:11px "Segoe UI",system-ui,sans-serif;paint-order:stroke;stroke:#11141a;stroke-width:4px}` +
+    `.edge-label.edge-return-label{fill:${accent}}` +
     '.node rect{stroke-width:1.5}' +
     `.node.raw rect{fill:#2b313c;stroke:#5b6675}.node.machine rect{fill:#3a2a12;stroke:${accent}}.node.out rect{fill:#15361f;stroke:${good}}` +
     '.node.sink rect{fill:#3a1530;stroke:#c061a4}.node.gen rect{fill:#1c2f3a;stroke:#4aa3c7}.node.depot rect{fill:#2c2740;stroke:#8a7bd8}' +

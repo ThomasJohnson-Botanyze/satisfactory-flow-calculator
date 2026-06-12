@@ -1098,6 +1098,54 @@ console.log('\n### WATER SINK (Wet Concrete) FLOWCHART WIRING');
   check('toggle off removes the wet node', !w.__lastFlow.nodes.some((n) => n.id.startsWith('wet|')));
 }
 
+// ---- Flowchart layout: no backwards normal lines; cycle returns dashed; raw co-providers ----
+// Aluminum with water sinking OFF keeps the classic backfeed: Aluminum Scrap's by-product
+// water returns to Alumina Solution, while the small shortfall is mined fresh. That used
+// to draw (a) an arbitrary right-to-left edge through the middle of the chart and (b) a
+// floating raw Water node with no edge (consumers drew 100% from the producer, overstated).
+console.log('\n### FLOW LAYOUT: RETURN EDGES + RAW CO-PROVIDERS');
+{
+  const { w, d, setVal, click } = boot13(null);
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  const row = d.querySelector('#optOutputs .row');
+  setVal(row.querySelector('.row-item'), 'Aluminum Ingot');
+  setVal(row.querySelector('.row-rate'), '240');
+  click(d.getElementById('viewFlow'));
+  const flow = w.__lastFlow;
+  const WATER = 'Desc_Water_C';
+  // (b) raw water is a CO-provider: node exists AND feeds a machine; rates split so the
+  // producer's water edge no longer overstates (raw edge ≈ the fresh shortfall).
+  const rawWaterEdges = flow.edges.filter((e) => e.src === 'raw|' + WATER);
+  check('raw Water node is connected (no floating input)', rawWaterEdges.length >= 1 && rawWaterEdges.every((e) => e.rate > 1e-6));
+  const machineWaterEdges = flow.edges.filter((e) => e.item === WATER && e.src.startsWith('mac|'));
+  check('by-product water still flows machine→machine (the loop exists)', machineWaterEdges.length >= 1);
+  const waterIn = flow.edges.filter((e) => e.item === WATER && e.dst.startsWith('mac|')).reduce((a, e) => a + e.rate, 0);
+  const rawNode = flow.byId['raw|' + WATER];
+  const rawSub = parseFloat((rawNode.sub || '').replace(/,/g, ''));
+  const prodWater = machineWaterEdges.reduce((a, e) => a + e.rate, 0);
+  check('water edges balance: raw share + producer share = total draw', Math.abs((rawWaterEdges.reduce((a, e) => a + e.rate, 0) + prodWater) - waterIn) < 0.5);
+  check('raw water edge stays near the mined amount (no overstated producer edge)', Math.abs(rawWaterEdges.reduce((a, e) => a + e.rate, 0) - rawSub) < 0.5);
+  // (a) layout: every NORMAL edge flows left -> right; only marked returns go back.
+  const returns = flow.edges.filter((e) => e._return);
+  check('the cycle has exactly its return leg marked', returns.length >= 1);
+  const backwardsNormals = flow.edges.filter((e) => !e._return && flow.byId[e.src] && flow.byId[e.dst]
+    && (flow.byId[e.src].x + flow.byId[e.src].w / 2) >= (flow.byId[e.dst].x + flow.byId[e.dst].w / 2));
+  check('no normal edge travels backwards after auto-layout', backwardsNormals.length === 0);
+  check('return edge drawn dashed with the ↩ label',
+    d.querySelectorAll('#flowSvg .edge-path.edge-return').length === returns.length
+    && [...d.querySelectorAll('#flowSvg .edge-label')].some((t) => t.textContent.startsWith('↩')));
+  // Reset layout re-runs the same auto-layout — still no backwards normals.
+  click(d.getElementById('flowReset'));
+  const flow2 = w.__lastFlow;
+  const back2 = flow2.edges.filter((e) => !e._return && flow2.byId[e.src] && flow2.byId[e.dst]
+    && (flow2.byId[e.src].x + flow2.byId[e.src].w / 2) >= (flow2.byId[e.dst].x + flow2.byId[e.dst].w / 2));
+  check('reset layout keeps every normal edge forward', back2.length === 0);
+  // Sankey shares the marking: return band dashed inline (survives PNG export).
+  click(d.getElementById('viewSankey'));
+  const dashed = [...d.querySelectorAll('#flowSvg .sankey-band')].filter((b) => b.getAttribute('stroke-dasharray'));
+  check('sankey return band dashed inline', dashed.length >= 1);
+}
+
 // ---- Multi-factory: whole-base balance + dependency graph ----
 console.log('\n### MULTI-FACTORY: BASE BALANCE + DEPENDENCY GRAPH');
 {

@@ -622,8 +622,12 @@ tbody tr.step-done .mach-sub, tbody tr.step-done .tag-alt { color: var(--good); 
 .np-note { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.35; }
 .np-foot { font-size: 10px; color: var(--muted); margin-top: 12px; text-align: center; opacity: 0.8; }
 .edge-path { fill: none; stroke: #4b566c; stroke-width: 1.5; }
+/* Cycle return lines (the one leg of a recycle loop that must travel right-to-left):
+   dashed + accent so they read as a deliberate "return pipe", not a confusing crossing. */
+.edge-path.edge-return { stroke-dasharray: 7 5; stroke: var(--accent); opacity: 0.8; }
 .flow-arrow { fill: #4b566c; }
 .edge-label { fill: #c2cad8; font-size: 11px; paint-order: stroke; stroke: #11141a; stroke-width: 4px; }
+.edge-label.edge-return-label { fill: var(--accent); }
 /* Sankey ribbons: per-band stroke/width/colour are set inline (so PNG export keeps them);
    here we only add the hover emphasis that highlights a single flow under the cursor. */
 .sankey-band { fill: none; stroke-linejoin: round; }
