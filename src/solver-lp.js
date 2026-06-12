@@ -632,8 +632,31 @@ function optimizeCleanest(params) {
   return finish(best);
 }
 
-function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null }) {
-  const { model, pool } = buildModel({ inputs: supply, maxItem: product, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes });
+// Max throughput. Single form: `product` — maximize that item's net output. Multi form:
+// `products` = [{ item, ratio }] — maximize a scalar T with every item's net output held
+// to AT LEAST ratio_i × T (the user-chosen output ratio), via a pseudo-variable __T__
+// whose item coefficients are -ratio_i and which alone carries the max objective. The
+// ratio is a floor, not an equality: a by-product overrun on one item never blocks T.
+function maxThroughput({ product, products, supply, allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null }) {
+  const multi = Array.isArray(products) && products.length
+    ? products.filter((p) => p && p.item && Number(p.ratio) > 0)
+    : null;
+  if (multi && !multi.length) return { feasible: false };
+  const { model, pool } = buildModel({ inputs: supply, maxItem: multi ? null : product, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes });
+  if (multi) {
+    // No pooled recipe produces a demanded item (and it isn't supplied) → name it
+    // instead of letting the dropped constraint report a hollow "feasible" T.
+    const noProducer = multi.filter((p) => supply[p.item] == null && !pool.some((rc) => (RC_INFO[rc].out[p.item] || 0) > 0)).map((p) => p.item);
+    if (noProducer.length) return { feasible: false, noProducer };
+    const tv = { _out: 1, _power: 0, _machines: 0, _raw: 0 };
+    for (const p of multi) {
+      tv[p.item] = (tv[p.item] || 0) - Number(p.ratio);
+      if (!model.constraints[p.item]) model.constraints[p.item] = { min: 0 };
+    }
+    model.variables.__T__ = tv;
+    model.optimize = '_out';
+    model.opType = 'max';
+  }
   const res = solver.Solve(model);
   // An unbounded objective (e.g. a cost multiplier < 1 rounding a package<->unpackage
   // pair matter-positive) reports as feasible with result = Infinity — surface it as
@@ -642,7 +665,8 @@ function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1
   if (!res.feasible || !(res.result > 1e-6)) return { feasible: false };
   const sum = summarize(res, pool, recipeCost, powerMult);
   sum.feasible = true;
-  sum.maxOutput = res.result;
+  sum.maxOutput = res.result; // single: the item's rate; multi: the ratio scalar T
+  if (multi) sum.maxOutputs = multi.map((p) => ({ item: p.item, ratio: Number(p.ratio), rate: Number(p.ratio) * res.result }));
   sum.utilization = [];
   for (const it in supply) {
     const avail = supply[it];

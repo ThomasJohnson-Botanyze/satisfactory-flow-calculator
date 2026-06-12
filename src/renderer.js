@@ -399,7 +399,10 @@ const defaultState = () => ({
   },
   // Max-supply rows are { item, amount }, optionally + { fromPlanId, fromItem } so the
   // amount tracks an upstream plan's output (same Project link as opt.extraInputs).
-  max: { supply: [{ item: resList[0] ? resList[0].c : '', amount: 120 }], product: '', alts: true },
+  // outputs = desired products with a user-chosen ratio between them (e.g. 2:1); the
+  // solver maximizes a scalar T with every product held to ratio×T. Legacy single
+  // `product` is kept as the primary-output sync target; outputs[0] mirrors it.
+  max: { supply: [{ item: resList[0] ? resList[0].c : '', amount: 120 }], product: '', outputs: [], alts: true },
   // Power Planner: a whole-factory power ledger over this plan's production. sourceMode =
   // which production solve to read (optimize|max|planner); minerTier = miner used for solid
   // raws; purity = per-resource node purity (rawClass -> impure|normal|pure); gens = the
@@ -3192,13 +3195,15 @@ function computeStateResult(st) {
       return { feasible: true, res, targets: outputs };
     }
     if (m === 'max') {
-      const product = st.max.product;
+      const products = maxProductsFor(st);
       const supply = maxSupplyMap(st);
-      if (!product || !Object.keys(supply).length) return { feasible: false };
-      const res = LP.maxThroughput({ product, supply, allowAlternates: st.max.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet() });
+      if (!products.length || !Object.keys(supply).length) return { feasible: false };
+      const res = LP.maxThroughput({ products, supply, allowAlternates: st.max.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet() });
       if (!res.feasible) return { feasible: false };
-      res.surplus = res.outputs.filter((o) => o.item !== product);
-      return { feasible: true, res, targets: { [product]: res.maxOutput } };
+      const targets = {};
+      for (const mo of (res.maxOutputs || [{ item: products[0].item, rate: res.maxOutput }])) targets[mo.item] = mo.rate;
+      res.surplus = res.outputs.filter((o) => targets[o.item] == null);
+      return { feasible: true, res, targets };
     }
     // planner
     const targets = plannerTargetsFor(st);
@@ -3430,24 +3435,50 @@ function renderOptimize() {
   $('modeExtras').appendChild(ex);
 }
 
+// Valid Max-Throughput products for a (possibly non-active) plan state: rows with a
+// resolvable item and a positive ratio; legacy single max.product seeds one 1:1 row.
+function maxProductsFor(st) {
+  const rows = (st.max && Array.isArray(st.max.outputs)) ? st.max.outputs : [];
+  const out = [];
+  for (const o of rows) {
+    const c = nameToClass(o.name);
+    if (c && Number(o.ratio) > 0) out.push({ item: c, ratio: Number(o.ratio) });
+  }
+  if (!out.length && st.max && st.max.product) out.push({ item: st.max.product, ratio: 1 });
+  return out;
+}
 function renderMax() {
   $('sumExtraLabel').textContent = 'Inputs at 100%';
-  const product = state.max.product;
-  if (!product) return showEmpty('Choose a product to maximize.');
+  const products = maxProductsFor(state);
+  if (!products.length) return showEmpty('Choose at least one product to maximize (and give each a ratio).');
   const supply = maxSupplyMap(state); // honors linked-supply amounts (Project links)
   if (!Object.keys(supply).length) return showEmpty('Add at least one available input with an amount.');
-  const res = LP.maxThroughput({ product, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet() });
+  const res = LP.maxThroughput({ products, supply, allowAlternates: state.max.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet() });
+  const names = products.map((p) => itemName(p.item)).join(', ');
   if (!res.feasible) {
-    if (res.unbounded) return showEmpty(`Output of ${itemName(product)} is unbounded with these inputs — a recipe pair turns matter-positive under the current Recipe Parts Cost Multiplier (its rounding makes a package/unpackage loop create matter). Set the multiplier back to 1× or remove the packaged input.`);
-    if (blockedOrphans([product]).length) return showEmpty(blockedWarn([product], 'build'));
-    return showEmpty(`Cannot produce ${itemName(product)} from the given inputs.`);
+    if (res.unbounded) return showEmpty(`Output of ${names} is unbounded with these inputs — a recipe pair turns matter-positive under the current Recipe Parts Cost Multiplier (its rounding makes a package/unpackage loop create matter). Set the multiplier back to 1× or remove the packaged input.`);
+    if (res.noProducer && res.noProducer.length) return showEmpty(`No enabled recipe produces: ${res.noProducer.map(itemName).join(', ')}. Re-enable a producer or supply it as an input.`);
+    const dead = blockedOrphans(products.map((p) => p.item));
+    if (dead.length) return showEmpty(blockedWarn(dead, 'build'));
+    return showEmpty(`Cannot produce ${names} at that ratio from the given inputs.`);
   }
-  res.surplus = res.outputs.filter((o) => o.item !== product);
-  present(res, { [product]: res.maxOutput });
+  const targets = {};
+  for (const m of (res.maxOutputs || [{ item: products[0].item, rate: res.maxOutput }])) targets[m.item] = m.rate;
+  res.surplus = res.outputs.filter((o) => targets[o.item] == null);
+  present(res, targets);
 
   const b = $('maxBanner');
   b.hidden = false;
-  b.innerHTML = `<span class="banner-num">${fmt(res.maxOutput)}</span> <span class="banner-unit">${isFluid(product) ? 'm³' : ''}/min ${itemName(product)}</span>`;
+  if (products.length === 1) {
+    const product = products[0].item;
+    b.innerHTML = `<span class="banner-num">${fmt(res.maxOutput)}</span> <span class="banner-unit">${isFluid(product) ? 'm³' : ''}/min ${itemName(product)}</span>`;
+  } else {
+    // Ratio-locked set: show each product's rate at the maximized scalar.
+    const ratioTxt = (res.maxOutputs || []).map((m) => fmt(m.ratio)).join(' : ');
+    b.innerHTML = (res.maxOutputs || []).map((m) =>
+      `<span class="banner-num">${fmt(m.rate)}</span> <span class="banner-unit">${isFluid(m.item) ? 'm³' : ''}/min ${itemName(m.item)}</span>`
+    ).join(' &nbsp;·&nbsp; ') + ` <span class="banner-unit">(ratio ${ratioTxt})</span>`;
+  }
   $('sumRaw').textContent = res.binding.length ? '✓' : '—';
   const ex = el('div', 'extras-card');
   ex.appendChild(el('div', 'extras-title', `Limiting factor: ${res.binding.length ? res.binding.map(itemName).join(', ') : '—'}`));
@@ -3978,6 +4009,39 @@ function buildMaxSupply() {
     amt.addEventListener('input', () => { s.amount = parseFloat(amt.value) || 0; save(); solveAndRender(); });
     rm.addEventListener('click', () => { state.max.supply.splice(i, 1); if (!state.max.supply.length) state.max.supply.push({ item: resList[0].c, amount: 120 }); save(); buildMaxSupply(); solveAndRender(); });
     row.append(name, amt, link, rm);
+    box.appendChild(row);
+  });
+}
+// Desired outputs for Max Throughput: rows of { name, ratio }. The first row doubles as
+// the plan's primary output (synced across tabs via reflectPrimary). An old plan that
+// only has max.product gets a single seeded row on first build.
+function maxOutputRows() {
+  if (!Array.isArray(state.max.outputs)) state.max.outputs = [];
+  if (!state.max.outputs.length && state.max.product) state.max.outputs.push({ name: itemName(state.max.product), ratio: 1 });
+  if (!state.max.outputs.length) state.max.outputs.push({ name: '', ratio: 1 });
+  return state.max.outputs;
+}
+function buildMaxOutputs() {
+  const box = $('maxOutputs');
+  if (!box) return;
+  box.innerHTML = '';
+  maxOutputRows().forEach((o, i) => {
+    const row = el('div', 'row');
+    const name = el('input', 'row-item'); name.setAttribute('list', 'itemList'); name.placeholder = 'item…';
+    name.value = o.name || ''; name.autocomplete = 'off';
+    const ratio = el('input', 'row-rate'); ratio.type = 'number'; ratio.min = '0'; ratio.step = 'any';
+    ratio.value = o.ratio == null ? 1 : o.ratio; ratio.title = 'Ratio share of this product (e.g. 2 and 1 = two of this per one of the other)';
+    const rm = el('button', 'row-rm', '×'); rm.setAttribute('aria-label', 'Remove'); rm.title = 'Remove';
+    const syncPrimary = () => {
+      if (i !== 0) return;
+      const c = nameToClass(name.value);
+      state.max.product = c || '';
+      if (c) { state.targetItem = c; reflectPrimary('max'); }
+    };
+    name.addEventListener('input', () => { o.name = name.value; syncPrimary(); save(); solveAndRender(); });
+    ratio.addEventListener('input', () => { o.ratio = parseFloat(ratio.value) || 0; save(); solveAndRender(); });
+    rm.addEventListener('click', () => { state.max.outputs.splice(i, 1); if (i === 0) state.max.product = ''; save(); buildMaxOutputs(); solveAndRender(); });
+    row.append(name, ratio, rm);
     box.appendChild(row);
   });
 }
@@ -4737,6 +4801,8 @@ function reflectPrimary(except) {
   const item = state.targetItem;
   const disp = item ? itemName(item) : '';
   state.max.product = item || '';
+  const m0 = (Array.isArray(state.max.outputs) && state.max.outputs[0]) || null;
+  if (m0) m0.name = disp; else if (disp) (state.max.outputs = state.max.outputs || []).push({ name: disp, ratio: 1 });
   const o0 = state.opt.outputs[0] || (state.opt.outputs[0] = { name: '', rate: 60 });
   o0.name = disp;
   o0.rate = state.targetRate;
@@ -4745,7 +4811,7 @@ function reflectPrimary(except) {
     if ($('targetRate')) $('targetRate').value = state.targetRate;
     if ($('rateUnit')) $('rateUnit').textContent = item && isFluid(item) ? 'm³ / min' : '/ min';
   }
-  if (except !== 'max' && $('maxProduct')) $('maxProduct').value = disp;
+  if (except !== 'max') buildMaxOutputs();
   if (except !== 'optimize') buildOptOutputs();
 }
 // Push the active plan's state into every control, then render.
@@ -4756,6 +4822,7 @@ function applyStateToControls() {
   buildOptInputs();
   buildOptExtraInputs();
   buildMaxSupply();
+  buildMaxOutputs();
   buildPowerControls();
   buildGameSelect('mRecipe', GAME.recipe, state.recipeCost);
   buildGameSelect('mPower', GAME.power, state.powerMult);
@@ -4775,7 +4842,6 @@ function applyStateToControls() {
   $('optAlts').checked = state.opt.alts;
   $('optSink').checked = state.opt.sink !== false; // default on, incl. plans saved before this option existed
   $('optWaterSink').checked = !!state.opt.waterSink; // default off; opt-in per plan
-  $('maxProduct').value = state.max.product ? itemName(state.max.product) : '';
   $('maxAlts').checked = state.max.alts;
   if ($('xrayWholeBase')) $('xrayWholeBase').checked = !!state.xrayWholeBase;
   if (mapDrawing) cancelAreaDraw(); // a plan switch mid-trace would write to the wrong plan
@@ -4935,9 +5001,7 @@ function init() {
   $('optAddInput').addEventListener('click', () => { (state.opt.extraInputs || (state.opt.extraInputs = [])).push({ name: '', cap: '' }); save(); buildOptExtraInputs(); });
 
   $('maxAddSupply').addEventListener('click', () => { state.max.supply.push({ item: resList[0].c, amount: 60 }); save(); buildMaxSupply(); });
-  const onProduct = (v) => { const c = nameToClass(v); state.max.product = c; if (c) { state.targetItem = c; reflectPrimary('max'); } save(); solveAndRender(); };
-  $('maxProduct').addEventListener('change', (e) => onProduct(e.target.value));
-  $('maxProduct').addEventListener('input', (e) => { if (nameToClass(e.target.value)) onProduct(e.target.value); });
+  $('maxAddOutput').addEventListener('click', () => { maxOutputRows().push({ name: '', ratio: 1 }); save(); buildMaxOutputs(); });
   $('maxAlts').addEventListener('change', (e) => { state.max.alts = e.target.checked; save(); solveAndRender(); });
 
   $('planNew').addEventListener('click', () => newPlan());

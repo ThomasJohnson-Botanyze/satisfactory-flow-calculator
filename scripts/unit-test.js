@@ -23,6 +23,19 @@ check('maxThroughput feasible', mt.feasible === true);
 check('60 ore -> 60 ingot', near(mt.maxOutput, 60, 0.5));
 check('ore is the binding input', mt.binding.includes(IronOre));
 
+// Multi-output ratio: 2 Iron Plate : 1 Iron Rod from 60 ore, alts off.
+// Plate costs 1.5 ore, Rod costs 1 ore -> one ratio unit = 2(1.5)+1 = 4 ore -> T=15.
+const mr = LP.maxThroughput({ products: [{ item: IronPlate, ratio: 2 }, { item: cls('Iron Rod'), ratio: 1 }], supply: { [IronOre]: 60 }, allowAlternates: false });
+check('ratio max feasible', mr.feasible === true);
+check('ratio scalar T = 15', near(mr.maxOutput, 15, 0.1));
+check('plates at 2x T = 30/min', !!mr.maxOutputs && near(mr.maxOutputs.find((m) => m.item === IronPlate).rate, 30, 0.1));
+check('rods at 1x T = 15/min', !!mr.maxOutputs && near(mr.maxOutputs.find((m) => m.item === cls('Iron Rod')).rate, 15, 0.1));
+check('ore binds the ratio set', mr.binding.includes(IronOre));
+const mr1 = LP.maxThroughput({ products: [{ item: IronIngot, ratio: 1 }], supply: { [IronOre]: 60 }, allowAlternates: false });
+check('single-row ratio == legacy single product', mr1.feasible && near(mr1.maxOutput, mt.maxOutput, 0.1));
+const mrBad = LP.maxThroughput({ products: [{ item: IronIngot, ratio: 1 }], supply: {}, allowAlternates: false });
+check('no supply -> infeasible (ratio path)', mrBad.feasible === false);
+
 // Optimize: make 30 Iron Ingot/min from ore, minimize raw, alts off.
 const opt = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: { [IronOre]: Infinity }, objective: 'raw', allowAlternates: false });
 check('optimize feasible', opt.feasible === true);

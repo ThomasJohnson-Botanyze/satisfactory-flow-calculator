@@ -1079,6 +1079,36 @@ console.log('\n### MULTI-FACTORY: BOTTLENECK (OVER-SUBSCRIBED SOURCE)');
   check('a bottleneck edge is drawn in red', [...d.querySelectorAll('#depSvg path')].some((pt) => (pt.getAttribute('stroke') || '').includes('ff5b5b')));
 }
 
+// ---- Max Throughput: multiple desired outputs locked to a user ratio ----
+console.log('\n### MAX THROUGHPUT: RATIO OUTPUTS');
+{
+  const { w, d, setVal, click } = boot13(null);
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'max'));
+  // Supply: 60 Iron Ore (replace the default supply row).
+  const srow = d.querySelector('#maxSupply .row');
+  setVal(srow.querySelector('.row-item'), 'Iron Ore');
+  setVal(srow.querySelector('.row-rate'), '60');
+  // Outputs: Iron Plate at ratio 2, Iron Rod at ratio 1. Alts off for determinism.
+  const alts = d.getElementById('maxAlts'); if (alts.checked) { alts.checked = false; alts.dispatchEvent(new w.Event('change', { bubbles: true })); }
+  const row0 = d.querySelector('#maxOutputs .row');
+  setVal(row0.querySelector('.row-item'), 'Iron Plate');
+  setVal(row0.querySelector('.row-rate'), '2');
+  click(d.getElementById('maxAddOutput'));
+  const row1 = d.querySelectorAll('#maxOutputs .row')[1];
+  setVal(row1.querySelector('.row-item'), 'Iron Rod');
+  setVal(row1.querySelector('.row-rate'), '1');
+  const banner = d.getElementById('maxBanner');
+  check('ratio banner shown', !banner.hidden && /ratio/.test(banner.textContent));
+  check('banner reports 30/min plates and 15/min rods', /30/.test(banner.textContent) && /15/.test(banner.textContent));
+  const st = JSON.parse(w.localStorage.getItem('satisfactory-factory-plans-v1'));
+  const ap = st.plans.find((p) => p.id === st.activeId);
+  check('ratio outputs persisted', Array.isArray(ap.state.max.outputs) && ap.state.max.outputs.length === 2 && Number(ap.state.max.outputs[0].ratio) === 2);
+  // Removing the second row falls back to single-product behavior.
+  click(d.querySelectorAll('#maxOutputs .row')[1].querySelector('.row-rm'));
+  check('single row again after remove', d.querySelectorAll('#maxOutputs .row').length === 1);
+  check('single-product banner restored (no ratio note)', !d.getElementById('maxBanner').hidden && !/ratio/.test(d.getElementById('maxBanner').textContent));
+}
+
 // ---- Blank-store guard: a session that boots off the blank fallback (its plans.json
 // read failed transiently) stamps a NEWER savedAt single-blank store into localStorage.
 // On the next boot that ghost must not outvote the real multi-plan file. ----
