@@ -196,6 +196,25 @@ tbody td { padding: 8px 12px; border-top: 1px solid var(--line); vertical-align:
 tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 
+/* Build-progress checklist (tables): the checkbox column + the green done state. */
+th.chk, td.chk { width: 30px; padding-right: 0; }
+.done-cb { accent-color: var(--good); width: 15px; height: 15px; cursor: pointer; }
+tbody tr.step-done { background: rgba(102, 187, 106, 0.10); }
+tbody tr.step-done:hover { background: rgba(102, 187, 106, 0.16); }
+tbody tr.step-done td { color: var(--good); }
+tbody tr.step-done .mach-sub, tbody tr.step-done .tag-alt { color: var(--good); opacity: 0.75; }
+.done-count {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--muted);
+  vertical-align: 1px;
+}
+.done-count.all-done { color: var(--good); border-color: var(--good); }
+
 .item-cell { display: flex; align-items: center; gap: 8px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
 .dot.fluid { background: #4fc3f7; }
@@ -552,6 +571,18 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
 /* A tunable machine node is clickable (opens the Overclock / Somersloop popup). */
 .node.tunable:hover rect { stroke-width: 2.5; filter: brightness(1.12); }
+
+/* Build-progress checklist: a done step turns green in every view. The corner tick
+   on flow/Sankey nodes is the toggle; it must stay its own hit target (the node body
+   drags / opens the settings popup). */
+.node.step-done rect { fill: #1d3a24; stroke: var(--good); }
+.node.step-done .n-title { fill: var(--good); }
+.node .n-check { cursor: pointer; }
+.node .n-check circle { fill: rgba(0, 0, 0, 0.25); stroke: #5b6675; stroke-width: 1.2; }
+.node .n-check:hover circle { stroke: var(--good); filter: brightness(1.2); }
+.node .n-check .n-tick { fill: none; stroke: transparent; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.node.step-done .n-check circle { fill: var(--good); stroke: var(--good); }
+.node.step-done .n-check .n-tick { stroke: #0c1510; }
 
 /* Floating node settings popup (Overclock + Somersloop). Lives on <body>, positioned
    in screen px next to the tapped node; sits above the flow viewport. */

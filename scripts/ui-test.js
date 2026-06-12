@@ -66,7 +66,7 @@ setVal(D.getElementById('mPower'), '1', 'change');
 console.log('\n### PER-NODE OVERCLOCK');
 const mw = () => parseFloat(D.getElementById('sumPower').textContent);
 const clockInputs = () => [...D.querySelectorAll('#prodTable tbody .clock-input')];
-check('Clock + Sloops columns present', D.querySelectorAll('#prodTable thead th').length === 8);
+check('Built + Clock + Sloops columns present', D.querySelectorAll('#prodTable thead th').length === 9);
 check('every step has a clock input', clockInputs().length === prodRows());
 const mwBefore = mw();
 setVal(clockInputs()[0], '250', 'change');
@@ -245,7 +245,7 @@ const fire5 = (n, t) => n.dispatchEvent(new dom5.window.Event(t, { bubbles: true
 const setVal5 = (n, v, t = 'input') => { n.value = v; fire5(n, t); };
 const click5 = (n) => n.dispatchEvent(new dom5.window.Event('click', { bubbles: true }));
 const rows5 = () => d5.querySelectorAll('#prodTable tbody tr').length;
-const itemTexts5 = () => [...d5.querySelectorAll('#prodTable tbody tr td:first-child')].map((td) => td.textContent);
+const itemTexts5 = () => [...d5.querySelectorAll('#prodTable tbody tr td:nth-child(2)')].map((td) => td.textContent); // col 1 = Built checkbox
 click5([...d5.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
 setVal5(d5.getElementById('targetItem'), 'Iron Plate'); setVal5(d5.getElementById('targetRate'), '30');
 const baseRows5 = rows5();
@@ -284,12 +284,12 @@ const d8 = dom8.window.document;
 const fire8 = (n, t) => n.dispatchEvent(new dom8.window.Event(t, { bubbles: true }));
 const setVal8 = (n, v, t = 'input') => { n.value = v; fire8(n, t); };
 const click8 = (n) => n.dispatchEvent(new dom8.window.Event('click', { bubbles: true }));
-const itemTexts8 = () => [...d8.querySelectorAll('#prodTable tbody tr td:first-child')].map((td) => td.textContent);
+const itemTexts8 = () => [...d8.querySelectorAll('#prodTable tbody tr td:nth-child(2)')].map((td) => td.textContent); // col 1 = Built checkbox
 const depotRowTexts8 = () => [...d8.querySelectorAll('#depotTable tbody tr td:first-child')].map((td) => td.textContent);
 const ironRodRate = () => { // gross /min produced for Iron Rod across all its production rows
   let r = 0;
   [...d8.querySelectorAll('#prodTable tbody tr')].forEach((tr) => {
-    if (/Iron Rod/.test(tr.querySelector('td:first-child').textContent)) r += parseFloat(tr.querySelector('td:nth-child(3)').textContent) || 0;
+    if (/Iron Rod/.test(tr.querySelector('td:nth-child(2)').textContent)) r += parseFloat(tr.querySelector('td:nth-child(4)').textContent) || 0;
   });
   return r;
 };
@@ -1205,6 +1205,58 @@ console.log('\n### BLANK-STORE GUARD (transient read failure)');
   check('edited ghost keeps its plan AND the file plans merge back in', namesI.length === 3 && namesI.includes('Motors') && namesI.includes('Turbofuel') && namesI.includes('Factory 1'));
   const unionParsed = (() => { try { return JSON.parse(savedUnion || domI.window.localStorage.getItem('satisfactory-factory-plans-v1')); } catch (_) { return null; } })();
   check('merged union persisted (3 plans saved)', !!unionParsed && unionParsed.plans.length === 3);
+}
+
+// ---- build-progress checklist (done steps) ----
+// Checking a step marks it green in the table, the flowchart and the Sankey view
+// (shared key = flow node id), persists per-plan, and unchecking reverts.
+console.log('\n### DONE-STEP CHECKLIST');
+{
+  const domC = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+  global.window = domC.window; global.document = domC.window.document;
+  global.localStorage = domC.window.localStorage; global.location = domC.window.location;
+  global.Event = domC.window.Event;
+  domC.window.confirm = () => true; global.confirm = domC.window.confirm;
+  if (!domC.window.SVGElement.prototype.setPointerCapture) domC.window.SVGElement.prototype.setPointerCapture = () => {};
+  domC.window.localStorage.clear();
+  delete require.cache[require.resolve('../src/renderer.js')];
+  require('../src/renderer.js');
+  domC.window.dispatchEvent(new domC.window.Event('DOMContentLoaded'));
+  const d = domC.window.document;
+  const fireC = (n, t) => n.dispatchEvent(new domC.window.Event(t, { bubbles: true }));
+  const clickC = (n) => fireC(n, 'click');
+  clickC([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
+  const ti = d.getElementById('targetItem'); ti.value = 'Reinforced Iron Plate'; fireC(ti, 'input');
+  const tr0 = d.querySelector('#prodTable tbody tr[data-done-key]');
+  check('production rows carry a done checkbox', !!tr0 && !!tr0.querySelector('input.done-cb'));
+  const key0 = tr0.dataset.doneKey;
+  const appC = domC.window.__app;
+  // toggle on via the table checkbox
+  const cb = tr0.querySelector('input.done-cb'); cb.checked = true; fireC(cb, 'change');
+  check('checked row turns green (step-done class)', tr0.classList.contains('step-done'));
+  check('done flag stored on the plan state', appC.state.doneSteps && appC.state.doneSteps[key0] === 1);
+  check('progress chip counts it', d.getElementById('doneCount').textContent.startsWith('1 / '));
+  // raw rows toggle too
+  const rawTr = d.querySelector('#rawTable tbody tr[data-done-key]');
+  const rawCb = rawTr.querySelector('input.done-cb'); rawCb.checked = true; fireC(rawCb, 'change');
+  check('raw-supply row toggles green', rawTr.classList.contains('step-done'));
+  // flowchart shows the same mark + its own toggle glyph
+  clickC(d.getElementById('viewFlow'));
+  const doneNodes = () => [...d.querySelectorAll('#flowSvg .node.step-done')];
+  check('flow view shows both marks green', doneNodes().length === 2);
+  check('machine + raw nodes have a check glyph', d.querySelectorAll('#flowSvg .node .n-check').length >= 5);
+  // toggle OFF from the flow glyph (pointerup), then re-render: stays off everywhere
+  const doneMachine = doneNodes().find((g) => g.classList.contains('machine'));
+  fireC(doneMachine.querySelector('.n-check'), 'pointerup');
+  check('glyph click unmarks the step in place', doneNodes().length === 1);
+  check('state cleared for that key', !appC.state.doneSteps[key0]);
+  // Sankey view carries the remaining mark (raw node) with the same id-keyed class
+  clickC(d.getElementById('viewSankey'));
+  check('sankey view keeps the raw mark green', [...d.querySelectorAll('#flowSvg .node.step-done')].length === 1);
+  // marks persist through the save payload
+  const payloadC = (() => { try { return JSON.parse(domC.window.localStorage.getItem('satisfactory-factory-plans-v1')); } catch (_) { return null; } })();
+  const savedPlanC = payloadC && payloadC.plans.find((p) => p.id === appC.activeId);
+  check('doneSteps persisted in the saved plan', !!savedPlanC && !!savedPlanC.state.doneSteps && Object.keys(savedPlanC.state.doneSteps).length === 1);
 }
 
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);

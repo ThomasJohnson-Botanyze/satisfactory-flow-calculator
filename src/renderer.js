@@ -360,6 +360,12 @@ const defaultState = () => ({
   nodeSloop: {},
   flowPos: {}, // saved flowchart node positions for this plan (nodeId -> {x,y})
   flowView: null, // saved flowchart zoom/pan for this plan ({k, tx, ty}); null = fit on render
+  // Build-progress checklist: step key -> 1 for steps the user has marked done in the
+  // factory (green across the table, flowchart and Sankey views). Keys reuse the flow
+  // node ids ('mac|<recipeClass>' for production steps, 'raw|<itemClass>' for resource
+  // supply) so all three views and re-solves agree. Stale keys (recipe swapped out of
+  // the plan) are inert and harmless. Per-plan; cleared by "Clear plan".
+  doneSteps: {},
   // When on, the flowchart shows power infrastructure (opt-in): miner/extractor nodes at
   // the front feeding each raw, and generator nodes at the end burning the outputs added
   // in the Power Planner. Off by default so existing charts are unchanged. Per-plan.
@@ -1255,11 +1261,68 @@ function sloopCell(s) {
   td.appendChild(sel);
   return td;
 }
+// ---------- build-progress checklist (done steps) ----------
+// A step's done flag lives in state.doneSteps under its flow-node id, so the table
+// row, the flowchart node and the Sankey node all read/write the same mark and the
+// mark survives re-solves (ids are keyed by recipe class / item class, not row order).
+const stepDone = (key) => !!((state.doneSteps || {})[key]);
+function toggleStepDone(key) {
+  if (!state.doneSteps) state.doneSteps = {};
+  if (state.doneSteps[key]) delete state.doneSteps[key];
+  else state.doneSteps[key] = 1;
+  save();
+  refreshDoneMarks();
+}
+// Repaint every done mark in place (no re-solve, no re-layout): table rows carry
+// data-done-key, flow/Sankey nodes carry _doneKey on their datum.
+function refreshDoneMarks() {
+  document.querySelectorAll('[data-done-key]').forEach((row) => {
+    const on = stepDone(row.dataset.doneKey);
+    row.classList.toggle('step-done', on);
+    const cb = row.querySelector('input.done-cb');
+    if (cb) cb.checked = on;
+  });
+  if (currentFlow && currentFlow.nodes) {
+    for (const n of currentFlow.nodes) {
+      if (n._g && n._doneKey) n._g.classList.toggle('step-done', stepDone(n._doneKey));
+    }
+  }
+  updateDoneCounter();
+}
+// "x / y built" progress chip next to the Production-steps title (and mirrored in the
+// flow toolbar hint via title attr). Counts production steps only — raw rows are
+// supply, not construction work, so they don't gate "everything built".
+function updateDoneCounter() {
+  const elc = $('doneCount');
+  if (!elc) return;
+  const steps = (lastResult && lastResult.recipes) || [];
+  const total = steps.length;
+  const done = steps.filter((s) => stepDone('mac|' + s.rc)).length;
+  elc.hidden = total === 0;
+  elc.textContent = `${done} / ${total} built`;
+  elc.classList.toggle('all-done', total > 0 && done === total);
+}
+// The checkbox cell shared by the production + raw tables.
+function doneCell(key) {
+  const td = el('td', 'chk');
+  const cb = el('input', 'done-cb');
+  cb.type = 'checkbox';
+  cb.checked = stepDone(key);
+  cb.title = 'Mark this step as built';
+  cb.addEventListener('change', () => toggleStepDone(key));
+  td.appendChild(cb);
+  return td;
+}
+
 function renderTables(res) {
   const tb = $('prodTable').querySelector('tbody');
   tb.innerHTML = '';
   res.recipes.slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((s) => {
     const tr = el('tr');
+    const key = 'mac|' + s.rc;
+    tr.dataset.doneKey = key;
+    if (stepDone(key)) tr.classList.add('step-done');
+    tr.appendChild(doneCell(key));
     const tdItem = el('td'); tdItem.appendChild(itemCell(s.item)); tr.appendChild(tdItem);
     const tdRec = el('td');
     if (s.interactive) tdRec.appendChild(recipeSelect(s.item, s.rc));
@@ -1280,11 +1343,15 @@ function renderTables(res) {
   rtb.innerHTML = '';
   res.raw.slice().sort((a, b) => itemName(a.item).localeCompare(itemName(b.item))).forEach((r) => {
     const tr = el('tr');
+    const key = 'raw|' + r.item;
+    tr.dataset.doneKey = key;
+    if (stepDone(key)) tr.classList.add('step-done');
+    tr.appendChild(doneCell(key));
     const td = el('td'); td.appendChild(itemCell(r.item)); tr.appendChild(td);
     tr.appendChild(el('td', 'num', fmt(r.rate)));
     rtb.appendChild(tr);
   });
-  if (!res.raw.length) rtb.innerHTML = '<tr><td colspan="2" style="color:var(--muted)">None</td></tr>';
+  if (!res.raw.length) rtb.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
 
   const bld = {};
   for (const s of res.recipes) {
@@ -1345,6 +1412,7 @@ function renderTables(res) {
   $('sumPower').textContent = fmtPower(res.totalPower);
   $('sumMachines').textContent = fmt(res.totalMachines, 0);
   if ($('sumSloops')) $('sumSloops').textContent = fmt(res.totalSloops || 0, 0);
+  updateDoneCounter();
 }
 // Extraction + Power-generation tables in the table view, shown only when the "Power infra"
 // toggle is on. Same powerInfraFor() sizing as the flowchart + Power Planner, so all agree.
@@ -1794,6 +1862,30 @@ function drawFlow(flow) {
     t2.setAttribute('class', 'n-sub'); t2.setAttribute('x', 10); t2.setAttribute('y', 35);
     t2.textContent = n.sub;
     g.appendChild(t2);
+    // Build-progress check: production steps and raw-supply nodes get a click-to-toggle
+    // tick in the top-right corner (key = node id, shared with the table checkboxes).
+    // Other kinds (outputs, sinks, power infra) aren't construction steps.
+    if (n.kind === 'machine' || n.kind === 'raw') {
+      n._doneKey = n.id;
+      if (stepDone(n.id)) g.classList.add('step-done');
+      const chk = document.createElementNS(SVGNS, 'g');
+      chk.setAttribute('class', 'n-check');
+      chk.setAttribute('transform', `translate(${n.w - 13}, 13)`);
+      const cc = document.createElementNS(SVGNS, 'circle');
+      cc.setAttribute('r', '7.5');
+      chk.appendChild(cc);
+      const tick = document.createElementNS(SVGNS, 'path');
+      tick.setAttribute('class', 'n-tick');
+      tick.setAttribute('d', 'M -3.2 0.2 L -0.8 2.8 L 3.4 -2.6');
+      chk.appendChild(tick);
+      const tip = document.createElementNS(SVGNS, 'title');
+      tip.textContent = 'Mark this step as built';
+      chk.appendChild(tip);
+      // Swallow the press so it neither starts a node drag nor opens the settings popup.
+      chk.addEventListener('pointerdown', (ev) => { ev.stopPropagation(); ev.preventDefault(); });
+      chk.addEventListener('pointerup', (ev) => { ev.stopPropagation(); toggleStepDone(n.id); });
+      g.appendChild(chk);
+    }
     n._g = g;
     gNodes.appendChild(g);
     attachDrag(g, n, flow);
@@ -3162,7 +3254,11 @@ function flowExportCss() {
     '.node rect{stroke-width:1.5}' +
     `.node.raw rect{fill:#2b313c;stroke:#5b6675}.node.machine rect{fill:#3a2a12;stroke:${accent}}.node.out rect{fill:#15361f;stroke:${good}}` +
     '.node.sink rect{fill:#3a1530;stroke:#c061a4}.node.gen rect{fill:#1c2f3a;stroke:#4aa3c7}.node.depot rect{fill:#2c2740;stroke:#8a7bd8}' +
-    `.node .n-title{fill:${text};font:700 12px "Segoe UI",system-ui,sans-serif}.node .n-sub{fill:${muted};font:10px "Segoe UI",system-ui,sans-serif}`
+    `.node .n-title{fill:${text};font:700 12px "Segoe UI",system-ui,sans-serif}.node .n-sub{fill:${muted};font:10px "Segoe UI",system-ui,sans-serif}` +
+    // Build-progress marks (done steps stay green in the exported PNG too).
+    `.node.step-done rect{fill:#1d3a24;stroke:${good}}` +
+    `.node .n-check circle{fill:rgba(0,0,0,0.25);stroke:#5b6675;stroke-width:1.2}.node .n-check .n-tick{fill:none;stroke:transparent;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}` +
+    `.node.step-done .n-check circle{fill:${good};stroke:${good}}.node.step-done .n-check .n-tick{stroke:#0c1510}`
   );
 }
 function exportFlowPng() {
@@ -5077,7 +5173,7 @@ function init() {
   $('btnClear').addEventListener('click', () => {
     // More destructive than "Reset recipes": wipes target, picks, extra outputs and
     // flow layout for this plan. Confirm first (game-save + cost globals are kept).
-    if (typeof confirm === 'function' && !confirm('Clear this plan? Target, recipe choices, extra outputs and flowchart layout will be reset.')) return;
+    if (typeof confirm === 'function' && !confirm('Clear this plan? Target, recipe choices, extra outputs, build progress and flowchart layout will be reset.')) return;
     const p = activePlan(); const g = pickGlobals(p.state); p.state = defaultState(); applyGlobals(p.state, g); state = p.state; save(); applyStateToControls();
   });
 

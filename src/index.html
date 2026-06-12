@@ -421,11 +421,11 @@
           </div>
 
           <div id="tableView">
-          <h2 class="block-title">Production steps</h2>
+          <h2 class="block-title">Production steps <span id="doneCount" class="done-count" hidden></span></h2>
           <div class="table-wrap">
             <table id="prodTable">
               <thead>
-                <tr><th>Item</th><th>Recipe</th><th class="num">Rate</th><th class="num">Machines</th><th class="num">Clock</th><th class="num">Sloops</th><th>Building</th><th class="num">Power</th></tr>
+                <tr><th class="chk" title="Built?"></th><th>Item</th><th>Recipe</th><th class="num">Rate</th><th class="num">Machines</th><th class="num">Clock</th><th class="num">Sloops</th><th>Building</th><th class="num">Power</th></tr>
               </thead>
               <tbody></tbody>
             </table>
@@ -435,7 +435,7 @@
             <div>
               <h2 class="block-title">Raw resources</h2>
               <div class="table-wrap">
-                <table id="rawTable"><thead><tr><th>Resource</th><th class="num">Rate / min</th></tr></thead><tbody></tbody></table>
+                <table id="rawTable"><thead><tr><th class="chk" title="Supplied?"></th><th>Resource</th><th class="num">Rate / min</th></tr></thead><tbody></tbody></table>
               </div>
             </div>
             <div>

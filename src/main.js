@@ -8,6 +8,18 @@ const SAVE = require('./save-reader');
 // after concurrent launches) — and the portable build re-extracts into the SAME
 // deterministic temp dir, racing a running copy's files mid-boot. A second launch
 // just focuses the existing window instead.
+// Profile isolation for tests/dev: --user-data-dir=<dir> moves EVERYTHING (Chromium
+// profile AND plans.json) off the real install. Windows resolves appData via the
+// Known Folder API, so overriding the APPDATA env var does NOT isolate an Electron
+// app — twice now a dev/CDP session aimed at a "temp profile" landed on the real
+// userData and edited live plans. setPath BEFORE the single-instance lock so the
+// lock file moves too (an isolated test instance must not fold into the real app).
+const udArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
+if (udArg) {
+  const dir = udArg.slice('--user-data-dir='.length).replace(/^"|"$/g, '');
+  if (dir) app.setPath('userData', dir);
+}
+
 let mainWin = null;
 if (!app.requestSingleInstanceLock()) {
   app.quit();
