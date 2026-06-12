@@ -112,6 +112,34 @@ console.log('\n### FEWEST CONNECTIONS OBJECTIVE');
   check('metric: simple chain counts 3 lines', LP.edgeCountOf(chain) === 3);
 }
 
+// ---- Cleanest-ratio plan search: recipe space scanned for the cleanest scale-up ----
+console.log('\n### CLEANEST-RATIO PLAN SEARCH');
+{
+  const RIP = cls('Reinforced Iron Plate');
+  const base = { outputs: { [RIP]: 30 }, allowedInputs: { [IronOre]: Infinity }, allowAlternates: true, objective: 'raw' };
+  const plain = LP.optimize(base);
+  const clean = LP.optimizeCleanest(base);
+  const ladder = (s) => LP.cleanLadderUp(s.recipes.map((r) => r.machines));
+  check('cleanest search feasible', clean.feasible === true);
+  check('user objective tag preserved', clean.objective === 'raw');
+  const lp = ladder(plain), lc = ladder(clean);
+  check('clean score never worse than the plain plan',
+    lc.frac < lp.frac || (lc.frac === lp.frac && lc.scale <= lp.scale + 1e-9));
+  const ripOut = clean.outputs.find((o) => o.item === RIP);
+  check('target rate still met (~30/min)', !!ripOut && near(ripOut.rate, 30, 0.1));
+  check('ladder scale stays within the cap', lc.scale <= 10 + 1e-9);
+
+  // A trivially clean chain short-circuits: same 2 recipes, no swaps.
+  const chainArgs = { outputs: { [IronPlate]: 20 }, allowedInputs: { [IronOre]: Infinity }, allowAlternates: false, objective: 'machinesLP' };
+  const chain = LP.optimizeCleanest(chainArgs);
+  check('already-clean chain returned as-is (2 recipes)', chain.feasible && chain.recipes.length === 2);
+  check('already-clean ladder = ×1, nothing fractional', (() => { const l = ladder(chain); return Math.abs(l.scale - 1) < 1e-9 && l.frac === 0; })());
+
+  // Cardinality objective passthrough: objectiveValue recomputed for the user's metric.
+  const cm = LP.optimizeCleanest(Object.assign({}, base, { objective: 'machines' }));
+  check('machines passthrough: integer whole-machine objectiveValue', cm.feasible && Number.isInteger(cm.objectiveValue) && cm.objectiveValue === cm.totalMachines);
+}
+
 // ---- Fewest-input-types objective: minimize DISTINCT raw resources drawn ----
 console.log('\n### FEWEST INPUT TYPES OBJECTIVE');
 {

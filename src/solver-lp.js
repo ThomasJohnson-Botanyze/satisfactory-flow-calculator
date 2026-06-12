@@ -519,6 +519,119 @@ function optimizeFewestEdges(params) {
   return finish(best);
 }
 
+// ---- Clean-ratio plan search ----
+// Rational helpers (solver-side copies; the renderer keeps its own for display math).
+function _frac(x, maxDen) {
+  let h0 = 0, h1 = 1, k0 = 1, k1 = 0, b = x;
+  for (let i = 0; i < 40; i++) {
+    const a = Math.floor(b);
+    const h2 = a * h1 + h0, k2 = a * k1 + k0;
+    if (k2 > maxDen) break;
+    h0 = h1; h1 = h2; k0 = k1; k1 = k2;
+    const f = b - a;
+    if (f < 1e-9) break;
+    b = 1 / f;
+  }
+  return { p: h1, q: k1 || 1 };
+}
+const _gcd2 = (a, b) => { a = Math.abs(a); b = Math.abs(b); while (b) { const t = a % b; a = b; b = t; } return a; };
+const _lcm2 = (a, b) => (a && b ? a / _gcd2(a, b) * b : 0);
+// Smallest scale-UP (≥1, capped) making every count whole; when the exact LCM blows past
+// the cap, allow the worst-denominator counts to stay fractional one at a time. Mirrors
+// the renderer's clean-ratio ladder so a plan scored here rescales identically there.
+function cleanLadderUp(counts, maxScale = 10) {
+  let pool = counts.filter((c) => c > 1e-9);
+  let frac = 0;
+  while (pool.length) {
+    let Q = 1, ok = true;
+    const fr = [];
+    for (const c of pool) {
+      const f = _frac(c, 1000);
+      if (Math.abs(f.p / f.q - c) > 1e-4) { ok = false; break; }
+      fr.push(f);
+      Q = _lcm2(Q, f.q);
+      if (!isFinite(Q) || Q > 1e7) { ok = false; break; }
+    }
+    if (ok) {
+      let g = 0;
+      for (const f of fr) g = _gcd2(g, Math.round(Q * f.p / f.q));
+      const fMin = g ? Q / g : 1;
+      const s = Math.ceil(1 / fMin - 1e-9) * fMin;
+      if (s <= maxScale + 1e-9) return { scale: s, frac };
+    }
+    let worst = 0, worstQ = -1;
+    pool.forEach((c, i) => {
+      const f = _frac(c, 1000);
+      const q = Math.abs(f.p / f.q - c) > 1e-4 ? Infinity : f.q;
+      if (q > worstQ) { worstQ = q; worst = i; }
+    });
+    pool.splice(worst, 1);
+    frac++;
+  }
+  return { scale: 1, frac: 0 };
+}
+// Cleanliness score, lexicographic: fewest forced-fractional steps, then the smallest
+// scale-up from the asked rate, then the simplest plan (fewest recipes, then machines).
+function cleanScoreOf(sum) {
+  const l = cleanLadderUp(sum.recipes.map((r) => r.machines));
+  return [l.frac, l.scale, sum.recipes.length, sum.fracMachines];
+}
+function lexBetter(a, b) {
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] < b[i] - 1e-9) return true;
+    if (a[i] > b[i] + 1e-9) return false;
+  }
+  return false;
+}
+// Search recipe space for the plan with the CLEANEST ratios near the asked output:
+// start from the chosen objective's plan, then greedily try blocking each used recipe
+// (other recipes / alternates take over) and keep any swap whose clean score is
+// strictly better. The clean-ratio toggle solves through this, and the suggestion tip
+// scores the same search — so what the tip promises is exactly what the toggle builds.
+function optimizeCleanest(params) {
+  const userObj = params.objective || 'raw';
+  // Cardinality objectives nest their own greedy loops — probe with the raw LP instead.
+  const innerObj = (userObj === 'machines' || userObj === 'recipes' || userObj === 'inputs' || userObj === 'edges') ? 'machinesLP' : userObj;
+  const inner = Object.assign({}, params, { objective: innerObj });
+  const finish = (sum) => {
+    if (!sum.feasible) return sum;
+    sum.objective = userObj;
+    sum.objectiveValue = userObj === 'raw' ? sum.rawTotal
+      : userObj === 'power' ? sum.totalPower
+      : userObj === 'machines' ? sum.totalMachines
+      : userObj === 'recipes' ? sum.recipes.length
+      : userObj === 'inputs' ? sum.raw.length
+      : userObj === 'edges' ? edgeCountOf(sum)
+      : sum.fracMachines;
+    return sum;
+  };
+  let best = optimize(inner);
+  if (!best.feasible) return finish(best);
+  let bestScore = cleanScoreOf(best);
+  if (bestScore[0] === 0 && bestScore[1] <= 1 + 1e-9) return finish(best); // already perfectly clean
+  const blocked = new Set(params.blockedRecipes ? [...params.blockedRecipes] : []);
+  let budget = 24;
+  let progress = true;
+  while (progress && budget > 0) {
+    progress = false;
+    const used = best.recipes.slice().sort((a, b) => a.machines - b.machines);
+    for (const cand of used) {
+      if (budget-- <= 0) break;
+      const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
+      const probe = optimize(Object.assign({}, inner, { blockedRecipes: tryBlocked }));
+      if (!probe.feasible) continue;
+      const s = cleanScoreOf(probe);
+      if (lexBetter(s, bestScore)) {
+        blocked.add(cand.rc);
+        best = probe; bestScore = s;
+        progress = true;
+        break; // plan changed — re-rank and scan again
+      }
+    }
+  }
+  return finish(best);
+}
+
 function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null }) {
   const { model, pool } = buildModel({ inputs: supply, maxItem: product, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes });
   const res = solver.Solve(model);
@@ -584,4 +697,4 @@ function planner({ target, rate, targets = null, recipes = [], rawItems = [], re
   return sum;
 }
 
-module.exports = { optimize, maxThroughput, planner, RC_INFO, RES, effAmount, edgeCountOf };
+module.exports = { optimize, maxThroughput, planner, RC_INFO, RES, effAmount, edgeCountOf, optimizeCleanest, cleanLadderUp };

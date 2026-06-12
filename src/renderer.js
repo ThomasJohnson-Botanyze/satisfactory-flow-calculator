@@ -3334,20 +3334,37 @@ function renderPlanner() {
 // Clean-rate tip under Desired Outputs: shows the nearest scaled-up output that makes
 // every machine count whole (the ⓘ suggestion), with an Apply that bumps every desired
 // output by that factor and switches the Clean ratio toggle on.
-function updateCleanSuggest(res) {
+function updateCleanSuggest(res, optArgs) {
   const box = $('cleanSuggest');
   if (!box) return;
   box.hidden = true; box.textContent = '';
   if (state.cleanRatio) return; // already snapping to clean ratios — tip is moot
-  const sug = cleanRateSuggestion(res);
-  if (!sug || Math.abs(sug.scale - 1) < 1e-9) return; // no suggestion / already clean
+  let sug = cleanRateSuggestion(res);
+  let swapNote = '';
+  // When the current recipe set rationalizes badly, search recipe space (other recipes /
+  // alternates may divide far more evenly) — the same search the toggle solves through,
+  // so applying reproduces exactly this plan.
+  if (optArgs && (!sug || sug.fracAllowed > 0 || sug.scale > 3)) {
+    const alt = LP.optimizeCleanest(optArgs);
+    if (alt.feasible) {
+      const l = LP.cleanLadderUp(alt.recipes.map((r) => r.machines));
+      const better = !sug || l.frac < sug.fracAllowed || (l.frac === sug.fracAllowed && l.scale < sug.scale - 1e-9);
+      if (better) {
+        sug = { scale: l.scale, fracAllowed: l.frac };
+        const cur = new Set(res.recipes.map((r) => r.rc));
+        const swapped = alt.recipes.filter((r) => !cur.has(r.rc)).length;
+        if (swapped) swapNote = ` (switches ${swapped} recipe${swapped === 1 ? '' : 's'} for cleaner ratios)`;
+      }
+    }
+  }
+  if (!sug || (Math.abs(sug.scale - 1) < 1e-9 && !swapNote)) return; // nothing better to offer
   const first = state.opt.outputs.find((o) => nameToClass(o.name) && o.rate > 0);
   if (!first) return;
   const newRate = Number(first.rate) * sug.scale;
   const fracNote = sug.fracAllowed === 0 ? 'every machine whole'
     : sug.fracAllowed === 1 ? 'all but 1 machine whole'
     : `all but ${sug.fracAllowed} machines whole`;
-  box.appendChild(el('span', '', `ⓘ Clean rate: ${first.name} ${fmt(newRate)}/min (×${fmt(sug.scale)} of all outputs) → ${fracNote}.`));
+  box.appendChild(el('span', '', `ⓘ Clean rate: ${first.name} ${fmt(newRate)}/min (×${fmt(sug.scale)} of all outputs) → ${fracNote}${swapNote}.`));
   const apply = el('button', 'btn mini ghost', 'Apply');
   apply.style.marginLeft = '8px';
   apply.addEventListener('click', () => {
@@ -3376,7 +3393,10 @@ function renderOptimize() {
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
   const sink = state.opt.sink !== false;
-  const res = LP.optimize({ outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterSink: !!state.opt.waterSink, sloopMult: sloopMapAll() });
+  const optArgs = { outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterSink: !!state.opt.waterSink, sloopMult: sloopMapAll() };
+  // Clean ratios on → search recipe space for the plan with the cleanest ratios near the
+  // asked rate (other recipes/alternates may divide more evenly), then snap-scale it.
+  const res = state.cleanRatio ? LP.optimizeCleanest(optArgs) : LP.optimize(optArgs);
   if (!res.feasible) {
     if (res.backup && res.backup.length) {
       const names = res.backup.map(itemName).join(', ');
@@ -3393,7 +3413,7 @@ function renderOptimize() {
   }
   res.surplus = res.outputs.filter((o) => !outputs[o.item]);
   tuneSteps(res); // per-step overclock / somersloop now editable in the Optimizer too
-  updateCleanSuggest(res); // clean-rate tip reads the UN-scaled plan (suggestion ≠ rescale)
+  updateCleanSuggest(res, optArgs); // clean-rate tip reads the UN-scaled plan (suggestion ≠ rescale)
   applyCleanScale(res, outputs); // whole-machine ratios when the toggle is on (no-op otherwise)
   present(res, outputs);
   $('sumRaw').textContent = fmt(res.raw.length, 0);

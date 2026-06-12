@@ -940,7 +940,9 @@ console.log('\n### CLEAN-RATE SUGGESTION (optimizer)');
   const st = JSON.parse(w.localStorage.getItem('satisfactory-factory-plans-v1'));
   const ap = st.plans.find((p) => p.id === st.activeId);
   check('Apply turns the clean-ratio setting on', ap.state.cleanRatio === true);
-  check('Apply scaled the desired output up', Number(ap.state.opt.outputs[0].rate) > 7);
+  // The recipe-space search may find a set that is already whole at the asked rate
+  // (a swap-only suggestion, ×1) — the rate must never go DOWN, but need not rise.
+  check('Apply never shrinks the desired output', Number(ap.state.opt.outputs[0].rate) >= 7);
   check('clean-ratio checkbox reflects the change', d.getElementById('cleanRatio').checked === true);
   check('suggestion hidden once clean ratio is on', d.getElementById('cleanSuggest').hidden === true);
 
