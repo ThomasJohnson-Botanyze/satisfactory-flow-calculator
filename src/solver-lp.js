@@ -13,6 +13,7 @@
 // actually carries .Solve, covering both shapes.
 const _lp = require('javascript-lp-solver');
 const solver = (_lp && typeof _lp.Solve === 'function') ? _lp : ((_lp && _lp.default) || _lp);
+require('./nuclear-burn'); // injects the reactor burn pseudo-recipes BEFORE the pool scan below
 const DATA = require('./data.json');
 
 const RECIPES = DATA.recipes;
@@ -85,6 +86,9 @@ for (const rc in RECIPES) {
     buildingName: b.name,
     primary: r.products[0].item,
     primaryRate: r.products[0].amount * f,
+    // Generator burn steps are physics, not crafting — the Recipe Parts Cost Multiplier
+    // must not round their fuel/water draw (see nuclear-burn.js).
+    noCost: !!r.burner,
   };
 }
 
@@ -99,7 +103,7 @@ function effAmount(amt, cost) {
   const r = Math.round(amt * cost);
   return r < 1 ? 1 : r;
 }
-const effInnRate = (info, item, cost) => effAmount(info.innAmt[item] || 0, cost) * info.f;
+const effInnRate = (info, item, cost) => effAmount(info.innAmt[item] || 0, info.noCost ? 1 : cost) * info.f;
 const itemsOf = (info) => new Set([...Object.keys(info.out), ...Object.keys(info.inn)]);
 // `sloop` is the step's Somersloop output multiplier (1×..2×). Per the game rule it
 // amplifies OUTPUT only — inputs per machine are unchanged — so it must live in the

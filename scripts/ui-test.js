@@ -863,6 +863,45 @@ console.log('\n### POWER PLANNER: NUCLEAR (plants + waste by-product)');
   check('flow shows the water pumps feeding the plants', extNodes.some((t) => /Water Extractor/.test(t)));
 }
 
+// ---- Nuclear burn recipes: reactors as plan steps (Sankey-able, clean-ratio-able) ----
+// Target the virtual "Nuclear Power (MW)" item in the Planner: the reactor becomes a
+// real machine step (rods + water in, MW + waste out), so the table, flowchart, Sankey
+// bands and the Power tab's generation ledger all carry the full loop.
+console.log('\n### NUCLEAR BURN: MW AS A PLANNER TARGET');
+{
+  const { d, setVal, click } = boot13(null);
+  const tabOf = (m) => click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === m));
+  tabOf('planner');
+  setVal(d.getElementById('targetItem'), 'Nuclear Power (MW)');
+  setVal(d.getElementById('targetRate'), '7500');
+  const rows = [...d.querySelectorAll('#prodTable tbody tr')].map((r) => r.textContent);
+  check('planner builds the reactor chain from an MW target', rows.length > 4);
+  const mwRow = rows.find((t) => /Nuclear Power \(MW\)/.test(t));
+  check('reactor row shows MW (not /min) and 3 plants', !!mwRow && /7,500 MW/.test(mwRow) && /3×/.test(mwRow));
+  check('reactor row offers no Somersloop slots', (() => {
+    const tr = [...d.querySelectorAll('#prodTable tbody tr')].find((r) => /Nuclear Power \(MW\)/.test(r.textContent));
+    return tr && !tr.querySelector('.sloop-input');
+  })());
+  // Flowchart: ☢ burn node + MW output terminal labelled in MW; waste flows onward.
+  click(d.getElementById('viewFlow'));
+  const macNodes = [...d.querySelectorAll('#flowSvg .node.machine')].map((n) => n.textContent);
+  check('flow shows the ☢ Burn Uranium Fuel Rod step', macNodes.some((t) => /☢ Burn Uranium Fuel Rod/.test(t)));
+  const outNodes = [...d.querySelectorAll('#flowSvg .node.out')].map((n) => n.textContent);
+  check('flow MW terminal reads "7,500 MW"', outNodes.some((t) => /Nuclear Power \(MW\)/.test(t) && /7,500 MW/.test(t)));
+  check('uranium waste floats as a real output of the plan', outNodes.some((t) => /Uranium Waste/.test(t) && /30\/min/.test(t)));
+  // Sankey view: bands render; the MW band must not crush material bands to minimum.
+  click(d.getElementById('viewSankey'));
+  const bands = [...d.querySelectorAll('#flowSvg .sankey-band')];
+  check('sankey bands render for the nuclear plan', bands.length > 4);
+  const widths = bands.map((b) => parseFloat(b.getAttribute('stroke-width') || 0));
+  check('material bands keep proportional widths (not all clamped to min)', widths.filter((w) => w > 2.6).length >= 2);
+  // Power tab: the in-plan reactors count as generation without adding a generator row.
+  tabOf('power');
+  setVal(d.getElementById('pwrSource'), 'planner', 'change');
+  check('power tab counts in-plan reactors as +7.5 GW generation', d.getElementById('pwrGenerated').textContent === '7.5 GW');
+  check('generation table lists the in-plan burn step', /in plan \(Burn Uranium Fuel Rod\)/.test([...d.querySelectorAll('#pwrGenTable tbody tr')].map((r) => r.textContent).join(' ')));
+}
+
 // ---- Base X-ray: per-plan region routing + scoped render ----
 console.log('\n### BASE X-RAY (per-plan area)');
 {

@@ -224,6 +224,59 @@ console.log('\n### POWERGEN NUCLEAR (burn rates + waste)');
   check('non-nuclear generators carry no waste field', DATA.powergen.Build_GeneratorCoal_C.waste == null && DATA.powergen.Build_GeneratorFuel_C.waste == null);
 }
 
+// ---- Nuclear burn pseudo-recipes: the whole loop in one plan ----
+// nuclear-burn.js injects Burn_<rod> recipes (rod + water -> virtual MW + waste) so the
+// reactors are real machine steps: the optimizer's by-product balance then forces waste
+// into the plutonium chain and the sinkable rods into the Awesome Sink — the classic
+// "no permanent waste" build emerges from the constraints alone.
+console.log('\n### NUCLEAR BURN RECIPES (full loop)');
+{
+  const MW = 'Virtual_MW_C';
+  check('virtual MW item injected', !!DATA.items[MW] && DATA.items[MW].virtual === true);
+  const burnU = DATA.recipes.Burn_Desc_NuclearFuelRod_C;
+  check('uranium burn recipe: 0.2 rod + 240 water -> 2500 MW + 10 waste', !!burnU
+    && burnU.ingredients.some((i) => i.item === 'Desc_NuclearFuelRod_C' && near(i.amount, 0.2, 1e-9))
+    && burnU.ingredients.some((i) => i.item === 'Desc_Water_C' && near(i.amount, 240, 1e-9))
+    && burnU.products.some((p) => p.item === MW && p.amount === 2500)
+    && burnU.products.some((p) => p.item === 'Desc_NuclearWaste_C' && near(p.amount, 10, 1e-9)));
+  check('ficsonium burn has no waste product', DATA.recipes.Burn_Desc_FicsoniumFuelRod_C.products.length === 1);
+
+  // Optimizer: demand 7,500 MW with by-product sinking on -> 3 plants, zero net waste,
+  // plutonium rods sunk (uranium waste is unsinkable, so the LP must reprocess it).
+  const allRes = {};
+  for (const r of DATA.resources) allRes[r] = Infinity;
+  const res = LP.optimize({ outputs: { [MW]: 7500 }, allowedInputs: allRes, objective: 'machines', allowAlternates: true, sinkByproducts: true });
+  check('optimizer solves a 7.5 GW nuclear demand', res.feasible === true);
+  const plants = res.feasible && res.recipes.find((r) => r.rc === 'Burn_Desc_NuclearFuelRod_C');
+  check('3 reactors built (7500 / 2500 MW)', !!plants && near(plants.machines, 3, 1e-6));
+  check('zero net uranium waste (reprocessed, not floating)', res.feasible && !(res.net.Desc_NuclearWaste_C > 1e-6) && !res.outputs.some((o) => o.item === 'Desc_NuclearWaste_C'));
+  check('plutonium rods leave via the Awesome Sink', res.feasible && (res.sunk || []).some((s) => s.item === 'Desc_PlutoniumFuelRod_C' && s.rate > 0));
+  check('MW output delivered exactly', res.feasible && res.outputs.some((o) => o.item === MW && near(o.rate, 7500, 1e-4)));
+
+  // Planner: the canonical 30-reactor module (Infused Uranium Cell + Uranium Fuel Unit,
+  // default waste chain) — machine counts must land on the known clean ratios.
+  const modRecipes = [
+    'Burn_Desc_NuclearFuelRod_C',
+    'Recipe_Alternate_NuclearFuelRod_1_C', 'Recipe_Alternate_UraniumCell_1_C',
+    'Recipe_ElectromagneticControlRod_C', 'Recipe_CrystalOscillator_C', 'Recipe_Rotor_C',
+    'Recipe_NonFissileUranium_C', 'Recipe_Plutonium_C', 'Recipe_PlutoniumCell_C', 'Recipe_PlutoniumFuelRod_C',
+    'Recipe_NitricAcid_C', 'Recipe_SulfuricAcid_C',
+  ];
+  const modRaws = ['Desc_Silica_C', 'Desc_HighSpeedWire_C', 'Desc_Cement_C', 'Desc_SteelPlate_C', 'Desc_AluminumCasing_C', 'Desc_QuartzCrystal_C', 'Desc_Cable_C', 'Desc_Stator_C', 'Desc_IronPlateReinforced_C', 'Desc_AluminumPlateReinforced_C', 'Desc_IronPlate_C', 'Desc_IronRod_C', 'Desc_IronScrew_C', 'Desc_CircuitBoardHighSpeed_C'];
+  const mod = LP.planner({ targets: { [MW]: 75000, Desc_PlutoniumFuelRod_C: 1.5 }, recipes: modRecipes, rawItems: modRaws });
+  const m = (rc) => { const r = mod.recipes.find((x) => x.rc === rc); return r ? r.machines : 0; };
+  check('30-reactor module solves', mod.feasible === true);
+  check('module: 30 plants / 10 fuel units / 10 infused cells', near(m('Burn_Desc_NuclearFuelRod_C'), 30, 1e-6) && near(m('Recipe_Alternate_NuclearFuelRod_1_C'), 10, 1e-6) && near(m('Recipe_Alternate_UraniumCell_1_C'), 10, 1e-6));
+  check('module: 6 NFU blenders / 3 accelerators / 9 assemblers / 6 rod manufacturers', near(m('Recipe_NonFissileUranium_C'), 6, 1e-6) && near(m('Recipe_Plutonium_C'), 3, 1e-6) && near(m('Recipe_PlutoniumCell_C'), 9, 1e-6) && near(m('Recipe_PlutoniumFuelRod_C'), 6, 1e-6));
+  check('module: zero net waste, both targets met', near(mod.net.Desc_NuclearWaste_C || 0, 0, 1e-6) && mod.outputs.some((o) => o.item === MW && near(o.rate, 75000, 1e-3)) && mod.outputs.some((o) => o.item === 'Desc_PlutoniumFuelRod_C' && near(o.rate, 1.5, 1e-6)));
+
+  // Recipe Parts Cost Multiplier must NOT touch burn physics: at 0.25x a crafting
+  // recipe's parts shrink, but a reactor still drinks 240 water per plant.
+  const burnOnly = LP.planner({ targets: { [MW]: 2500 }, recipes: ['Burn_Desc_NuclearFuelRod_C'], rawItems: ['Desc_NuclearFuelRod_C'], recipeCost: 0.25 });
+  const w = burnOnly.feasible && burnOnly.raw.find((r) => r.item === 'Desc_Water_C');
+  check('cost multiplier 0.25x leaves the reactor water draw at 240/min', !!w && near(w.rate, 240, 1e-6));
+}
+
 // Infeasible: ask for a product with no allowed inputs.
 const bad = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: {}, objective: 'raw', allowAlternates: false });
 check('optimize infeasible with no inputs', bad.feasible === false);

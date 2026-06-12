@@ -191,6 +191,12 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 const itemName = (c) => (ITEMS[c] ? ITEMS[c].name : c);
 const isFluid = (c) => !!(ITEMS[c] && ITEMS[c].liquid);
 const isDeliverable = (c) => /Desc_SpaceElevatorPart_\d+_C/.test(c);
+// Virtual MW item produced by the reactor burn pseudo-recipes (see nuclear-burn.js).
+// 1 unit = 1 MW of continuous output — display it as "MW", never "/min".
+const MW_ITEM = require('./nuclear-burn').MW_ITEM;
+const isPowerItem = (c) => c === MW_ITEM;
+const isBurnRecipe = (rc) => !!(RECIPES[rc] && RECIPES[rc].burner);
+const rateStr = (item, rate) => (isPowerItem(item) ? `${fmt(rate)} MW` : `${fmt(rate)} ${isFluid(item) ? 'm³' : ''}/min`);
 
 // exact Satisfactory Advanced Game Settings value lists
 const GAME = {
@@ -879,7 +885,8 @@ function maxSloopSlots(rc) {
   const r = RECIPES[rc];
   if (!r) return 1;
   const b = BUILDINGS[r.building] || {};
-  return b.shardSlots || SLOOP_SLOTS_FALLBACK[r.building] || 1;
+  // shardSlots 0 is meaningful (generators never take Somersloops) — don't || past it.
+  return b.shardSlots != null ? b.shardSlots : (SLOOP_SLOTS_FALLBACK[r.building] || 1);
 }
 // Shards installed per machine for a step, clamped to [0, max slots].
 function sloopCountOf(rc) {
@@ -1250,7 +1257,7 @@ function clockCell(s) {
 // physical sloops the step eats so the scarce-resource trade-off is visible.
 function sloopCell(s) {
   const td = el('td', 'num');
-  if (!s.interactive) { td.textContent = '—'; return td; }
+  if (!s.interactive || s.maxSloops === 0) { td.textContent = '—'; return td; } // generators: no sloop slots
   const max = s.maxSloops || 1;
   const sel = el('select', 'sloop-input');
   for (let n = 0; n <= max; n++) {
@@ -1339,7 +1346,7 @@ function renderTables(res) {
     if (s.interactive) tdRec.appendChild(recipeSelect(s.item, s.rc));
     else { const r = RECIPES[s.rc]; tdRec.appendChild(el('span', null, r.name)); if (r.alternate) tdRec.appendChild(el('span', 'tag-alt', 'ALT')); }
     tr.appendChild(tdRec);
-    tr.appendChild(el('td', 'num', `${fmt(s.rate)} ${isFluid(s.item) ? 'm³' : ''}/min`));
+    tr.appendChild(el('td', 'num', rateStr(s.item, s.rate)));
     const tdM = el('td', 'num');
     tdM.innerHTML = `<span class="mach-main">${fmt(Math.ceil(s.machines - 1e-9), 0)}×</span> <span class="mach-sub">(${fmt(s.machines)})</span>`;
     tr.appendChild(tdM);
@@ -1475,7 +1482,8 @@ function buildFlow(res, targets) {
     s._nid = 'mac|' + (s.rc || i);
     const r = RECIPES[s.rc];
     // Alternate recipes show the recipe name; standard recipes show the output item.
-    const title = r && r.alternate ? '★ ' + r.name.replace(/^Alternate:\s*/, '') : itemName(s.item);
+    // Reactor burn steps show the burn name (their "item" is the virtual MW product).
+    const title = r && r.alternate ? '★ ' + r.name.replace(/^Alternate:\s*/, '') : (r && r.burner ? '☢ ' + r.name : itemName(s.item));
     // Exact (fractional) machine count for perfect-ratio / 100%-uptime planning,
     // e.g. "7.5× Assembler" = 7 machines at 100% + 1 at 50%. Append the clock only
     // when this step is overclocked away from the global slider.
@@ -1521,7 +1529,7 @@ function buildFlow(res, targets) {
     if (!(rate > 1e-9)) return; // a zero-rate band/line is never worth drawing
     // item + numeric rate are carried alongside the display label so the Sankey view can
     // size each band by throughput (and colour it by material) without re-parsing the text.
-    const e = { src: srcId, dst: dstId, item, rate, label: `${itemName(item)} ${fmt(rate)}/min` };
+    const e = { src: srcId, dst: dstId, item, rate, label: `${itemName(item)} ${isPowerItem(item) ? fmt(rate) + ' MW' : fmt(rate) + '/min'}` };
     edges.push(e); byId[srcId].outs.push(e); byId[dstId].ins.push(e);
   };
   // Wet Concrete (water-sink) terminals — built BEFORE any consumer edges because the
@@ -1544,8 +1552,9 @@ function buildFlow(res, targets) {
     const prod = r.products.find((p) => p.item === s.item) || r.products[0];
     r.ingredients.forEach((ing) => {
       // s.rate is sloop-amplified gross output; inputs scale with machines (not sloop),
-      // so divide the multiplier back out to get the true ingredient draw.
-      const total = (s.rate / (prod.amount * (s.sloopMult || 1))) * LP.effAmount(ing.amount, state.recipeCost);
+      // so divide the multiplier back out to get the true ingredient draw. Burn steps are
+      // exempt from the cost multiplier (physics, not crafting — matches the solver).
+      const total = (s.rate / (prod.amount * (s.sloopMult || 1))) * LP.effAmount(ing.amount, r.burner ? 1 : state.recipeCost);
       const provs = (producers[ing.item] || []).filter((p) => p.step !== s); // no self-edge on by-product loops
       if (provs.length) {
         const tot = provs.reduce((a, p) => a + p.rate, 0) || 1;
@@ -1581,7 +1590,7 @@ function buildFlow(res, targets) {
   for (const item in outs) {
     if (burnedSet.has(item)) continue;
     const oid = 'out|' + item;
-    addNode(oid, 'out', itemName(item), fmt(outs[item]) + '/min');
+    addNode(oid, 'out', itemName(item), isPowerItem(item) ? fmt(outs[item]) + ' MW' : fmt(outs[item]) + '/min');
     const provs = producers[item];
     if (provs && provs.length) { const tot = provs.reduce((a, p) => a + p.rate, 0) || 1; provs.forEach((p) => addEdge(p.step._nid, oid, item, outs[item] * (p.rate / tot))); }
   }
@@ -1745,8 +1754,14 @@ function sankeyLayout(flow) {
   const { nodes } = flow;
   let maxStack = 0;
   nodes.forEach((n) => {
-    n._in = n.ins.reduce((a, e) => a + (e.rate || 0), 0);
-    n._out = n.outs.reduce((a, e) => a + (e.rate || 0), 0);
+    // The virtual MW bands carry numbers (thousands of MW) on a different scale than any
+    // material flow — letting them set the global band scale would squash every real
+    // belt/pipe band to the minimum width. They're excluded here and simply clamp to the
+    // max band width below: power reads as a uniformly fat ribbon, materials stay
+    // proportional to each other.
+    const matStack = (list) => list.reduce((a, e) => a + (isPowerItem(e.item) ? 0 : (e.rate || 0)), 0);
+    n._in = matStack(n.ins);
+    n._out = matStack(n.outs);
     maxStack = Math.max(maxStack, n._in, n._out);
   });
   // One global scale so band widths are comparable across the whole chart: the busiest
@@ -2017,12 +2032,12 @@ function renderNodePopup() {
   if (!s) { closeNodePopup(); return; } // step vanished (recipe changed) — nothing to tune
   const r = RECIPES[rc] || {};
   const b = BUILDINGS[r.building] || { exponent: 1.321929 };
-  const title = r.alternate ? '★ ' + r.name.replace(/^Alternate:\s*/, '') : itemName(s.item);
+  const title = r.alternate ? '★ ' + r.name.replace(/^Alternate:\s*/, '') : (r.burner ? '☢ ' + r.name : itemName(s.item));
   p.innerHTML = '';
 
   const x = el('button', 'modal-x', '✕'); x.title = 'Close'; x.addEventListener('click', closeNodePopup); p.appendChild(x);
   p.appendChild(el('div', 'np-title', title));
-  p.appendChild(el('div', 'np-sub', `${fmt(Math.ceil(s.machines - 1e-9), 0)}× ${s.buildingName} · ${fmt(s.rate)} ${isFluid(s.item) ? 'm³' : ''}/min`));
+  p.appendChild(el('div', 'np-sub', `${fmt(Math.ceil(s.machines - 1e-9), 0)}× ${s.buildingName} · ${rateStr(s.item, s.rate)}`));
 
   // ----- Overclock (power shards) -----
   const ocSec = el('div', 'np-section');
@@ -2056,7 +2071,8 @@ function renderNodePopup() {
     : 'No shards · power ×1.00'));
   p.appendChild(ocSec);
 
-  // ----- Somersloop -----
+  // ----- Somersloop ----- (generators have no slots — skip the section entirely)
+  if (s.maxSloops === 0) { p.appendChild(el('div', 'np-foot', 'Esc or click away to close')); return; }
   const slSec = el('div', 'np-section');
   slSec.appendChild(el('div', 'np-label', 'Somersloop'));
   const max = s.maxSloops || 1;
@@ -3638,14 +3654,15 @@ function renderMax() {
 
   const b = $('maxBanner');
   b.hidden = false;
+  const unitOf = (it) => (isPowerItem(it) ? ' MW' : `${isFluid(it) ? 'm³' : ''}/min`);
   if (products.length === 1) {
     const product = products[0].item;
-    b.innerHTML = `<span class="banner-num">${fmt(res.maxOutput)}</span> <span class="banner-unit">${isFluid(product) ? 'm³' : ''}/min ${itemName(product)}</span>`;
+    b.innerHTML = `<span class="banner-num">${fmt(res.maxOutput)}</span> <span class="banner-unit">${unitOf(product)} ${itemName(product)}</span>`;
   } else {
     // Ratio-locked set: show each product's rate at the maximized scalar.
     const ratioTxt = (res.maxOutputs || []).map((m) => fmt(m.ratio)).join(' : ');
     b.innerHTML = (res.maxOutputs || []).map((m) =>
-      `<span class="banner-num">${fmt(m.rate)}</span> <span class="banner-unit">${isFluid(m.item) ? 'm³' : ''}/min ${itemName(m.item)}</span>`
+      `<span class="banner-num">${fmt(m.rate)}</span> <span class="banner-unit">${unitOf(m.item)} ${itemName(m.item)}</span>`
     ).join(' &nbsp;·&nbsp; ') + ` <span class="banner-unit">(ratio ${ratioTxt})</span>`;
   }
   $('sumRaw').textContent = res.binding.length ? '✓' : '—';
@@ -3842,9 +3859,17 @@ function computeFactoryPower() {
   const { extraction, gens } = powerInfraFor(res, targets);
   const extractionBase = extraction.reduce((a, e) => a + e.powerBase, 0);
   const genWaterBase = gens.reduce((a, g) => a + (g.water ? g.water.powerBase : 0), 0);
-  const generated = gens.reduce((a, g) => a + g.mw, 0);
+  // Reactors built INTO the plan (burn pseudo-recipes): their MW product is generation.
+  // s.rate is the step's MW output (clock cancels; their building draw is 0 by design),
+  // and the step's waste/water are already real plan flows — only the MW needs adding.
+  const burnSteps = (res.recipes || []).filter((s) => isBurnRecipe(s.rc)).map((s) => ({
+    rc: s.rc, name: (RECIPES[s.rc] && RECIPES[s.rc].name) || s.rc, fuel: (RECIPES[s.rc].ingredients[0] || {}).item,
+    buildingName: s.buildingName, nGen: s.machines, mw: s.rate, clock: s.clock || 1,
+  }));
+  const burnMW = burnSteps.reduce((a, b) => a + b.mw, 0);
+  const generated = gens.reduce((a, g) => a + g.mw, 0) + burnMW;
   const consumptionBase = prodPowerBase + extractionBase + genWaterBase;
-  return { feasible: true, sourceMode: p.sourceMode, res, machines: res.totalMachines || 0, prodPowerBase, extraction, extractionBase, gens, generated, genWaterBase, consumptionBase };
+  return { feasible: true, sourceMode: p.sourceMode, res, machines: res.totalMachines || 0, prodPowerBase, extraction, extractionBase, gens, burnSteps, generated, genWaterBase, consumptionBase };
 }
 function powerConsRow(tb, stage, building, count, power) {
   const tr = el('tr');
@@ -3887,6 +3912,15 @@ function renderPower() {
     if (!cons.children.length) cons.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No machines.</td></tr>';
   }
   if (gtb) {
+    // In-plan reactors first (the burn pseudo-recipe steps), then the user-added rows.
+    (r.burnSteps || []).forEach((g) => {
+      const tr = el('tr');
+      const td = el('td'); if (g.fuel) td.appendChild(itemCell(g.fuel)); tr.appendChild(td);
+      tr.appendChild(el('td', null, `${g.buildingName} · in plan (${g.name})` + (g.clock !== 1 ? ` · ${Math.round(g.clock * 100)}%` : '')));
+      const c = el('td', 'num'); c.innerHTML = `${fmt(Math.ceil(g.nGen - 1e-9), 0)}× <span class="mach-sub">(${fmt(g.nGen)})</span>`; tr.appendChild(c);
+      tr.appendChild(el('td', 'num', '+' + fmtPower(g.mw)));
+      gtb.appendChild(tr);
+    });
     r.gens.forEach((g) => {
       const tr = el('tr');
       const td = el('td'); td.appendChild(itemCell(g.output)); tr.appendChild(td);
@@ -3895,7 +3929,7 @@ function renderPower() {
       tr.appendChild(el('td', 'num', '+' + fmtPower(g.mw)));
       gtb.appendChild(tr);
     });
-    if (!r.gens.length) gtb.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No generators — add one to burn an output for power.</td></tr>';
+    if (!r.gens.length && !(r.burnSteps || []).length) gtb.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No generators — add one to burn an output for power.</td></tr>';
   }
   if (mtb) {
     GAME.power.forEach((mm) => {
