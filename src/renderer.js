@@ -886,12 +886,6 @@ function cleanFMin(counts) {
   if (!g) return 1;
   return Q / g; // smallest scale giving all-integer machines
 }
-function cleanRatioScale(counts) {
-  const fMin = cleanFMin(counts);
-  if (fMin == null) return null;
-  const k = Math.max(1, Math.round(1 / fMin));
-  return k * fMin;
-}
 // Clean-rate suggestion: the smallest scale-UP (≥1) of the whole plan that makes every
 // machine count a whole number. When that scale is crazy (one awkward denominator can
 // force a huge LCM), allow the single worst-denominator step to stay fractional and
@@ -920,13 +914,43 @@ function cleanRateSuggestion(res, maxScale = 10) {
   }
   return null;
 }
+// Bounded clean scale for the TOGGLE: the exact all-whole LCM can be astronomically
+// large (4 exotic outputs once demanded ×1,355,400 — "make 81 million/min"), which is
+// worse than useless. Same relaxation ladder as the suggestion tip: cap the scale at
+// maxScale, and when the exact clean ratio needs more, let the worst-denominator
+// machine counts stay fractional one at a time until the scale is sane. Nearest
+// multiple (round, not ceil) keeps the adjusted output close to what was asked.
+function cleanScaleBounded(counts, maxScale = 10) {
+  let pool = counts.filter((c) => c > 1e-9);
+  let fracAllowed = 0;
+  while (pool.length) {
+    const fMin = cleanFMin(pool);
+    if (fMin != null) {
+      const k = Math.max(1, Math.round(1 / fMin));
+      const s = k * fMin;
+      if (s <= maxScale + 1e-9) return { scale: s, fracAllowed };
+    }
+    let worst = 0, worstQ = -1;
+    pool.forEach((c, i) => {
+      const f = toFraction(c, 1000);
+      const q = Math.abs(f.p / f.q - c) > 1e-4 ? Infinity : f.q;
+      if (q > worstQ) { worstQ = q; worst = i; }
+    });
+    pool.splice(worst, 1);
+    fracAllowed++;
+  }
+  return { scale: 1, fracAllowed: 0 }; // nothing rationalizes — leave the plan untouched
+}
+if (typeof window !== 'undefined') window.__cleanScaleBounded = cleanScaleBounded; // test/debug hook
 // Scale a solved result in place to clean (whole-machine) ratios when the toggle is on.
 // Linear in the LP solution, so we just multiply the reported quantities. Returns the
 // scale (1 = unchanged / already clean); also stamps res._cleanScale for the UI note.
 function applyCleanScale(res, targets) {
   if (!state.cleanRatio || !res || !res.recipes || !res.recipes.length) return 1;
-  const scale = cleanRatioScale(res.recipes.map((r) => r.machines)) || 1;
+  const bounded = cleanScaleBounded(res.recipes.map((r) => r.machines));
+  const scale = bounded.scale;
   res._cleanScale = scale;
+  res._cleanFrac = bounded.fracAllowed; // machines left fractional to keep the scale sane
   if (Math.abs(scale - 1) < 1e-9) return 1;
   const mul = (arr, ...keys) => (arr || []).forEach((o) => keys.forEach((k) => { if (typeof o[k] === 'number') o[k] *= scale; }));
   mul(res.recipes, 'machines', 'rate', 'power');
@@ -3215,9 +3239,14 @@ function updateCleanRatioNote(res) {
   if (!state.cleanRatio) { n.hidden = true; n.textContent = ''; return; }
   if (res && res._cleanScale != null) {
     const sc = res._cleanScale;
+    const fr = res._cleanFrac || 0;
+    const fracNote = fr === 0 ? 'every step is a whole number of machines'
+      : fr === 1 ? 'all but 1 step lands on whole machines (its exact ratio would need an absurd scale — underclock that one)'
+      : `all but ${fr} steps land on whole machines (their exact ratios would need an absurd scale — underclock those)`;
     n.hidden = false;
     n.textContent = Math.abs(sc - 1) > 1e-9
-      ? `Inputs & outputs scaled ×${fmt(sc, 3)} so every step is a whole number of machines.`
+      ? `Inputs & outputs scaled ×${fmt(sc, 3)} so ${fracNote}.`
+      : fr > 0 ? `No sane scale fits ${fr} step(s) to whole machines — left fractional (underclock those); the rest are already whole.`
       : 'Already whole-machine ratios — no scaling needed.';
   } else {
     n.hidden = false;

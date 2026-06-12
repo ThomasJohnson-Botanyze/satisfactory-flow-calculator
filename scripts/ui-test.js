@@ -943,6 +943,16 @@ console.log('\n### CLEAN-RATE SUGGESTION (optimizer)');
   check('Apply scaled the desired output up', Number(ap.state.opt.outputs[0].rate) > 7);
   check('clean-ratio checkbox reflects the change', d.getElementById('cleanRatio').checked === true);
   check('suggestion hidden once clean ratio is on', d.getElementById('cleanSuggest').hidden === true);
+
+  // The clean-ratio TOGGLE must never demand an absurd scale: counts whose exact LCM
+  // explodes (1/3 · 1/7 · 1/11 · 1/13 → ×3003) get the relaxation ladder instead —
+  // capped scale, worst-denominator steps left fractional. Regression for the
+  // "asked for 60/min, got 81,324,000/min" blow-up.
+  const ladder = w.__cleanScaleBounded([1 / 3, 1 / 7, 1 / 11, 1 / 13]);
+  check('bounded clean scale stays sane (≤10×)', ladder.scale <= 10 + 1e-9);
+  check('bounded clean scale relaxes steps instead of exploding', ladder.fracAllowed >= 1);
+  const easy = w.__cleanScaleBounded([0.5, 1.5]);
+  check('easy counts still snap exactly (×2, nothing fractional)', Math.abs(easy.scale - 2) < 1e-9 && easy.fracAllowed === 0);
 }
 
 // ---- Water sink (Wet Concrete): flowchart wiring must match the LP's diversion ----
