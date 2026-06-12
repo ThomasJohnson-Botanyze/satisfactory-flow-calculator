@@ -1585,7 +1585,7 @@ function buildFlow(res, targets) {
       // s.rate is sloop-amplified gross output; inputs scale with machines (not sloop),
       // so divide the multiplier back out to get the true ingredient draw. Burn steps are
       // exempt from the cost multiplier (physics, not crafting — matches the solver).
-      const total = (s.rate / (prod.amount * (s.sloopMult || 1))) * LP.effAmount(ing.amount, r.burner ? 1 : state.recipeCost);
+      const total = (s.rate / (prod.amount * (s.sloopMult || 1))) * LP.effAmount(ing.amount, r.burner ? 1 : state.recipeCost, isFluid(ing.item));
       let provs = (producers[ing.item] || []).filter((p) => p.step !== s); // no self-edge on by-product loops
       // An item can be PART by-product, PART fresh draw (Aluminum Scrap's return water
       // covers most but not all of Alumina Solution's need; the rest is mined). The raw

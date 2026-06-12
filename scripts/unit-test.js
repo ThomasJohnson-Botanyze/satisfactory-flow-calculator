@@ -199,6 +199,19 @@ check('effAmount 0.5x: 1-part recipe stays 1', LP.effAmount(1, 0.5) === 1);
 check('effAmount 0.5x: 2-part recipe -> 1', LP.effAmount(2, 0.5) === 1);
 check('effAmount 0.5x: 3-part recipe -> 2 (round half up)', LP.effAmount(3, 0.5) === 2);
 check('effAmount never rounds a needed part to 0', LP.effAmount(1, 0.1) === 1);
+// FLUIDS round at the game's native mL granularity (1 m³ = 1000), not whole m³:
+// 3 m³ Crude Oil at 0.5x is exactly 1.5 m³ — the Heavy Oil Residue alternate shows
+// 15/min crude in-game, not the 20/min that whole-m³ rounding produced.
+check('effAmount fluid 0.5x: 3 m³ -> 1.5 m³ (mL granularity)', LP.effAmount(3, 0.5, true) === 1.5);
+check('effAmount fluid 0.25x: 3 m³ -> 0.75 m³', LP.effAmount(3, 0.25, true) === 0.75);
+check('effAmount fluid floors at 1 mL, never free', LP.effAmount(0.001, 0.25, true) === 0.001);
+{
+  const ph = LP.planner({ targets: { Desc_HeavyOilResidue_C: 40 }, recipes: ['Recipe_Alternate_HeavyOilResidue_C'], rawItems: [], recipeCost: 0.5 });
+  const oil = ph.feasible && ph.raw.find((r) => r.item === 'Desc_LiquidOil_C');
+  check('0.5x HOR alternate: 40 HOR/min draws 15 crude/min (game-accurate)', !!oil && near(oil.rate, 15, 1e-6));
+  const resin = ph.feasible && ph.outputs.find((o) => o.item === 'Desc_PolymerResin_C');
+  check('0.5x HOR alternate: 20 resin/min by-product', !!resin && near(resin.rate, 20, 1e-6));
+}
 // A 1:1 smelter is UNCHANGED at 0.5x (round(1*0.5)=1): 30 ore still makes 30 ingot.
 const ph1 = LP.planner({ targets: { [IronIngot]: 30 }, recipes: [primStd(IronIngot)], rawItems: [], recipeCost: 0.5 });
 const oreI = ph1.raw.find((r) => r.item === IronOre);

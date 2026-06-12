@@ -92,18 +92,24 @@ for (const rc in RECIPES) {
   };
 }
 
-// Recipe Parts Cost Multiplier: scale each ingredient AMOUNT then round to a whole unit —
-// mirroring the game, where part costs are integers. So a 1:1 recipe (1 ore -> 1 ingot)
-// stays at 1 under 0.5x (round(0.5)=1) and only multi-part recipes (amount >= 2) shrink.
-// cost===1 returns the exact amount, so vanilla and any fractional-fluid recipes are
-// untouched; a needed ingredient never rounds away to free (floored at 1).
-function effAmount(amt, cost) {
+// Recipe Parts Cost Multiplier: scale each ingredient AMOUNT then round to a whole unit
+// of that item's NATIVE granularity — mirroring the game, where SOLID part costs are
+// integers but FLUIDS are stored in mL (1 m³ = 1000), so a fluid's cost rounds at the
+// mL: 3 m³ Crude Oil at 0.5× is exactly 1.5 m³ (the game shows 15/min for the Heavy Oil
+// Residue alternate), NOT round(1.5)=2. So a 1:1 solid recipe (1 ore -> 1 ingot) stays
+// at 1 under 0.5x and only multi-part solid recipes shrink. cost===1 returns the exact
+// amount; a needed ingredient never rounds away to free (floored at 1 unit / 1 mL).
+function effAmount(amt, cost, liquid = false) {
   if (!amt) return 0;
   if (cost === 1) return amt;
+  if (liquid) {
+    const r = Math.round(amt * 1000 * cost);
+    return (r < 1 ? 1 : r) / 1000;
+  }
   const r = Math.round(amt * cost);
   return r < 1 ? 1 : r;
 }
-const effInnRate = (info, item, cost) => effAmount(info.innAmt[item] || 0, info.noCost ? 1 : cost) * info.f;
+const effInnRate = (info, item, cost) => effAmount(info.innAmt[item] || 0, info.noCost ? 1 : cost, !!(ITEMS[item] && ITEMS[item].liquid)) * info.f;
 const itemsOf = (info) => new Set([...Object.keys(info.out), ...Object.keys(info.inn)]);
 // `sloop` is the step's Somersloop output multiplier (1×..2×). Per the game rule it
 // amplifies OUTPUT only — inputs per machine are unchanged — so it must live in the
