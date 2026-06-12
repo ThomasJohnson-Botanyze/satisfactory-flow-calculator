@@ -381,6 +381,15 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   }
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
+  // Packaged Water mode must not satisfy its own net-water cap through the COMPETING
+  // disposal recipe — a "Wet Concrete" step appearing under the packaging mode reads as
+  // the wrong mode firing (and limestone+1 refinery usually beats the canister chain on
+  // any objective, so it would win every time). Users who want that route pick the Wet
+  // Concrete mode. The block is per-solve only; other genuine water consumers stay fair game.
+  if (packageWater && !(blockedRecipes && blockedRecipes.has(WET_CONCRETE_RC))) {
+    blockedRecipes = new Set(blockedRecipes ? [...blockedRecipes] : []);
+    blockedRecipes.add(WET_CONCRETE_RC);
+  }
   const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, exportWaste, sloopMult });
   // A demanded item no pooled recipe produces (every producer blocked / not unlocked)
   // would otherwise be silently dropped from the constraints — the solver would return a

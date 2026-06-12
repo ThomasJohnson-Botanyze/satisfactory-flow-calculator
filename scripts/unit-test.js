@@ -424,6 +424,21 @@ console.log('\n### WATER DISPOSAL MODES');
   const alu = LP.optimize({ outputs: { Desc_AluminumIngot_C: 240 }, allowedInputs: allRes, objective: 'machines', allowAlternates: false, sinkByproducts: true, packageWater: true });
   check('package: aluminum still solves with loops allowed', alu.feasible === true);
   check('package: aluminum nets water (fresh draw, no Packager)', alu.feasible && (alu.net.Desc_Water_C || 0) < -1e-6 && !alu.recipes.some((r) => r.rc === 'Recipe_PackagedWater_C'));
+  // Package mode must never absorb via the COMPETING Wet Concrete recipe — with
+  // limestone available, 1 wet refinery beats any canister chain on every objective, so
+  // unblocked it would win every time and the mode would LOOK like Wet Concrete.
+  const bait = LP.optimize({
+    outputs: { Desc_AluminumScrap_C: 360 },
+    allowedInputs: { Desc_AluminaSolution_C: Infinity, Desc_Coal_C: Infinity, Desc_Stone_C: Infinity, Desc_LiquidOil_C: Infinity },
+    objective: 'machines', allowAlternates: true, sinkByproducts: true, packageWater: true,
+  });
+  check('package: Wet Concrete never appears as the absorber', bait.feasible === true && !bait.recipes.some((r) => r.rc === 'Recipe_Alternate_WetConcrete_C'));
+  check('package: bait surplus still fully handled', bait.feasible && !(bait.resSurplus || []).length && !(bait.net.Desc_Water_C > 1e-6));
+  // ...while the Wet Concrete MODE itself still works (its route is the __wet__
+  // variable, not the pool recipe — the block above is package-mode-only).
+  const wetStill = LP.optimize(Object.assign({}, scrapArgs, { waterSink: true }));
+  check('wet mode unaffected: diverts via the Wet Concrete route', wetStill.feasible === true && (wetStill.watered || []).length === 1);
+
   // Diagnostic: water allowed but no oil ⇒ no plastic ⇒ no canisters — dropping ONLY the
   // net-water cap would solve, so the failure is named waterPackaging.
   const noCans = LP.optimize({
