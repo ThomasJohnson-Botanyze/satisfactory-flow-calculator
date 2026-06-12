@@ -1166,6 +1166,32 @@ console.log('\n### FLUID COST ROUNDING (flowchart edges)');
   check('0.5x flow edge reads Crude Oil 15/min', labels.some((t) => /Crude Oil 15\/min/.test(t)));
 }
 
+// ---- Split shared lines: per-consumer machine groups (view toggle) ----
+console.log('\n### SPLIT SHARED LINES');
+{
+  const { w, d, setVal, click } = boot13(null);
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
+  setVal(d.getElementById('targetItem'), 'Reinforced Iron Plate');
+  setVal(d.getElementById('targetRate'), '10');
+  click(d.getElementById('viewFlow'));
+  const before = w.__lastFlow.nodes.length;
+  const ingotRc = w.__lastFlow.nodes.find((n) => /Iron Ingot/.test(n.title) && n.id.startsWith('mac|'));
+  check('baseline: one merged Iron Ingot node', !!ingotRc && ingotRc.outs.length === 2);
+  const totalMachines = ingotRc && ingotRc._step.machines;
+  click(d.getElementById('flowSplitToggle'));
+  const flow = w.__lastFlow;
+  const clones = flow.nodes.filter((n) => n.id.startsWith(ingotRc.id + '|line'));
+  check('split: ingot step becomes one node per consumer line', clones.length === 2 && flow.nodes.length === before + 1);
+  const shareSum = clones.reduce((a, c) => a + parseFloat(c.sub), 0);
+  check('split: per-line machine counts sum to the step total', Math.abs(shareSum - totalMachines) < 0.02);
+  check('split: line subs name their destination', clones.every((c) => /→/.test(c.sub)));
+  const oreEdges = flow.edges.filter((e) => e.src === 'raw|' + cls('Iron Ore') && e.dst.startsWith(ingotRc.id + '|line'));
+  check('split: the ore input splits across both lines', oreEdges.length === 2);
+  check('split: clones share the original done-key', clones.every((c) => c._doneKey === ingotRc.id));
+  click(d.getElementById('flowSplitToggle'));
+  check('toggle off restores the merged chart', w.__lastFlow.nodes.length === before);
+}
+
 // ---- Water disposal: excess reporting (off) + Packaged Water mode (loops allowed) ----
 console.log('\n### WATER DISPOSAL: EXCESS REPORTING + PACKAGED WATER');
 {

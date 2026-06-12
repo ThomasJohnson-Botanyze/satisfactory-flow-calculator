@@ -376,6 +376,7 @@ const defaultState = () => ({
   // the front feeding each raw, and generator nodes at the end burning the outputs added
   // in the Power Planner. Off by default so existing charts are unchanged. Per-plan.
   flowPower: false,
+  flowSplit: false, // split multi-consumer machine groups into one node per line (view toggle)
   // null = no save loaded → every alternate available (original behavior).
   // [] = a save was read but no alternates unlocked. [...classNames] = restrict to these.
   unlockedAlts: null,
@@ -1532,6 +1533,7 @@ function buildFlow(res, targets) {
     // (Overclock / Somersloop). Only interactive steps (Planner / Optimizer) are tunable.
     macNode.rc = s.rc;
     macNode.interactive = !!s.interactive;
+    macNode._step = s; // for the split-lines view (per-consumer machine shares)
   });
   res.raw.forEach((r) => addNode('raw|' + r.item, 'raw', itemName(r.item), fmt(r.rate) + '/min'));
   // Index every step under *each* item it produces — primary product AND by-products.
@@ -2012,7 +2014,7 @@ function drawFlow(flow) {
     // tick in the top-right corner (key = node id, shared with the table checkboxes).
     // Other kinds (outputs, sinks, power infra) aren't construction steps.
     if (n.kind === 'machine' || n.kind === 'raw') {
-      n._doneKey = n.id;
+      n._doneKey = n._doneKey || n.id; // split clones preset the ORIGINAL step's key — one mark greens every line
       if (stepDone(n.id)) g.classList.add('step-done');
       const chk = document.createElementNS(SVGNS, 'g');
       chk.setAttribute('class', 'n-check');
@@ -2366,9 +2368,62 @@ function ensureFlowControls() {
   }, { passive: false });
 }
 
+// ----- Split shared lines (opt-in view toggle) -----
+// A machine step whose single product fans out to several consumers is one node with N
+// out-edges — right for totals, but the player builds SEPARATE machine groups per line.
+// With state.flowSplit on, such a node splits into per-line clones: machines ∝ each
+// line's share of the output, and every INPUT edge splits across the clones by the same
+// shares — so each line reads as its own group ("how many refineries feed THIS
+// consumer"). Multi-product steps stay merged (a by-product line can't own a machine
+// share). Clones keep the original's done-key and settings popup (same recipe — clock /
+// Somersloop apply to the whole step).
+function splitSharedLines(flow) {
+  for (const n of [...flow.nodes]) {
+    if (!n._step || n.outs.length < 2) continue;
+    if (new Set(n.outs.map((e) => e.item)).size !== 1) continue;
+    const s = n._step;
+    const total = n.outs.reduce((a, e) => a + e.rate, 0);
+    if (!(total > 1e-9)) continue;
+    const oc = s.clock != null && Math.abs(s.clock - state.clock) > 1e-9 ? ` · ${Math.round(s.clock * 100)}%` : '';
+    const sp = s.sloops ? ` · ${fmt(s.sloopMult, 2)}× sloop` : '';
+    const clones = n.outs.map((e, i) => {
+      const share = e.rate / total;
+      const id = `${n.id}|line${i}`;
+      const dstN = flow.byId[e.dst];
+      const lineTo = dstN ? dstN.title : '';
+      const c = {
+        id, kind: n.kind, title: n.title,
+        sub: `${fmt(s.machines * share)}× ${s.buildingName}${oc}${sp}${lineTo ? ` → ${lineTo.length > 14 ? lineTo.slice(0, 13) + '…' : lineTo}` : ''}`,
+        ins: [], outs: [e], rc: n.rc, interactive: n.interactive, _doneKey: n.id, _step: s,
+      };
+      e.src = id;
+      flow.byId[id] = c;
+      flow.nodes.push(c);
+      return { c, share };
+    });
+    for (const e of n.ins) {
+      const baseRate = e.rate; // capture BEFORE the first clone mutates the shared edge object
+      clones.forEach(({ c, share }, i) => {
+        let ne = e; // first clone reuses the original edge object; the rest are copies
+        if (i > 0) { ne = Object.assign({}, e); flow.edges.push(ne); }
+        ne.dst = c.id;
+        ne.rate = baseRate * share;
+        ne.label = `${itemName(ne.item)} ${isPowerItem(ne.item) ? fmt(ne.rate) + ' MW' : fmt(ne.rate) + '/min'}`;
+        c.ins.push(ne);
+        if (i > 0 && flow.byId[ne.src]) flow.byId[ne.src].outs.push(ne);
+      });
+    }
+    flow.nodes.splice(flow.nodes.indexOf(n), 1);
+    delete flow.byId[n.id];
+  }
+  return flow;
+}
+
 function renderFlowView() {
   if (!lastResult) return;
-  currentFlow = layoutFlow(buildFlow(lastResult, lastTargets));
+  const built = buildFlow(lastResult, lastTargets);
+  if (state.flowSplit) splitSharedLines(built);
+  currentFlow = layoutFlow(built);
   drawFlow(currentFlow);
   if (typeof window !== 'undefined') window.__lastFlow = currentFlow; // test/debug hook: inspect node + edge wiring
   // Keep the saved zoom/pan across tab toggles; first render of a plan fits to window.
@@ -2384,6 +2439,8 @@ function renderFlowView() {
 function syncFlowPowerBtn() {
   const b = $('flowPowerToggle');
   if (b) b.classList.toggle('active', !!state.flowPower);
+  const sp = $('flowSplitToggle');
+  if (sp) sp.classList.toggle('active', !!state.flowSplit);
 }
 function applyView() {
   const sankey = state.view === 'sankey';
@@ -5255,6 +5312,7 @@ function init() {
   if ($('viewSankey')) $('viewSankey').addEventListener('click', () => { state.view = 'sankey'; save(); applyView(); });
   $('flowReset').addEventListener('click', () => { state.flowPos = {}; state.flowView = null; save(); renderFlowView(); });
   $('flowPowerToggle').addEventListener('click', () => { state.flowPower = !state.flowPower; save(); syncFlowPowerBtn(); solveAndRender(); });
+  if ($('flowSplitToggle')) $('flowSplitToggle').addEventListener('click', () => { state.flowSplit = !state.flowSplit; save(); syncFlowPowerBtn(); solveAndRender(); });
   $('flowFit').addEventListener('click', () => { fitFlow(currentFlow); save(); });
   $('flowZoomIn').addEventListener('click', () => zoomFlowCenter(1.2));
   $('flowZoomOut').addEventListener('click', () => zoomFlowCenter(1 / 1.2));
