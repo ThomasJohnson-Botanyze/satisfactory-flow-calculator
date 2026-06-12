@@ -435,6 +435,17 @@ console.log('\n### WATER DISPOSAL MODES');
   check('package: no-oil plan stays feasible with the excess reported + flagged', noOil.feasible === true && noOil.waterPackagingBlocked === true && (noOil.resSurplus || []).some((r) => r.item === 'Desc_Water_C'));
   const vetoed = LP.optimize(Object.assign({}, scrapArgs, { packageWater: true, blockedRecipes: new Set(['Recipe_Plastic_C']) }));
   check('package: vetoed chain recipe flags instead of substituting', vetoed.feasible === true && vetoed.waterPackagingBlocked === true);
+  // ---- the decoupled (loops x method) controls ----
+  const onWet2 = LP.optimize(Object.assign({}, scrapArgs, { waterLoops: true, waterMethod: 'wet' }));
+  check('loops on + wet: net surplus into 1.2 wet refineries (looped flag set)', onWet2.feasible === true && (onWet2.watered || []).length === 1 && near(onWet2.watered[0].machines, 1.2, 1e-6) && onWet2.watered[0].looped === true);
+  check('loops on + wet: 144 limestone drawn, 96 concrete sunk', onWet2.feasible && onWet2.raw.some((r) => r.item === 'Desc_Stone_C' && near(r.rate, 144, 1e-4)) && (onWet2.sunk || []).some((x) => x.item === 'Desc_Cement_C' && near(x.rate, 96, 1e-4)));
+  const offPkg2 = LP.optimize(Object.assign({}, scrapArgs, { waterLoops: false, waterMethod: 'package' }));
+  check('loops off + package: diverted gross into 2 Packagers', offPkg2.feasible === true && offPkg2.waterDiverted === true && offPkg2.recipes.some((r) => r.rc === 'Recipe_PackagedWater_C' && near(r.machines, 2, 1e-6)));
+  const aluOffPkg = LP.optimize({ outputs: { Desc_AluminumIngot_C: 240 }, allowedInputs: allRes, objective: 'machines', allowAlternates: false, sinkByproducts: true, waterLoops: false, waterMethod: 'package' });
+  check('loops off + package: aluminum draws FULL fresh water and packages its by-product', aluOffPkg.feasible === true && aluOffPkg.raw.some((r) => r.item === 'Desc_Water_C' && r.rate > 300) && aluOffPkg.recipes.some((r) => r.rc === 'Recipe_PackagedWater_C'));
+  const offNone2 = LP.optimize(Object.assign({}, scrapArgs, { waterLoops: false, waterMethod: 'none' }));
+  check('loops off + none: diverted gross reported as excess', offNone2.feasible === true && offNone2.waterDiverted === true && (offNone2.resSurplus || []).some((r) => r.item === 'Desc_Water_C' && near(r.rate, 120, 1e-4)));
+
   // Without Water even allowed as an input, the by-product balance itself blocks (the
   // older "would back up" shape) — and the fluid surplus is still NAMED.
   const noWaterIn = LP.optimize({

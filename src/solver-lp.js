@@ -80,19 +80,107 @@ const COKE = 'Desc_PetroleumCoke_C';
 // the fewest-inputs mode), because a plan with a flagged-unbuildable route counts fewer
 // machines/edges/inputs. Route pieces are not legitimate elimination candidates.
 const PKG_RCS = new Set([PKG_CHAIN.pkg, PKG_CHAIN.can, PKG_CHAIN.pl, PKG_CHAIN.coke]);
-const pkgProtected = (params, rc) => !!params.packageWater && PKG_RCS.has(rc);
+const pkgProtected = (params, rc) => (!!params.packageWater || params.waterMethod === 'package') && PKG_RCS.has(rc);
 
-function applyPackagedWaterRoute(sum, { recipeCost = 1, powerMult = 1, sinkByproducts = false, allowedInputs = null, blockedRecipes = null } = {}) {
-  const xs = (sum.resSurplus || []).find((r) => r.item === WATER);
-  const E = xs ? xs.rate : 0;
+function applyWaterRoute(sum, { loops = true, method = 'none', recipeCost = 1, powerMult = 1, sinkByproducts = false, allowedInputs = null, blockedRecipes = null, unlockedAlts = null, sloopMult = null } = {}) {
+  // E: with loop-backs allowed, the plan's NET surplus (what recirculation couldn't use);
+  // with loops OFF, the GROSS water output — every drop was diverted in-LP and consumers
+  // already drew fresh extractor water, so all of it must leave here.
+  let E = 0;
+  if (loops) {
+    const xs = (sum.resSurplus || []).find((r) => r.item === WATER);
+    E = xs ? xs.rate : 0;
+  } else {
+    for (const r of sum.recipes) {
+      const sl = (sloopMult && sloopMult[r.rc]) || 1;
+      E += ((RC_INFO[r.rc] && RC_INFO[r.rc].out[WATER]) || 0) * sl * r.machines;
+    }
+  }
   if (!(E > 1e-9)) return;
-  // The route is only honest when its pieces are usable: Crude Oil allowed as an input
-  // and none of the chain recipes vetoed. Otherwise leave the excess REPORTED + flagged.
-  const rcs = [PKG_CHAIN.pkg, PKG_CHAIN.can, PKG_CHAIN.pl, PKG_CHAIN.coke];
-  if ((allowedInputs && allowedInputs[OIL] == null) || rcs.some((rc) => !RC_INFO[rc] || (blockedRecipes && blockedRecipes.has(rc)))) {
-    sum.waterPackagingBlocked = true;
+  // With loops OFF, summarize rebuilt net from ORIGINAL coefficients — re-crediting the
+  // diverted output (net = gross − freshDraw). Fix the books: the raw entry becomes the
+  // TRUE fresh draw the LP made the consumers take; the gross is what leaves below.
+  const fixFreshRaw = () => {
+    const before = sum.net[WATER] || 0;
+    const fresh = E - before;
+    sum.resSurplus = (sum.resSurplus || []).filter((r) => r.item !== WATER);
+    const oldRaw = sum.raw.find((r) => r.item === WATER);
+    const oldRate = oldRaw ? oldRaw.rate : 0;
+    if (fresh > 1e-9) { if (oldRaw) oldRaw.rate = fresh; else sum.raw.push({ item: WATER, rate: fresh }); }
+    else if (oldRaw) sum.raw.splice(sum.raw.indexOf(oldRaw), 1);
+    sum.rawTotal += (fresh > 1e-9 ? fresh : 0) - oldRate;
+    sum.waterDiverted = true;
+    return fresh;
+  };
+  const reportExcess = () => {
+    sum.resSurplus = (sum.resSurplus || []).filter((r) => r.item !== WATER);
+    sum.resSurplus.push({ item: WATER, rate: E });
+  };
+  // Availability guards per method — when the route can't be built the excess stays
+  // REPORTED and waterRouteBlocked names which method was blocked.
+  let blocked = null;
+  if (method === 'package') {
+    const rcs = [PKG_CHAIN.pkg, PKG_CHAIN.can, PKG_CHAIN.pl, PKG_CHAIN.coke];
+    if ((allowedInputs && allowedInputs[OIL] == null) || rcs.some((rc) => !RC_INFO[rc] || (blockedRecipes && blockedRecipes.has(rc)))) blocked = 'package';
+  } else if (method === 'wet') {
+    if (!RC_INFO[WET_CONCRETE_RC] || (blockedRecipes && blockedRecipes.has(WET_CONCRETE_RC))
+      || (unlockedAlts && !unlockedAlts.has(WET_CONCRETE_RC))
+      || (allowedInputs && allowedInputs[LIMESTONE] == null)) blocked = 'wet';
+  }
+  if (method === 'none' || blocked) {
+    // Nothing leaves: report the excess (gross when diverted, net surplus otherwise).
+    if (!loops) { fixFreshRaw(); }
+    if (blocked) {
+      sum.waterRouteBlocked = blocked;
+      if (blocked === 'package') sum.waterPackagingBlocked = true; // legacy flag name
+    }
+    reportExcess();
     return;
   }
+  // The excess leaves: settle the water books for either loop setting.
+  if (loops) {
+    sum.net[WATER] = (sum.net[WATER] || 0) - E;
+    sum.resSurplus = (sum.resSurplus || []).filter((r) => r.item !== WATER);
+  } else {
+    fixFreshRaw();
+    sum.net[WATER] = (sum.net[WATER] || 0) - E; // diverted gross leaves via the route
+  }
+  // Chain ends leave on the sink belt — or float as surplus outputs when sinking is off.
+  const leave = (item, rate) => {
+    if (!(rate > 1e-9)) return;
+    if (sinkByproducts) {
+      sum.net[item] = (sum.net[item] || 0) - rate;
+      sum.sunk.push({ item, rate, points: rate * sinkPointsOf(item) });
+    } else {
+      const o = sum.outputs.find((x) => x.item === item);
+      if (o) o.rate += rate; else sum.outputs.push({ item, rate });
+    }
+  };
+  if (method === 'wet') {
+    // Wet Concrete as a SIZED post-solve route: E water + limestone -> sinkable Concrete.
+    // Stays a special wet| node (not a recipe step), like the classic mode, so the
+    // flowchart and by-product surfaces read identically.
+    const info = RC_INFO[WET_CONCRETE_RC];
+    const waterIn = effInnRate(info, WATER, recipeCost);
+    const stoneIn = effInnRate(info, LIMESTONE, recipeCost);
+    const cementOut = info.out[CONCRETE] || 0;
+    const m = E / waterIn;
+    const limestone = stoneIn * m;
+    const concrete = cementOut * m;
+    sum.totalPower += info.power * powerMult * m;
+    sum.fracMachines += m;
+    sum.totalMachines += Math.ceil(m - 1e-9);
+    const rawStone = sum.raw.find((r) => r.item === LIMESTONE);
+    if (rawStone) rawStone.rate += limestone; else sum.raw.push({ item: LIMESTONE, rate: limestone });
+    sum.rawTotal += limestone;
+    sum.net[LIMESTONE] = (sum.net[LIMESTONE] || 0) - limestone;
+    sum.net[CONCRETE] = (sum.net[CONCRETE] || 0) + concrete;
+    leave(CONCRETE, concrete);
+    sum.watered = (sum.watered || []).concat([{ item: WATER, rate: E, concrete, limestone, machines: m, looped: !!loops }]);
+    return;
+  }
+  // method === 'package': the fixed Packager <- Empty Canister <- Plastic(oil) chain,
+  // with the plastic step's HOR converted to sinkable Petroleum Coke.
   const I = (rc, item) => effInnRate(RC_INFO[rc], item, recipeCost);
   const O = (rc, item) => RC_INFO[rc].out[item] || 0;
   const mPkg = E / I(PKG_CHAIN.pkg, WATER);
@@ -115,23 +203,12 @@ function applyPackagedWaterRoute(sum, { recipeCost = 1, powerMult = 1, sinkBypro
     sum.fracMachines += m;
     for (const it of itemsOf(info)) sum.net[it] = (sum.net[it] || 0) + coefOf(info, it, recipeCost) * m;
   }
+  // the chain's Packager consumed E of already-settled water — undo its net effect
+  sum.net[WATER] = (sum.net[WATER] || 0) + E;
   sum.totalMachines = sum.recipes.reduce((a, r) => a + Math.ceil(r.machines - 1e-9), 0);
   const rawOil = sum.raw.find((r) => r.item === OIL);
   if (rawOil) rawOil.rate += oil; else sum.raw.push({ item: OIL, rate: oil });
   sum.rawTotal += oil;
-  sum.resSurplus = sum.resSurplus.filter((r) => r.item !== WATER);
-  // The chain's two solid ends leave on the sink belt — or float as surplus outputs
-  // when by-product sinking is off (the user sinks them manually).
-  const leave = (item, rate) => {
-    if (!(rate > 1e-9)) return;
-    if (sinkByproducts) {
-      sum.net[item] = (sum.net[item] || 0) - rate;
-      sum.sunk.push({ item, rate, points: rate * sinkPointsOf(item) });
-    } else {
-      const o = sum.outputs.find((x) => x.item === item);
-      if (o) o.rate += rate; else sum.outputs.push({ item, rate });
-    }
-  };
   leave(PKG_WATER, packaged);
   leave(COKE, coke);
   sum.packaged = { water: E, packaged, canisters: cans, plastic, oil, hor, coke, machines: mPkg };
@@ -213,7 +290,7 @@ function recipePool(allowAlternates, unlockedAlts, blockedRecipes) {
   });
 }
 
-function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, packageWater = false, exportWaste = false, sloopMult = null }) {
+function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlternates = true, maxItem = null, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, divertWater = false, exportWaste = false, sloopMult = null }) {
   // Keep an unpackage recipe only when its packaged input is actually supplied; otherwise
   // it can only form a degenerate package<->unpackage loop (see UNPACKAGE note above).
   const pool = recipePool(allowAlternates, unlockedAlts, blockedRecipes).filter(
@@ -246,7 +323,11 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
   // Divert every recipe's water OUTPUT to the virtual waste item so it can't net against
   // fresh-water demand — that netting IS the recirculation loop we're breaking. Water
   // INPUTS keep their real-item coefficient and are met fresh from extractors.
-  if (wetAvail) {
+  // divertWater (water loop-backs OFF without the in-LP Wet Concrete route): the same
+  // diversion, but the waste item simply floats (min 0) — a POST-SOLVE route (Packaged
+  // Water / excess report) deals with the gross afterwards. Diversion still matters
+  // in-LP so consumers draw fresh water and the raw/power objectives price it honestly.
+  if (wetAvail || divertWater) {
     for (const rc of pool) {
       const sl = (sloopMult && sloopMult[rc]) || 1;
       const wOut = (RC_INFO[rc].out[WATER] || 0) * sl;
@@ -310,6 +391,7 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
     } else constraints[it] = { min: 0 };
   }
   if (wetAvail) constraints[WASTE_WATER] = { equal: 0 }; // all diverted water must leave via the Wet Concrete route
+  else if (divertWater) constraints[WASTE_WATER] = { min: 0 }; // floats; the post-solve route consumes the gross
 
   // Minimization carries the chosen objective plus the tiny activity tie-break in one key
   // (`_score`), so a free package<->unpackage cycle can never spin. Max-throughput keeps a
@@ -419,28 +501,37 @@ function summarize(res, pool, recipeCost, powerMult, disposal, sloopMult) {
   return { recipes, raw, outputs, net, totalPower, totalMachines, fracMachines, rawTotal, sunk, burned, recoveredPower, watered, resSurplus };
 }
 
-function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, packageWater = false, exportWaste = false, sloopMult = null }) {
+function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null, sinkByproducts = false, waterSink = false, packageWater = false, waterLoops = true, waterMethod = null, exportWaste = false, sloopMult = null }) {
+  // Two independent water controls: LOOPS (may by-product water recirculate?) x METHOD
+  // (where the excess goes: none-report / Wet Concrete / Packaged Water). The legacy
+  // single-flag params map onto the pair for old callers.
+  let wLoops = waterLoops !== false;
+  let wMethod = waterMethod || 'none';
+  if (waterSink) { wLoops = false; wMethod = 'wet'; }
+  else if (packageWater && !waterMethod) { wMethod = 'package'; }
+  const lpWet = !wLoops && wMethod === 'wet';      // classic in-LP diversion + __wet__ route
+  const divertOnly = !wLoops && wMethod !== 'wet'; // diversion; a post-solve route takes the gross
   if (objective === 'recipes') {
-    return optimizeFewestRecipes({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, exportWaste, sloopMult });
+    return optimizeFewestRecipes({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, waterLoops, waterMethod, exportWaste, sloopMult });
   }
   if (objective === 'inputs') {
-    return optimizeFewestInputs({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, exportWaste, sloopMult });
+    return optimizeFewestInputs({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, waterLoops, waterMethod, exportWaste, sloopMult });
   }
   if (objective === 'machines') {
-    return optimizeWholeMachines({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, exportWaste, sloopMult });
+    return optimizeWholeMachines({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, waterLoops, waterMethod, exportWaste, sloopMult });
   }
   if (objective === 'edges') {
-    return optimizeFewestEdges({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, exportWaste, sloopMult });
+    return optimizeFewestEdges({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, waterLoops, waterMethod, exportWaste, sloopMult });
   }
   if (objective === 'loops') {
-    return optimizeFewestLoops({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, exportWaste, sloopMult });
+    return optimizeFewestLoops({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, waterLoops, waterMethod, exportWaste, sloopMult });
   }
   if (objective === 'clean') {
-    return optimizeCleanest({ outputs, allowedInputs, objective: 'clean', allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, exportWaste, sloopMult });
+    return optimizeCleanest({ outputs, allowedInputs, objective: 'clean', allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, waterLoops, waterMethod, exportWaste, sloopMult });
   }
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
-  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, exportWaste, sloopMult });
+  const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink: lpWet, divertWater: divertOnly, exportWaste, sloopMult });
   // A demanded item no pooled recipe produces (every producer blocked / not unlocked)
   // would otherwise be silently dropped from the constraints — the solver would return a
   // feasible EMPTY plan. Detect it and report infeasible with the orphaned items named,
@@ -460,7 +551,7 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
     if (sinkByproducts) {
       // Diagnosis solve: drop BOTH the by-product balance and the net-water cap, so the
       // would-be surplus can float and be named (water lands in resSurplus, fluids in outputs).
-      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts: false, waterSink, packageWater: false, exportWaste, sloopMult });
+      const relaxed = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts: false, waterSink: lpWet, divertWater: false, exportWaste, sloopMult });
       const rres = solver.Solve(relaxed.model);
       if (rres.feasible) {
         const rsum = summarize(rres, relaxed.pool, recipeCost, powerMult, relaxed.disposal, sloopMult);
@@ -473,9 +564,12 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
     return { feasible: false };
   }
   const sum = summarize(res, pool, recipeCost, powerMult, disposal, sloopMult);
-  // Packaged-water mode: the plan above is UNTOUCHED (loops intact); only its net
-  // surplus water now leaves through the fixed Packager chain, sized arithmetically.
-  if (packageWater) applyPackagedWaterRoute(sum, { recipeCost, powerMult, sinkByproducts, allowedInputs, blockedRecipes });
+  // Post-solve water route: the plan above is untouched (loops per wLoops); the excess
+  // — net surplus (loops on) or diverted gross (loops off) — leaves via the chosen
+  // method. The classic in-LP wet mode (lpWet) already handled itself in summarize.
+  if (!lpWet && (wMethod !== 'none' || divertOnly)) {
+    applyWaterRoute(sum, { loops: wLoops, method: wMethod, recipeCost, powerMult, sinkByproducts, allowedInputs, blockedRecipes, unlockedAlts, sloopMult });
+  }
   sum.feasible = true;
   sum.objective = objective;
   // Report the true objective, not the regularized score (res.result carries the tiny
@@ -538,7 +632,7 @@ function optimizeFewestInputs(params) {
   let progress = true;
   while (progress && budget > 0) {
     progress = false;
-    const candidates = best.raw.slice().filter((r) => !(params.packageWater && r.item === OIL)).sort((a, b) => a.rate - b.rate);
+    const candidates = best.raw.slice().filter((r) => !((params.packageWater || params.waterMethod === 'package') && r.item === OIL)).sort((a, b) => a.rate - b.rate);
     for (const cand of candidates) {
       if (!(cand.item in allowed) || budget-- <= 0) continue;
       const tryAllowed = Object.assign({}, allowed);

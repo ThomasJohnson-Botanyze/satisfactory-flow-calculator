@@ -1073,7 +1073,9 @@ console.log('\n### WATER SINK (Wet Concrete) FLOWCHART WIRING');
   click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
   const row = d.querySelector('#optOutputs .row');
   setVal(row.querySelector('.row-item'), 'Aluminum Ingot'); setVal(row.querySelector('.row-rate'), '100');
-  setVal(d.getElementById('optWaterMode'), 'wet', 'change');
+  const wl = d.getElementById('optWaterLoops');
+  wl.checked = false; wl.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
+  setVal(d.getElementById('optWaterMethod'), 'wet', 'change');
   click(d.getElementById('viewFlow'));
   const flow = w.__lastFlow;
   const WATER = 'Desc_Water_C', CEMENT = 'Desc_Cement_C', STONE = 'Desc_Stone_C';
@@ -1092,8 +1094,9 @@ console.log('\n### WATER SINK (Wet Concrete) FLOWCHART WIRING');
     flow.edges.some((e) => e.item === STONE && e.src === 'raw|' + STONE && e.dst === 'wet|' + WATER));
   check('wet node\'s Concrete connects onward (sink or output, not floating)',
     flow.edges.some((e) => e.item === CEMENT && e.src === 'wet|' + WATER));
-  // Mode off: route gone, no wet node in the rebuilt chart.
-  setVal(d.getElementById('optWaterMode'), 'off', 'change');
+  // Loops back on + method none: route gone, no wet node in the rebuilt chart.
+  wl.checked = true; wl.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
+  setVal(d.getElementById('optWaterMethod'), 'none', 'change');
   check('mode off removes the wet node', !w.__lastFlow.nodes.some((n) => n.id.startsWith('wet|')));
 }
 
@@ -1223,9 +1226,9 @@ console.log('\n### WATER DISPOSAL: EXCESS REPORTING + PACKAGED WATER');
   // Legacy migration: a plan saved with the old waterSink checkbox loads as mode 'wet'.
   const seed = JSON.stringify({ plans: [{ id: 'pW', name: 'Legacy', state: { mode: 'optimize', opt: { outputs: [{ name: '', rate: 60 }], waterSink: true } } }], activeId: 'pW', savedAt: 1 });
   const mig = boot13(seed);
-  check('legacy waterSink:true migrates to Water disposal = wet', mig.d.getElementById('optWaterMode').value === 'wet');
+  check('legacy waterSink:true migrates to loops OFF + method wet', mig.d.getElementById('optWaterMethod').value === 'wet' && mig.d.getElementById('optWaterLoops').checked === false);
 
-  const { d, app, setVal, click } = boot13(null);
+  const { w, d, app, setVal, click } = boot13(null);
   click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
   const alts = d.getElementById('optAlts'); // std recipes only → deterministic 120/min surplus
   alts.checked = false; alts.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
@@ -1244,12 +1247,19 @@ console.log('\n### WATER DISPOSAL: EXCESS REPORTING + PACKAGED WATER');
   // Packager + Empty Canister chain must appear as real steps with explicit totals.
   app.state.opt.inputs.Desc_OreBauxite_C.on = false;
   app.state.disabledRecipes = ['Recipe_ResidualPlastic_C', 'Recipe_ResidualRubber_C'];
-  setVal(d.getElementById('optWaterMode'), 'package', 'change');
+  setVal(d.getElementById('optWaterMethod'), 'package', 'change');
   const prodTxt = d.getElementById('prodTable').textContent;
   check('package: Packaged Water + Empty Canister steps in the plan', /Packaged Water/.test(prodTxt) && /Empty Canister/.test(prodTxt));
   check('package: extras states water + canister inputs and packager count', /Excess water packaged: 120 Water\/min \+ 120 Empty Canister\/min → 120 Packaged Water\/min \(2 Packager\)/.test(d.getElementById('modeExtras').textContent.replace(/,/g, '')));
   check('package: no excess-water warning remains', !/Excess Water:/.test(d.getElementById('modeExtras').textContent));
   check('package: packaged water routed to the Awesome Sink', /Awesome Sink/.test(d.getElementById('byprodTable').textContent) && /Packaged Water/.test(d.getElementById('byprodTable').textContent));
+  // loops OFF + package: emitters feed the Packager exclusively; no other machine takes
+  // by-product water (everyone else would drink fresh).
+  const wl2 = d.getElementById('optWaterLoops');
+  wl2.checked = false; wl2.dispatchEvent(new d.defaultView.Event('change', { bubbles: true }));
+  click(d.getElementById('viewFlow'));
+  const wEdges = w.__lastFlow.edges.filter((e) => e.item === 'Desc_Water_C' && e.src.startsWith('mac|') && e.dst.startsWith('mac|'));
+  check('loops off + package: machine water only flows into the Packager', wEdges.length >= 1 && wEdges.every((e) => e.dst.startsWith('mac|Recipe_PackagedWater_C')));
 }
 
 // ---- Nuclear waste as a cross-plan input: Plan A exports, Plan B links it ----

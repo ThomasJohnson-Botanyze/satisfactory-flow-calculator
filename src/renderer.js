@@ -409,7 +409,8 @@ const defaultState = () => ({
     alts: true,
     sink: true, // route surplus by-products to the Awesome Sink / Fuel Generator
     waterSink: false, // LEGACY boolean (pre-2.11) — migrated into waterMode by mergeState
-    waterMode: 'off', // water disposal: 'off' (excess reported) | 'wet' (Wet Concrete, no loops) | 'package' (Packaged Water, loops allowed)
+    waterLoops: true, // may by-product water recirculate into consumers? (off = every consumer drinks fresh; ALL water output goes to the sink method)
+    waterMethod: 'none', // where excess water goes: 'none' (reported) | 'wet' (Wet Concrete) | 'package' (Packaged Water)
     exportWaste: false, // let unsinkable solids (nuclear waste) float as exportable surplus instead of forcing in-plan reprocessing
   },
   // Max-supply rows are { item, amount }, optionally + { fromPlanId, fromItem } so the
@@ -486,11 +487,17 @@ function mergeState(s) {
   // Clean ratios graduated from a toggle into its own Optimizer objective: migrate
   // plans saved with the old flag on, then retire the flag.
   if (m.cleanRatio) { m.opt.objective = 'clean'; m.cleanRatio = false; }
-  // Water disposal graduated from the waterSink checkbox to a 3-way mode select: a plan
-  // saved BEFORE the select existed (no waterMode key) migrates its old flag to 'wet'.
-  const savedMode = s && s.opt && s.opt.waterMode;
-  if (savedMode == null && s && s.opt && s.opt.waterSink) m.opt.waterMode = 'wet';
-  if (!['off', 'wet', 'package'].includes(m.opt.waterMode)) m.opt.waterMode = 'off';
+  // Water disposal history: waterSink checkbox -> waterMode 3-way -> the (loops x method)
+  // pair. Old saves map: waterSink/'wet' = loops OFF + wet; 'package' = loops ON + package.
+  const so = (s && s.opt) || {};
+  if (so.waterLoops == null && so.waterMethod == null) {
+    const mode = so.waterMode != null ? so.waterMode : (so.waterSink ? 'wet' : 'off');
+    m.opt.waterLoops = mode !== 'wet';
+    m.opt.waterMethod = mode === 'off' ? 'none' : mode;
+  }
+  if (!['none', 'wet', 'package'].includes(m.opt.waterMethod)) m.opt.waterMethod = 'none';
+  m.opt.waterLoops = m.opt.waterLoops !== false;
+  delete m.opt.waterMode;
   m.opt.waterSink = false;
   return m;
 }
@@ -1561,9 +1568,16 @@ function buildFlow(res, targets) {
   // water edge proportionally across extractor + scrap step — drawing the very backfeed
   // loop the option exists to eliminate.
   const wasteProducers = {};
-  (res.watered || []).forEach((w) => {
+  (res.watered || []).filter((w) => !w.looped).forEach((w) => {
     if (producers[w.item]) { wasteProducers[w.item] = producers[w.item]; delete producers[w.item]; }
   });
+  // Loops OFF without the wet route (diverted gross goes to the Packager / excess
+  // terminal): water emitters likewise must not feed normal consumers — those drink
+  // fresh extractor water, exactly as the LP solved it.
+  if (res.waterDiverted && producers[WATER_ITEM]) {
+    wasteProducers[WATER_ITEM] = producers[WATER_ITEM];
+    delete producers[WATER_ITEM];
+  }
   const addEdge = (srcId, dstId, item, rate) => {
     if (!byId[srcId] || !byId[dstId]) return;
     if (!(rate > 1e-9)) return; // a zero-rate band/line is never worth drawing
@@ -1581,7 +1595,9 @@ function buildFlow(res, targets) {
   (res.watered || []).forEach((w) => {
     const id = 'wet|' + w.item;
     addNode(id, 'sink', 'Wet Concrete', `${fmt(w.machines)}× → ${fmt(w.concrete)} Concrete/min`);
-    const provs = wasteProducers[w.item] || [];
+    // Looped wet route: a normal consumer of the net surplus (drawn from the water
+    // emitters proportionally); diverted (loops-off): exclusive feeders, as classic.
+    const provs = (w.looped ? producers[w.item] : wasteProducers[w.item]) || [];
     const tot = provs.reduce((a, p) => a + p.rate, 0) || 1;
     provs.forEach((p) => addEdge(p.step._nid, id, w.item, w.rate * (p.rate / tot)));
     addEdge('raw|Desc_Stone_C', id, 'Desc_Stone_C', w.limestone);
@@ -1598,6 +1614,11 @@ function buildFlow(res, targets) {
       // exempt from the cost multiplier (physics, not crafting — matches the solver).
       const total = (s.rate / (prod.amount * (s.sloopMult || 1))) * LP.effAmount(ing.amount, r.burner ? 1 : state.recipeCost, isFluid(ing.item));
       let provs = (producers[ing.item] || []).filter((p) => p.step !== s); // no self-edge on by-product loops
+      // Diverted water (loops off, package method): the Packager step drinks the
+      // emitters' diverted output, never fresh extractor water.
+      if (res.waterDiverted && ing.item === WATER_ITEM && s.rc === 'Recipe_PackagedWater_C' && wasteProducers[WATER_ITEM]) {
+        provs = wasteProducers[WATER_ITEM];
+      }
       // An item can be PART by-product, PART fresh draw (Aluminum Scrap's return water
       // covers most but not all of Alumina Solution's need; the rest is mined). The raw
       // node is then a CO-provider for the shortfall — without it the raw node floated
@@ -1641,7 +1662,9 @@ function buildFlow(res, targets) {
     if (burnedSet.has(item)) continue;
     const oid = 'out|' + item;
     addNode(oid, 'out', itemName(item), isPowerItem(item) ? fmt(outs[item]) + ' MW' : fmt(outs[item]) + '/min');
-    const provs = producers[item];
+    // Diverted excess water (loops off, method none): the terminal is fed by the
+    // emitters' diverted output — producers[] was emptied so consumers drink fresh.
+    const provs = producers[item] || (res.waterDiverted && item === WATER_ITEM ? wasteProducers[item] : null);
     if (provs && provs.length) { const tot = provs.reduce((a, p) => a + p.rate, 0) || 1; provs.forEach((p) => addEdge(p.step._nid, oid, item, outs[item] * (p.rate / tot))); }
   }
   // Disposal terminals: solids routed to the Awesome Sink, liquid fuels burned in a
@@ -3568,7 +3591,7 @@ function computeStateResult(st) {
       for (const o of st.opt.outputs) { const c = nameToClass(o.name); if (c && o.rate > 0) outputs[c] = (outputs[c] || 0) + Number(o.rate) * (isDeliverable(c) ? st.spaceMult : 1); }
       const allowedInputs = optAllowedInputs(st);
       if (!Object.keys(outputs).length || !Object.keys(allowedInputs).length) return { feasible: false };
-      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false, waterSink: st.opt.waterMode === 'wet', packageWater: st.opt.waterMode === 'package', exportWaste: !!st.opt.exportWaste, sloopMult: sloopMapAll() });
+      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false, waterLoops: st.opt.waterLoops !== false, waterMethod: st.opt.waterMethod || 'none', exportWaste: !!st.opt.exportWaste, sloopMult: sloopMapAll() });
       if (!res.feasible) return { feasible: false };
       res.surplus = res.outputs.filter((o) => !outputs[o.item]);
       tuneSteps(res); // apply per-step overclock / somersloop (machines & power)
@@ -3772,7 +3795,7 @@ function renderOptimize() {
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
   const sink = state.opt.sink !== false;
-  const optArgs = { outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterSink: state.opt.waterMode === 'wet', packageWater: state.opt.waterMode === 'package', exportWaste: !!state.opt.exportWaste, sloopMult: sloopMapAll() };
+  const optArgs = { outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterLoops: state.opt.waterLoops !== false, waterMethod: state.opt.waterMethod || 'none', exportWaste: !!state.opt.exportWaste, sloopMult: sloopMapAll() };
   // optimize() dispatches per objective — incl. 'clean' (cleanest-ratio recipe search,
   // snap-scaled below) and 'loops' (straightforward feed-forward chains).
   const res = LP.optimize(optArgs);
@@ -3780,7 +3803,7 @@ function renderOptimize() {
     if (res.backup && res.backup.length) {
       const names = res.backup.map(itemName).join(', ');
       const waterTip = res.backup.includes('Desc_Water_C')
-        ? (state.opt.waterMode === 'package'
+        ? (state.opt.waterMethod === 'package'
           ? ' Packaged Water handles the plan’s NET surplus, but here water can’t even enter the balance — allow Water as an input resource so the by-product can net before the leftovers are packaged.'
           : ' For Water specifically, pick a Water disposal mode (Wet Concrete or Packaged Water).')
         : '';
@@ -3809,7 +3832,7 @@ function renderOptimize() {
   const sunkPts = (res.sunk || []).reduce((a, s) => a + s.points, 0);
   if ((res.sunk || []).length) ex.appendChild(el('div', 'extras-line', `By-products sunk: ${res.sunk.map((s) => itemName(s.item)).join(', ')} — ${fmt(sunkPts, 0)} AWESOME Sink points/min`));
   if ((res.burned || []).length) ex.appendChild(el('div', 'extras-line', `By-products burned: ${res.burned.map((b) => itemName(b.item)).join(', ')} — ${fmt(res.recoveredPower, 0)} MW recovered from generators`));
-  (res.watered || []).forEach((w) => ex.appendChild(el('div', 'extras-line', `Excess water sunk via Wet Concrete: ${fmt(w.rate)} Water/min → ${fmt(w.concrete)} Concrete/min (${fmt(w.machines)} Refinery, ${fmt(w.limestone)} Limestone/min) — no by-product loop`)));
+  (res.watered || []).forEach((w) => ex.appendChild(el('div', 'extras-line', `Excess water sunk via Wet Concrete: ${fmt(w.rate)} Water/min → ${fmt(w.concrete)} Concrete/min (${fmt(w.machines)} Refinery, ${fmt(w.limestone)} Limestone/min) — ${w.looped ? 'net surplus only; water loops untouched' : 'no by-product loop'}`)));
   // Packaged-water mode: the fixed route's totals — what the Packager drinks, what the
   // canisters need, and where the plastic step's HOR byproduct ends up.
   if (res.packaged) {
@@ -3817,8 +3840,11 @@ function renderOptimize() {
     ex.appendChild(el('div', 'extras-line', `Excess water packaged: ${fmt(p.water)} Water/min + ${fmt(p.canisters)} Empty Canister/min → ${fmt(p.packaged)} Packaged Water/min (${fmt(p.machines)} Packager) — water loops untouched, only the net surplus leaves`));
     ex.appendChild(el('div', 'extras-line', `Canisters crafted on site: ${fmt(p.plastic)} Plastic/min from ${fmt(p.oil)} Crude Oil/min; the plastic step's ${fmt(p.hor)} Heavy Oil Residue/min (a fluid — can't be sunk) becomes ${fmt(p.coke)} Petroleum Coke/min and is sunk with the Packaged Water`));
   }
-  if (res.waterPackagingBlocked) {
+  if (res.waterRouteBlocked === 'package' || res.waterPackagingBlocked) {
     ex.appendChild(el('div', 'extras-line', `⚠ Excess water can't be packaged: the route needs Crude Oil allowed as an input and the Plastic / Empty Canister / Packaged Water / Petroleum Coke recipes enabled. The excess is reported below instead.`));
+  }
+  if (res.waterRouteBlocked === 'wet') {
+    ex.appendChild(el('div', 'extras-line', `⚠ Excess water can't go to Wet Concrete: the route needs Limestone allowed as an input and the Wet Concrete recipe enabled (unlocked, not vetoed). The excess is reported below instead.`));
   }
   // No disposal mode: excess water is REPORTED (it would back up in-game), never hidden.
   (res.resSurplus || []).forEach((rs) => ex.appendChild(el('div', 'extras-line', `⚠ Excess ${itemName(rs.item)}: ${fmt(rs.rate)}${isFluid(rs.item) ? ' m³' : ''}/min unconsumed — backs up in-game. Pick a Water disposal mode, or route it into a consumer.`)));
@@ -5259,7 +5285,8 @@ function applyStateToControls() {
   $('optObjective').value = state.opt.objective;
   $('optAlts').checked = state.opt.alts;
   $('optSink').checked = state.opt.sink !== false; // default on, incl. plans saved before this option existed
-  if ($('optWaterMode')) $('optWaterMode').value = state.opt.waterMode || 'off';
+  if ($('optWaterLoops')) $('optWaterLoops').checked = state.opt.waterLoops !== false;
+  if ($('optWaterMethod')) $('optWaterMethod').value = state.opt.waterMethod || 'none';
   if ($('optExportWaste')) $('optExportWaste').checked = !!state.opt.exportWaste;
   $('maxAlts').checked = state.max.alts;
   if ($('xrayWholeBase')) $('xrayWholeBase').checked = !!state.xrayWholeBase;
@@ -5414,7 +5441,8 @@ function init() {
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });
   $('optAlts').addEventListener('change', (e) => { state.opt.alts = e.target.checked; save(); solveAndRender(); });
   $('optSink').addEventListener('change', (e) => { state.opt.sink = e.target.checked; save(); solveAndRender(); });
-  if ($('optWaterMode')) $('optWaterMode').addEventListener('change', (e) => { state.opt.waterMode = e.target.value; save(); solveAndRender(); });
+  if ($('optWaterLoops')) $('optWaterLoops').addEventListener('change', (e) => { state.opt.waterLoops = e.target.checked; save(); solveAndRender(); });
+  if ($('optWaterMethod')) $('optWaterMethod').addEventListener('change', (e) => { state.opt.waterMethod = e.target.value; save(); solveAndRender(); });
   if ($('optExportWaste')) $('optExportWaste').addEventListener('change', (e) => { state.opt.exportWaste = e.target.checked; save(); solveAndRender(); });
   $('optAllInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = true)); save(); buildOptInputs(); solveAndRender(); });
   $('optNoInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = false)); save(); buildOptInputs(); solveAndRender(); });
