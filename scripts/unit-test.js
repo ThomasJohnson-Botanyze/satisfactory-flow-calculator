@@ -277,6 +277,53 @@ console.log('\n### NUCLEAR BURN RECIPES (full loop)');
   check('cost multiplier 0.25x leaves the reactor water draw at 240/min', !!w && near(w.rate, 240, 1e-6));
 }
 
+// ---- 'loops' objective: straightforward feed-forward chains ----
+console.log('\n### LOOPS OBJECTIVE (straightforward chains)');
+{
+  const allRes = {};
+  for (const r of DATA.resources) allRes[r] = Infinity;
+  // loopEdgeCountOf is a pure graph metric — pin its two loop flavours deterministically.
+  const sumOf = (...rcs) => ({ recipes: rcs.map((rc) => ({ rc })) });
+  check('2-cycle counted (Recycled Rubber <-> Recycled Plastic = 2 loop edges)',
+    LP.loopEdgeCountOf(sumOf('Recipe_Alternate_RecycledRubber_C', 'Recipe_Alternate_Plastic_1_C')) === 2);
+  check('a plain chain has zero loop edges',
+    LP.loopEdgeCountOf(sumOf('Recipe_IngotIron_C', 'Recipe_IronPlate_C')) === 0);
+  check('self-loop counted (std Encased Uranium Cell: sulfuric acid in AND out)',
+    LP.loopEdgeCountOf(sumOf('Recipe_UraniumCell_C')) === 1);
+
+  // Plastic + Rubber demand is the classic recycled-loop bait — the 'loops' objective
+  // must deliver a feed-forward plan (zero loop edges), even at a worse raw bill.
+  const Plastic = cls('Plastic'), Rubber = cls('Rubber');
+  const loopy = LP.optimize({ outputs: { [Plastic]: 90, [Rubber]: 90 }, allowedInputs: allRes, objective: 'loops', allowAlternates: true, sinkByproducts: true });
+  check('plastic+rubber solves under the loops objective', loopy.feasible === true);
+  check('plastic+rubber plan is loop-free', loopy.feasible && LP.loopEdgeCountOf(loopy) === 0);
+  check('objectiveValue reports the loop count', loopy.feasible && loopy.objective === 'loops' && loopy.objectiveValue === 0);
+  // Same demand under 'raw' picks the recycled cycle (that's WHY the mode exists).
+  const rawPlan = LP.optimize({ outputs: { [Plastic]: 90, [Rubber]: 90 }, allowedInputs: allRes, objective: 'raw', allowAlternates: true, sinkByproducts: true });
+  check('raw objective happily loops on the same demand (mode differentiates)', rawPlan.feasible && LP.loopEdgeCountOf(rawPlan) > 0);
+
+  // Self-loop avoidance: Encased Uranium Cell demand should land on a recipe set with
+  // no step feeding itself (the Infused alternate has no acid return).
+  const cell = LP.optimize({ outputs: { [cls('Encased Uranium Cell')]: 50 }, allowedInputs: allRes, objective: 'loops', allowAlternates: true, sinkByproducts: true });
+  check('uranium cell plan avoids the sulfuric self-loop', cell.feasible && LP.loopEdgeCountOf(cell) === 0);
+}
+
+// ---- 'clean' objective: cleanest machine ratios, no adherence to other objectives ----
+console.log('\n### CLEAN OBJECTIVE (cleanest ratios as a mode)');
+{
+  const allRes = {};
+  for (const r of DATA.resources) allRes[r] = Infinity;
+  const RIP = cls('Reinforced Iron Plate');
+  const res = LP.optimize({ outputs: { [RIP]: 7 }, allowedInputs: allRes, objective: 'clean', allowAlternates: true, sinkByproducts: true });
+  check('clean objective solves', res.feasible === true);
+  check('result stamped objective=clean', res.objective === 'clean');
+  // The mode's promise: machine counts rationalize — the ladder leaves nothing forced-fractional.
+  const ladder = res.feasible && LP.cleanLadderUp(res.recipes.map((r) => r.machines));
+  check('every machine count rationalizes to a sane clean scale', !!ladder && ladder.frac === 0);
+  check('objectiveValue = forced-fractional steps (0)', res.objectiveValue === 0);
+  check("asked rate still met (scaling is the renderer's job)", res.outputs.some((o) => o.item === RIP && o.rate >= 7 - 1e-6));
+}
+
 // Infeasible: ask for a product with no allowed inputs.
 const bad = LP.optimize({ outputs: { [IronIngot]: 30 }, allowedInputs: {}, objective: 'raw', allowAlternates: false });
 check('optimize infeasible with no inputs', bad.feasible === false);

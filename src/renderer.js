@@ -349,8 +349,8 @@ const defaultState = () => ({
   // Planner/Optimizer/Max tabs; these extras are Planner-local.
   extraTargets: [],
   clock: 1.0,
-  // When on, the plan is scaled to the nearest output that makes every step a whole
-  // number of machines (clean ratios, zero over/underclocking). See applyCleanScale.
+  // LEGACY (pre-2.7): the old "Clean ratios" toggle. Now an Optimizer objective
+  // ('clean'); mergeState migrates a saved true into opt.objective and clears this.
   cleanRatio: false,
   recipeCost: 1,
   powerMult: 1,
@@ -480,6 +480,9 @@ function mergeState(s) {
   const m = Object.assign(defaultState(), s || {});
   m.opt = Object.assign(defaultState().opt, (s && s.opt) || {});
   m.max = Object.assign(defaultState().max, (s && s.max) || {});
+  // Clean ratios graduated from a toggle into its own Optimizer objective: migrate
+  // plans saved with the old flag on, then retire the flag.
+  if (m.cleanRatio) { m.opt.objective = 'clean'; m.cleanRatio = false; }
   return m;
 }
 // Disk writes are debounced: save() fires on every edit (often every keystroke), so
@@ -1012,11 +1015,12 @@ function cleanScaleBounded(counts, maxScale = 10) {
   return { scale: 1, fracAllowed: 0 }; // nothing rationalizes — leave the plan untouched
 }
 if (typeof window !== 'undefined') window.__cleanScaleBounded = cleanScaleBounded; // test/debug hook
-// Scale a solved result in place to clean (whole-machine) ratios when the toggle is on.
+// Scale a solved result in place to clean (whole-machine) ratios — applies to plans
+// solved under the 'clean' Optimizer objective (res.objective stamped by the solver).
 // Linear in the LP solution, so we just multiply the reported quantities. Returns the
 // scale (1 = unchanged / already clean); also stamps res._cleanScale for the UI note.
 function applyCleanScale(res, targets) {
-  if (!state.cleanRatio || !res || !res.recipes || !res.recipes.length) return 1;
+  if (!res || res.objective !== 'clean' || !res.recipes || !res.recipes.length) return 1;
   const bounded = cleanScaleBounded(res.recipes.map((r) => r.machines));
   const scale = bounded.scale;
   res._cleanScale = scale;
@@ -1029,7 +1033,7 @@ function applyCleanScale(res, targets) {
   mul(res.watered, 'rate', 'concrete', 'limestone', 'machines');
   if (typeof res.totalPower === 'number') res.totalPower *= scale;
   if (typeof res.recoveredPower === 'number') res.recoveredPower *= scale;
-  if (typeof res.objectiveValue === 'number' && res.objective !== 'recipes' && res.objective !== 'inputs' && res.objective !== 'machines' && res.objective !== 'edges') res.objectiveValue *= scale; // a COUNT (recipes / inputs / whole machines / connections) doesn't scale linearly with rates
+  if (typeof res.objectiveValue === 'number' && res.objective !== 'recipes' && res.objective !== 'inputs' && res.objective !== 'machines' && res.objective !== 'edges' && res.objective !== 'loops' && res.objective !== 'clean') res.objectiveValue *= scale; // a COUNT (recipes / inputs / whole machines / connections / loops / fractional steps) doesn't scale linearly with rates
   // Snap tiny float drift so ceil()/labels show exact integers.
   res.recipes.forEach((r) => { const rd = Math.round(r.machines); if (Math.abs(r.machines - rd) < 1e-4) r.machines = rd; });
   res.totalMachines = res.recipes.reduce((a, r) => a + Math.ceil(r.machines - 1e-9), 0);
@@ -3395,7 +3399,6 @@ function computeStateResult(st) {
     if (!Object.keys(targets).length) return { feasible: false };
     const res = computePlanner(targets);
     if (!res.feasible) return { feasible: false };
-    applyCleanScale(res);
     return { feasible: true, res, targets: res.targets };
   } finally {
     state = saved;
@@ -3421,27 +3424,22 @@ function present(res, targets) {
   renderTables(res);
   updateCleanRatioNote(res);
 }
-// Explain what the Clean ratios toggle did this solve: how much the output was scaled to
-// land on whole machines, or that it was already clean / doesn't apply in this mode.
+// Explain what the 'clean' objective did this solve: how much the output was scaled to
+// land on whole machines, or that it was already clean.
 function updateCleanRatioNote(res) {
   const n = $('cleanRatioNote');
   if (!n) return;
-  if (!state.cleanRatio) { n.hidden = true; n.textContent = ''; return; }
-  if (res && res._cleanScale != null) {
-    const sc = res._cleanScale;
-    const fr = res._cleanFrac || 0;
-    const fracNote = fr === 0 ? 'every step is a whole number of machines'
-      : fr === 1 ? 'all but 1 step lands on whole machines (its exact ratio would need an absurd scale — underclock that one)'
-      : `all but ${fr} steps land on whole machines (their exact ratios would need an absurd scale — underclock those)`;
-    n.hidden = false;
-    n.textContent = Math.abs(sc - 1) > 1e-9
-      ? `Inputs & outputs scaled ×${fmt(sc, 3)} so ${fracNote}.`
-      : fr > 0 ? `No sane scale fits ${fr} step(s) to whole machines — left fractional (underclock those); the rest are already whole.`
-      : 'Already whole-machine ratios — no scaling needed.';
-  } else {
-    n.hidden = false;
-    n.textContent = 'Clean ratios apply in the Planner and Recipe Optimizer.';
-  }
+  if (!res || res.objective !== 'clean' || res._cleanScale == null) { n.hidden = true; n.textContent = ''; return; }
+  const sc = res._cleanScale;
+  const fr = res._cleanFrac || 0;
+  const fracNote = fr === 0 ? 'every step is a whole number of machines'
+    : fr === 1 ? 'all but 1 step lands on whole machines (its exact ratio would need an absurd scale — underclock that one)'
+    : `all but ${fr} steps land on whole machines (their exact ratios would need an absurd scale — underclock those)`;
+  n.hidden = false;
+  n.textContent = Math.abs(sc - 1) > 1e-9
+    ? `Inputs & outputs scaled ×${fmt(sc, 3)} so ${fracNote}.`
+    : fr > 0 ? `No sane scale fits ${fr} step(s) to whole machines — left fractional (underclock those); the rest are already whole.`
+    : 'Already whole-machine ratios — no scaling needed.';
 }
 function solveAndRender() {
   $('modeExtras').innerHTML = '';
@@ -3494,7 +3492,6 @@ function renderPlanner() {
   if (deadTargets.length) return showEmpty(blockedWarn(deadTargets, 'build'));
   const res = computePlanner(targets);
   if (!res.feasible) return showEmpty('No feasible plan: the selected recipes can’t balance — a recycle loop that consumes more than it makes. Switch one alternate to break it.');
-  applyCleanScale(res); // scale to whole-machine ratios when the toggle is on (no-op otherwise)
   // Split the desired outputs by destination. Depot / Storage outputs stay full
   // production demand (already summed into res.targets), but are pulled out of the
   // line-output set so they render in their own group + a distinct flow terminal, not
@@ -3523,19 +3520,19 @@ function renderPlanner() {
 
 // Clean-rate tip under Desired Outputs: shows the nearest scaled-up output that makes
 // every machine count whole (the ⓘ suggestion), with an Apply that bumps every desired
-// output by that factor and switches the Clean ratio toggle on.
+// output by that factor and switches the objective to 'clean'.
 function updateCleanSuggest(res, optArgs) {
   const box = $('cleanSuggest');
   if (!box) return;
   box.hidden = true; box.textContent = '';
-  if (state.cleanRatio) return; // already snapping to clean ratios — tip is moot
+  if (state.opt.objective === 'clean') return; // already in the cleanest-ratio mode — tip is moot
   let sug = cleanRateSuggestion(res);
   let swapNote = '';
   // When the current recipe set rationalizes badly, search recipe space (other recipes /
-  // alternates may divide far more evenly) — the same search the toggle solves through,
-  // so applying reproduces exactly this plan.
+  // alternates may divide far more evenly) — the same search the 'clean' objective
+  // solves through, so applying reproduces exactly this plan.
   if (optArgs && (!sug || sug.fracAllowed > 0 || sug.scale > 3)) {
-    const alt = LP.optimizeCleanest(optArgs);
+    const alt = LP.optimizeCleanest(Object.assign({}, optArgs, { objective: 'clean' }));
     if (alt.feasible) {
       const l = LP.cleanLadderUp(alt.recipes.map((r) => r.machines));
       const better = !sug || l.frac < sug.fracAllowed || (l.frac === sug.fracAllowed && l.scale < sug.scale - 1e-9);
@@ -3559,8 +3556,8 @@ function updateCleanSuggest(res, optArgs) {
   apply.style.marginLeft = '8px';
   apply.addEventListener('click', () => {
     for (const o of state.opt.outputs) if (o.rate > 0) o.rate = Math.round(Number(o.rate) * sug.scale * 1e6) / 1e6;
-    state.cleanRatio = true;
-    if ($('cleanRatio')) $('cleanRatio').checked = true;
+    state.opt.objective = 'clean';
+    if ($('optObjective')) $('optObjective').value = 'clean';
     save();
     buildOptOutputs(); // refresh the rate inputs to the new values
     solveAndRender();
@@ -3584,9 +3581,9 @@ function renderOptimize() {
 
   const sink = state.opt.sink !== false;
   const optArgs = { outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterSink: !!state.opt.waterSink, sloopMult: sloopMapAll() };
-  // Clean ratios on → search recipe space for the plan with the cleanest ratios near the
-  // asked rate (other recipes/alternates may divide more evenly), then snap-scale it.
-  const res = state.cleanRatio ? LP.optimizeCleanest(optArgs) : LP.optimize(optArgs);
+  // optimize() dispatches per objective — incl. 'clean' (cleanest-ratio recipe search,
+  // snap-scaled below) and 'loops' (straightforward feed-forward chains).
+  const res = LP.optimize(optArgs);
   if (!res.feasible) {
     if (res.backup && res.backup.length) {
       const names = res.backup.map(itemName).join(', ');
@@ -3608,7 +3605,7 @@ function renderOptimize() {
   present(res, outputs);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
 
-  const labels = { raw: 'raw resources /min', power: 'MW', machines: 'whole machines', recipes: 'distinct recipes (build steps)', inputs: 'distinct input resources', edges: 'belt / pipe connections' };
+  const labels = { raw: 'raw resources /min', power: 'MW', machines: 'whole machines', recipes: 'distinct recipes (build steps)', inputs: 'distinct input resources', edges: 'belt / pipe connections', loops: 'recycle loops (lines inside cycles)', clean: 'steps left fractional (cleanest-ratio search)' };
   const ex = el('div', 'extras-card');
   ex.appendChild(el('div', 'extras-title', '✓ Optimized recipe selection'));
   const alts = res.recipes.filter((x) => RECIPES[x.rc].alternate).length;
@@ -5047,7 +5044,6 @@ function applyStateToControls() {
   $('targetRate').value = state.targetRate;
   $('targetDest').value = normDest(state.targetDest);
   $('clock').value = Math.round(state.clock * 100);
-  $('cleanRatio').checked = !!state.cleanRatio;
   if ($('autoSave')) $('autoSave').checked = state.autoSave !== false;
   $('rateUnit').textContent = state.targetItem && isFluid(state.targetItem) ? 'm³ / min' : '/ min';
   syncSliderLabels();
@@ -5143,7 +5139,6 @@ function init() {
   $('targetDest').addEventListener('change', (e) => { state.targetDest = e.target.value; save(); solveAndRender(); });
   $('plannerAddOutput').addEventListener('click', () => { (state.extraTargets || (state.extraTargets = [])).push({ name: '', rate: 60, dest: 'line' }); save(); buildPlannerExtra(); });
   $('clock').addEventListener('input', (e) => { state.clock = (parseFloat(e.target.value) || 100) / 100; syncSliderLabels(); save(); solveAndRender(); });
-  $('cleanRatio').addEventListener('change', (e) => { state.cleanRatio = e.target.checked; save(); solveAndRender(); });
 
   $('mRecipe').addEventListener('change', (e) => { state.recipeCost = Number(e.target.value); save(); solveAndRender(); });
   $('mPower').addEventListener('change', (e) => { state.powerMult = Number(e.target.value); save(); solveAndRender(); });

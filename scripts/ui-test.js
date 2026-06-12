@@ -101,22 +101,27 @@ check('setting 0 sloops clears the override', Object.keys(slPlan2.state.nodeSloo
 check('power restored after clearing sloops', mw() === slMwBefore);
 check('Somersloops-used back to 0', parseFloat(D.getElementById('sumSloops').textContent) === 0);
 
-// ---- clean ratios ----
-console.log('\n### CLEAN RATIO');
-setVal(D.getElementById('targetRate'), '7'); // 7 RIP/min -> fractional machine counts
+// ---- clean ratios: now its own Optimizer objective (the toggle is gone) ----
+console.log('\n### CLEAN OBJECTIVE (optimizer mode)');
+check('clean-ratio toggle removed from the UI', D.getElementById('cleanRatio') === null);
+check('objective dropdown offers clean + loops', !!D.querySelector('#optObjective option[value="clean"]') && !!D.querySelector('#optObjective option[value="loops"]'));
+tab('optimize');
+const crRow = D.querySelector('#optOutputs .row');
+setVal(crRow.querySelector('.row-item'), 'Reinforced Iron Plate');
+setVal(crRow.querySelector('.row-rate'), '7'); // -> fractional machine counts under raw
 const machSubs = () => [...D.querySelectorAll('#prodTable .mach-sub')].map((s) => s.textContent);
 const anyFrac = () => machSubs().some((t) => t.includes('.'));
-check('fractional machine counts at 7/min', anyFrac());
-const crBox = D.getElementById('cleanRatio');
-crBox.checked = true; fire(crBox, 'change');
-check('clean ratio -> all whole machine counts', !anyFrac());
+check('fractional machine counts at 7/min under raw', anyFrac());
+setVal(D.getElementById('optObjective'), 'clean', 'change');
+check('clean objective -> all whole machine counts', !anyFrac());
 const crStore = JSON.parse(localStorage.getItem('satisfactory-factory-plans-v1'));
 const crPlan = crStore.plans.find((p) => p.id === crStore.activeId);
-check('clean ratio toggle persisted', crPlan.state.cleanRatio === true);
+check('clean objective persisted', crPlan.state.opt.objective === 'clean');
 check('clean ratio note shown', !D.getElementById('cleanRatioNote').hidden);
-crBox.checked = false; fire(crBox, 'change');
-check('toggling clean ratio off restores fractional counts', anyFrac());
-setVal(D.getElementById('targetRate'), '10'); // restore target for the factory-plans block below
+setVal(D.getElementById('optObjective'), 'raw', 'change');
+check('switching back to raw restores fractional counts (and hides the note)', anyFrac() && D.getElementById('cleanRatioNote').hidden);
+setVal(crRow.querySelector('.row-rate'), '10'); // restore: the primary output row syncs the planner target rate
+tab('planner');
 
 // ---- factory plans ----
 console.log('\n### FACTORY PLANS');
@@ -998,7 +1003,7 @@ console.log('\n### SANKEY VIEW (proportional flow bands)');
 
 // ---- Clean-rate suggestion: ⓘ tip under Desired Outputs proposing the nearest
 // scaled-up output where every machine count is whole; Apply bumps the rates and
-// flips the Clean ratio setting on. ----
+// switches the objective to 'clean'. ----
 console.log('\n### CLEAN-RATE SUGGESTION (optimizer)');
 {
   const { w, d, setVal, click } = boot13(null);
@@ -1013,12 +1018,12 @@ console.log('\n### CLEAN-RATE SUGGESTION (optimizer)');
   click(applyBtn);
   const st = JSON.parse(w.localStorage.getItem('satisfactory-factory-plans-v1'));
   const ap = st.plans.find((p) => p.id === st.activeId);
-  check('Apply turns the clean-ratio setting on', ap.state.cleanRatio === true);
+  check('Apply switches the objective to clean', ap.state.opt.objective === 'clean');
   // The recipe-space search may find a set that is already whole at the asked rate
   // (a swap-only suggestion, ×1) — the rate must never go DOWN, but need not rise.
   check('Apply never shrinks the desired output', Number(ap.state.opt.outputs[0].rate) >= 7);
-  check('clean-ratio checkbox reflects the change', d.getElementById('cleanRatio').checked === true);
-  check('suggestion hidden once clean ratio is on', d.getElementById('cleanSuggest').hidden === true);
+  check('objective dropdown reflects the change', d.getElementById('optObjective').value === 'clean');
+  check('suggestion hidden once the clean objective is active', d.getElementById('cleanSuggest').hidden === true);
 
   // The clean-ratio TOGGLE must never demand an absurd scale: counts whose exact LCM
   // explodes (1/3 · 1/7 · 1/11 · 1/13 → ×3003) get the relaxation ladder instead —
@@ -1029,6 +1034,31 @@ console.log('\n### CLEAN-RATE SUGGESTION (optimizer)');
   check('bounded clean scale relaxes steps instead of exploding', ladder.fracAllowed >= 1);
   const easy = w.__cleanScaleBounded([0.5, 1.5]);
   check('easy counts still snap exactly (×2, nothing fractional)', Math.abs(easy.scale - 2) < 1e-9 && easy.fracAllowed === 0);
+}
+
+// ---- Loops objective in the UI + legacy clean-toggle migration ----
+console.log('\n### LOOPS OBJECTIVE + LEGACY CLEAN-TOGGLE MIGRATION');
+{
+  // A plan saved before 2.8 with the old toggle on must load as objective 'clean'.
+  const seed = JSON.stringify({
+    plans: [{ id: 'pL', name: 'Legacy', state: { mode: 'optimize', cleanRatio: true, opt: { outputs: [{ name: 'Iron Plate', rate: 30 }], objective: 'raw', alts: true } } }],
+    activeId: 'pL', savedAt: 1,
+  });
+  const { w, d, setVal, click } = boot13(seed);
+  check('legacy cleanRatio plan migrates to objective=clean', d.getElementById('optObjective').value === 'clean');
+  check('legacy flag itself retired', w.__app.state.cleanRatio === false);
+  // Loops objective end-to-end: the classic plastic+rubber recycled-loop bait must
+  // come out feed-forward, and the extras card must report 0 recycle loops.
+  setVal(d.getElementById('optObjective'), 'loops', 'change');
+  const row = d.querySelector('#optOutputs .row');
+  setVal(row.querySelector('.row-item'), 'Plastic');
+  setVal(row.querySelector('.row-rate'), '90');
+  click(d.getElementById('optAddOutput'));
+  const row2 = [...d.querySelectorAll('#optOutputs .row')][1];
+  setVal(row2.querySelector('.row-item'), 'Rubber');
+  setVal(row2.querySelector('.row-rate'), '90');
+  check('loops objective solves in the UI', d.getElementById('output').hidden === false);
+  check('extras card reports 0 recycle loops', /Minimized loops = 0 recycle loops/.test(d.getElementById('modeExtras').textContent));
 }
 
 // ---- Water sink (Wet Concrete): flowchart wiring must match the LP's diversion ----

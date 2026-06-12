@@ -338,6 +338,12 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   if (objective === 'edges') {
     return optimizeFewestEdges({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
   }
+  if (objective === 'loops') {
+    return optimizeFewestLoops({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+  }
+  if (objective === 'clean') {
+    return optimizeCleanest({ outputs, allowedInputs, objective: 'clean', allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+  }
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
   const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
@@ -512,6 +518,158 @@ function edgeCountOf(sum) {
   return edges;
 }
 
+// Count the plan's LOOP edges — machine→machine item links that sit inside a recycle
+// cycle. Two flavours both count (each is a line the player must prime and that can
+// deadlock): a SELF-loop, where one recipe both consumes and produces the same item
+// (e.g. standard Encased Uranium Cell's sulfuric acid in + out), and a CYCLE across
+// recipes (e.g. Recycled Rubber <-> Recycled Plastic), found as edges within a
+// non-trivial strongly connected component of the recipe graph. Disposal routes
+// (sink / generator / Wet Concrete) are terminals and can never close a cycle.
+function loopEdgeCountOf(sum) {
+  const rcs = sum.recipes.map((r) => r.rc);
+  const idx = new Map(rcs.map((rc, i) => [rc, i]));
+  const producers = {}, consumers = {};
+  let selfLoops = 0;
+  for (const rc of rcs) {
+    const info = RC_INFO[rc];
+    for (const it in info.out) {
+      (producers[it] = producers[it] || []).push(rc);
+      if (info.inn[it]) selfLoops++; // same recipe makes and eats it: a backfeed line
+    }
+    for (const it in info.inn) (consumers[it] = consumers[it] || []).push(rc);
+  }
+  // Adjacency (deduped) for Tarjan; remember each cross-recipe edge per item so loop
+  // edges are counted like the flowchart draws them (one line per item per pair).
+  const adj = rcs.map(() => new Set());
+  const edges = [];
+  for (const it in producers) {
+    if (!consumers[it]) continue;
+    for (const p of producers[it]) for (const c of consumers[it]) {
+      if (p === c) continue; // self-loop already counted above
+      adj[idx.get(p)].add(idx.get(c));
+      edges.push([idx.get(p), idx.get(c)]);
+    }
+  }
+  // Tarjan SCC, iterative (recipe graphs are tiny, but no recursion-depth surprises).
+  const N = rcs.length;
+  const low = new Array(N).fill(0), num = new Array(N).fill(-1), comp = new Array(N).fill(-1), onStk = new Array(N).fill(false);
+  const stk = [];
+  let counter = 0, ncomp = 0;
+  for (let s = 0; s < N; s++) {
+    if (num[s] !== -1) continue;
+    const call = [[s, 0, null]];
+    while (call.length) {
+      const fr = call[call.length - 1];
+      const [v] = fr;
+      if (fr[1] === 0) { num[v] = low[v] = counter++; stk.push(v); onStk[v] = true; }
+      const nbrs = [...adj[v]];
+      if (fr[1] < nbrs.length) {
+        const w = nbrs[fr[1]++];
+        if (num[w] === -1) call.push([w, 0, v]);
+        else if (onStk[w]) low[v] = Math.min(low[v], num[w]);
+      } else {
+        if (low[v] === num[v]) {
+          for (;;) { const w = stk.pop(); onStk[w] = false; comp[w] = ncomp; if (w === v) break; }
+          ncomp++;
+        }
+        call.pop();
+        const parent = fr[2];
+        if (parent != null) low[parent] = Math.min(low[parent], low[v]);
+      }
+    }
+  }
+  let cyc = 0;
+  for (const [a, b] of edges) if (comp[a] === comp[b]) cyc++;
+  return selfLoops + cyc;
+}
+
+// Structural loop-bait in the recipe POOL, independent of any particular plan:
+//  - SELF-loopers: a recipe that consumes an item it also produces (std Encased Uranium
+//    Cell's sulfuric acid in + out) — a guaranteed backfeed line if used.
+//  - Alternate 2-cycle pairs: two ALTERNATES that each consume the other's product
+//    (Recycled Rubber <-> Recycled Plastic) — the classic recirculation bait the
+//    fractional-machines LP loves, because the pair is cheap per machine.
+// Each is only pruned when its primary product keeps at least one other (unpruned)
+// producer, so the prune alone never makes an item unproducible. Standard 2-cycle pairs
+// (e.g. Aluminum Scrap's water returning to Alumina Solution) are left alone — pruning
+// those can cascade a whole chain away; the greedy refinement handles what it can.
+function loopBaitPrune(pool) {
+  const inPool = new Set(pool);
+  const pruned = new Set();
+  const producersOf = (item) => pool.filter((rc) => !pruned.has(rc) && (RC_INFO[rc].out[item] || 0) > 0);
+  const tryPrune = (rc) => {
+    if (pruned.has(rc)) return;
+    if (producersOf(RC_INFO[rc].primary).length < 2) return; // sole producer — must stay
+    pruned.add(rc);
+  };
+  for (const rc of pool) {
+    const info = RC_INFO[rc];
+    for (const it in info.out) if (info.inn[it]) { tryPrune(rc); break; }
+  }
+  for (const rc of pool) {
+    if (!RECIPES[rc].alternate || pruned.has(rc)) continue;
+    const a = RC_INFO[rc];
+    for (const other of pool) {
+      if (other === rc || !RECIPES[other].alternate || pruned.has(other)) continue;
+      const b = RC_INFO[other];
+      const aFeedsB = Object.keys(a.out).some((it) => b.inn[it]);
+      const bFeedsA = Object.keys(b.out).some((it) => a.inn[it]);
+      if (aFeedsB && bFeedsA) { tryPrune(rc); tryPrune(other); }
+    }
+  }
+  return pruned;
+}
+
+// "Fewest loops" objective: the most STRAIGHTFORWARD chain, even when it isn't optimal —
+// minimize loop edges first (target: zero — pure feed-forward, nothing to prime, nothing
+// to deadlock), then untangle ties toward fewer belt/pipe lines. Two stages:
+//  1. STRUCTURAL PRUNE: solve with the pool's loop-bait blocked outright (see
+//     loopBaitPrune). Greedy block-one search alone can't escape a loopy basin — every
+//     single-block probe just re-solves into a different web of cycles.
+//  2. GREEDY REFINEMENT on whatever loops remain (longer cycles the prune can't see),
+//     probing with the prune still in force. Falls back to the unpruned pool when the
+//     pruned solve is infeasible (a pruned chain was load-bearing after all).
+function optimizeFewestLoops(params) {
+  const inner = Object.assign({}, params, { objective: 'machinesLP' });
+  const score = (sum) => [loopEdgeCountOf(sum), edgeCountOf(sum)];
+  const finish = (sum) => { sum.objective = 'loops'; if (sum.feasible) sum.objectiveValue = loopEdgeCountOf(sum); return sum; };
+  const userBlocked = params.blockedRecipes ? [...params.blockedRecipes] : [];
+  const pool = recipePool(params.allowAlternates !== false, params.unlockedAlts, params.blockedRecipes);
+  const prune = loopBaitPrune(pool);
+  let blocked = new Set([...userBlocked, ...prune]);
+  let best = optimize(Object.assign({}, inner, { blockedRecipes: blocked }));
+  if (!best.feasible) { blocked = new Set(userBlocked); best = optimize(Object.assign({}, inner, { blockedRecipes: blocked })); }
+  if (!best.feasible) return finish(best);
+  let bestScore = score(best);
+  let budget = 120;
+  let progress = true;
+  while (progress && budget > 0 && bestScore[0] > 0) {
+    progress = false;
+    // Self-loopers and cycle members first — blocking a bystander can't reduce loops.
+    const inLoop = (rc) => {
+      const info = RC_INFO[rc];
+      for (const it in info.out) if (info.inn[it]) return true;
+      const others = best.recipes.filter((r) => r.rc !== rc);
+      return loopEdgeCountOf(best) > loopEdgeCountOf({ recipes: others });
+    };
+    const used = best.recipes.slice().sort((a, b) => (inLoop(b.rc) ? 1 : 0) - (inLoop(a.rc) ? 1 : 0) || a.machines - b.machines);
+    for (const cand of used) {
+      if (budget-- <= 0) break;
+      const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
+      const probe = optimize(Object.assign({}, inner, { blockedRecipes: tryBlocked }));
+      if (!probe.feasible) continue;
+      const s = score(probe);
+      if (s[0] < bestScore[0] || (s[0] === bestScore[0] && s[1] < bestScore[1])) {
+        blocked = tryBlocked;
+        best = probe; bestScore = s;
+        progress = true;
+        break; // plan changed — re-rank the survivors and scan again
+      }
+    }
+  }
+  return finish(best);
+}
+
 // "Fewest connections" objective: minimize the number of LINES between nodes — distinct
 // belt/pipe links the player must route — which is NOT the same as fewest recipe nodes
 // (a web of 10 recipes can need more routing than a chain of 12). Same greedy elimination
@@ -608,14 +766,19 @@ function lexBetter(a, b) {
   return false;
 }
 // Search recipe space for the plan with the CLEANEST ratios near the asked output:
-// start from the chosen objective's plan, then greedily try blocking each used recipe
-// (other recipes / alternates take over) and keep any swap whose clean score is
-// strictly better. The clean-ratio toggle solves through this, and the suggestion tip
-// scores the same search — so what the tip promises is exactly what the toggle builds.
+// start from a base plan, then greedily try blocking each used recipe (other recipes /
+// alternates take over) and keep any swap whose clean score is strictly better. This IS
+// the 'clean' Optimizer objective: cleanliness outranks everything — the inner LP is a
+// plain fewest-machines solve with NO adherence to any other optimization parameter, so
+// the search is free to take a worse plan whose counts land on whole machines or simple
+// fractions (.5, .333…). The suggestion tip scores the same search, so what the tip
+// promises is exactly what switching to the mode builds. (Other objective values are
+// still accepted for back-compat with stored args.)
 function optimizeCleanest(params) {
-  const userObj = params.objective || 'raw';
-  // Cardinality objectives nest their own greedy loops — probe with the raw LP instead.
-  const innerObj = (userObj === 'machines' || userObj === 'recipes' || userObj === 'inputs' || userObj === 'edges') ? 'machinesLP' : userObj;
+  const userObj = params.objective || 'clean';
+  // 'clean' (and the cardinality objectives, which nest their own greedy loops) probe
+  // with the plain fractional-machines LP; rate objectives keep their own inner LP.
+  const innerObj = (userObj === 'clean' || userObj === 'machines' || userObj === 'recipes' || userObj === 'inputs' || userObj === 'edges' || userObj === 'loops') ? 'machinesLP' : userObj;
   const inner = Object.assign({}, params, { objective: innerObj });
   const finish = (sum) => {
     if (!sum.feasible) return sum;
@@ -626,15 +789,33 @@ function optimizeCleanest(params) {
       : userObj === 'recipes' ? sum.recipes.length
       : userObj === 'inputs' ? sum.raw.length
       : userObj === 'edges' ? edgeCountOf(sum)
+      : userObj === 'loops' ? loopEdgeCountOf(sum)
+      : userObj === 'clean' ? cleanLadderUp(sum.recipes.map((r) => r.machines)).frac
       : sum.fracMachines;
     return sum;
   };
-  let best = optimize(inner);
-  if (!best.feasible) return finish(best);
-  let bestScore = cleanScoreOf(best);
+  // Multi-base start: the fractional-machines LP gravitates to dense alternate webs
+  // whose counts are fraction spaghetti (0.0124× of this, 0.448× of that) — a greedy
+  // block-one search can't climb out of that basin, because swapping one alternate for
+  // another never strictly improves the score. So seed from several shapes — the inner
+  // LP, the raw-minimizing LP, and a STANDARD-RECIPES-ONLY solve (human-style chains,
+  // whose counts come out as simple rate fractions) — and refine the cleanest of them.
+  let best = null, bestScore = null;
+  const bases = [
+    { objective: innerObj },
+    { objective: innerObj === 'raw' ? 'machinesLP' : 'raw' },
+    { objective: 'machinesLP', allowAlternates: false },
+  ];
+  for (const b of bases) {
+    const cand = optimize(Object.assign({}, params, b));
+    if (!cand.feasible) continue;
+    const s = cleanScoreOf(cand);
+    if (!best || lexBetter(s, bestScore)) { best = cand; bestScore = s; }
+  }
+  if (!best) return finish(optimize(inner));
   if (bestScore[0] === 0 && bestScore[1] <= 1 + 1e-9) return finish(best); // already perfectly clean
   const blocked = new Set(params.blockedRecipes ? [...params.blockedRecipes] : []);
-  let budget = 24;
+  let budget = 48;
   let progress = true;
   while (progress && budget > 0) {
     progress = false;
@@ -745,4 +926,4 @@ function planner({ target, rate, targets = null, recipes = [], rawItems = [], re
   return sum;
 }
 
-module.exports = { optimize, maxThroughput, planner, RC_INFO, RES, effAmount, edgeCountOf, optimizeCleanest, cleanLadderUp };
+module.exports = { optimize, maxThroughput, planner, RC_INFO, RES, effAmount, edgeCountOf, loopEdgeCountOf, optimizeCleanest, cleanLadderUp };
