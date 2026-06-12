@@ -398,57 +398,45 @@ console.log('\n### WATER DISPOSAL MODES');
   const off = LP.optimize(scrapArgs);
   const xs = off.feasible && (off.resSurplus || []).find((r) => r.item === 'Desc_Water_C');
   check('off: 120/min excess water reported as resSurplus', !!xs && near(xs.rate, 120, 1e-4));
-  // Mode PACKAGE: net water capped at ≤ 0. The solver may consume the surplus in any
-  // real water-eating recipe when that's cheaper (here: extra Alumina Solution offsets
-  // the supplied input) — the contract is simply NO surplus survives.
+  // Mode PACKAGE (post-solve fixed route): the plan itself is UNTOUCHED — the solver may
+  // not restructure to absorb water — and the surplus leaves through exactly one chain:
+  // Packager <- Empty Canister <- Plastic from oil, HOR -> Petroleum Coke, both ends sunk.
   const pkg = LP.optimize(Object.assign({}, scrapArgs, { packageWater: true }));
+  const m = (rc) => { const r = pkg.feasible && pkg.recipes.find((x) => x.rc === rc); return r ? r.machines : 0; };
   check('package: plan solves', pkg.feasible === true);
-  check('package: no leftover water surplus (consumed or packaged)', pkg.feasible && !(pkg.resSurplus || []).length && !(pkg.net.Desc_Water_C > 1e-6));
-  // Forced-Packager scenario: inputs offer NO other water consumer (alumina-from-bauxite
-  // is impossible without bauxite; residual plastic/rubber blocked), so the surplus MUST
-  // be packaged — Packager + in-plan Empty Canister chain + plastic from oil, sunk.
-  const forced = LP.optimize({
-    outputs: { Desc_AluminumScrap_C: 360 },
-    allowedInputs: { Desc_AluminaSolution_C: Infinity, Desc_Coal_C: Infinity, Desc_LiquidOil_C: Infinity },
-    objective: 'machines', allowAlternates: false, sinkByproducts: true, packageWater: true,
-    blockedRecipes: new Set(['Recipe_ResidualPlastic_C', 'Recipe_ResidualRubber_C']),
-  });
-  check('package (forced): plan solves', forced.feasible === true);
-  const pkgStep = forced.feasible && forced.recipes.find((r) => r.rc === 'Recipe_PackagedWater_C');
-  check('package (forced): 2 Packagers for 120 water/min', !!pkgStep && near(pkgStep.machines, 2, 1e-6));
-  check('package (forced): canisters crafted in-plan (2 Constructors)', forced.feasible && forced.recipes.some((r) => r.rc === 'Recipe_FluidCanister_C' && near(r.machines, 2, 1e-6)));
-  check('package (forced): plastic feedstock chain in-plan from oil', forced.feasible && forced.recipes.some((r) => r.rc === 'Recipe_Plastic_C') && forced.raw.some((r) => r.item === 'Desc_LiquidOil_C'));
-  check('package (forced): 120/min Packaged Water leaves via the Awesome Sink', forced.feasible && (forced.sunk || []).some((s) => s.item === 'Desc_PackagedWater_C' && near(s.rate, 120, 1e-4)));
+  check('package: base plan untouched (1 scrap refinery, no extra alumina)', near(m('Recipe_AluminumScrap_C'), 1, 1e-6) && m('Recipe_AluminaSolution_C') === 0);
+  check('package: 2 Packagers drink the 120/min excess', near(m('Recipe_PackagedWater_C'), 2, 1e-6));
+  check('package: 2 canister Constructors + 3 Plastic refineries + 0.75 coke refineries', near(m('Recipe_FluidCanister_C'), 2, 1e-6) && near(m('Recipe_Plastic_C'), 3, 1e-6) && near(m('Recipe_PetroleumCoke_C'), 0.75, 1e-6));
+  check('package: 90/min crude oil drawn for the chain', pkg.feasible && pkg.raw.some((r) => r.item === 'Desc_LiquidOil_C' && near(r.rate, 90, 1e-4)));
+  check('package: Packaged Water (120) + Petroleum Coke (90) leave via the sink', pkg.feasible
+    && (pkg.sunk || []).some((s) => s.item === 'Desc_PackagedWater_C' && near(s.rate, 120, 1e-4))
+    && (pkg.sunk || []).some((s) => s.item === 'Desc_PetroleumCoke_C' && near(s.rate, 90, 1e-4)));
+  check('package: no leftover water surplus, net water clean', pkg.feasible && !(pkg.resSurplus || []).some((r) => r.item === 'Desc_Water_C') && !(pkg.net.Desc_Water_C > 1e-6));
+  check('package: route totals reported (packaged summary)', pkg.feasible && pkg.packaged && near(pkg.packaged.water, 120, 1e-4) && near(pkg.packaged.canisters, 120, 1e-4) && near(pkg.packaged.plastic, 60, 1e-4) && near(pkg.packaged.hor, 30, 1e-4));
+  // Wet-Concrete bait (alternates on, limestone available): the route is fixed, so the
+  // competing recipe can never appear as the absorber and the Packager always shows.
+  const bait = LP.optimize(Object.assign({}, scrapArgs, { allowAlternates: true, packageWater: true }));
+  check('package: Wet Concrete never appears as the absorber', bait.feasible === true && !bait.recipes.some((r) => r.rc === 'Recipe_Alternate_WetConcrete_C'));
+  // With alternates the solver may pick a scrap recipe with no water by-product at all
+  // (Instant Scrap) — then there is simply nothing to package. The contract: any surplus
+  // that DOES exist is packaged, and no positive net water ever survives.
+  check('package: surplus (if any) packaged — net water never positive', bait.feasible && !(bait.net.Desc_Water_C > 1e-6) && ((bait.packaged != null) === bait.recipes.some((r) => r.rc === 'Recipe_PackagedWater_C')));
+  // ...while the Wet Concrete MODE itself still works (its route is the __wet__ variable).
+  const wetStill = LP.optimize(Object.assign({}, scrapArgs, { waterSink: true }));
+  check('wet mode unaffected: diverts via the Wet Concrete route', wetStill.feasible === true && (wetStill.watered || []).length === 1);
   // LOOPS STAY ALLOWED: an aluminum-ingot plan nets its scrap water against the alumina
   // draw — net water is a fresh DRAW, so no Packager appears and nothing is diverted.
   const alu = LP.optimize({ outputs: { Desc_AluminumIngot_C: 240 }, allowedInputs: allRes, objective: 'machines', allowAlternates: false, sinkByproducts: true, packageWater: true });
   check('package: aluminum still solves with loops allowed', alu.feasible === true);
   check('package: aluminum nets water (fresh draw, no Packager)', alu.feasible && (alu.net.Desc_Water_C || 0) < -1e-6 && !alu.recipes.some((r) => r.rc === 'Recipe_PackagedWater_C'));
-  // Package mode must never absorb via the COMPETING Wet Concrete recipe — with
-  // limestone available, 1 wet refinery beats any canister chain on every objective, so
-  // unblocked it would win every time and the mode would LOOK like Wet Concrete.
-  const bait = LP.optimize({
-    outputs: { Desc_AluminumScrap_C: 360 },
-    allowedInputs: { Desc_AluminaSolution_C: Infinity, Desc_Coal_C: Infinity, Desc_Stone_C: Infinity, Desc_LiquidOil_C: Infinity },
-    objective: 'machines', allowAlternates: true, sinkByproducts: true, packageWater: true,
-  });
-  check('package: Wet Concrete never appears as the absorber', bait.feasible === true && !bait.recipes.some((r) => r.rc === 'Recipe_Alternate_WetConcrete_C'));
-  check('package: bait surplus still fully handled', bait.feasible && !(bait.resSurplus || []).length && !(bait.net.Desc_Water_C > 1e-6));
-  // ...while the Wet Concrete MODE itself still works (its route is the __wet__
-  // variable, not the pool recipe — the block above is package-mode-only).
-  const wetStill = LP.optimize(Object.assign({}, scrapArgs, { waterSink: true }));
-  check('wet mode unaffected: diverts via the Wet Concrete route', wetStill.feasible === true && (wetStill.watered || []).length === 1);
-
-  // Diagnostic: water allowed but no oil ⇒ no plastic ⇒ no canisters — dropping ONLY the
-  // net-water cap would solve, so the failure is named waterPackaging.
-  const noCans = LP.optimize({
-    outputs: { Desc_AluminumScrap_C: 360 },
-    allowedInputs: { Desc_AluminaSolution_C: Infinity, Desc_Coal_C: Infinity, Desc_Water_C: Infinity },
-    objective: 'machines', allowAlternates: false, sinkByproducts: true, packageWater: true,
-  });
-  check('package: canister-less plan reports waterPackaging infeasibility', noCans.feasible === false && noCans.waterPackaging === true);
+  // Route blocked (no Crude Oil input / a chain recipe vetoed): the plan still solves,
+  // the excess stays REPORTED, and the flag names why.
+  const noOil = LP.optimize({ outputs: { Desc_AluminumScrap_C: 360 }, allowedInputs: { Desc_AluminaSolution_C: Infinity, Desc_Coal_C: Infinity, Desc_Water_C: Infinity }, objective: 'machines', allowAlternates: false, sinkByproducts: true, packageWater: true });
+  check('package: no-oil plan stays feasible with the excess reported + flagged', noOil.feasible === true && noOil.waterPackagingBlocked === true && (noOil.resSurplus || []).some((r) => r.item === 'Desc_Water_C'));
+  const vetoed = LP.optimize(Object.assign({}, scrapArgs, { packageWater: true, blockedRecipes: new Set(['Recipe_Plastic_C']) }));
+  check('package: vetoed chain recipe flags instead of substituting', vetoed.feasible === true && vetoed.waterPackagingBlocked === true);
   // Without Water even allowed as an input, the by-product balance itself blocks (the
-  // older "would back up" shape) — and the fluid surplus is still NAMED via resSurplus.
+  // older "would back up" shape) — and the fluid surplus is still NAMED.
   const noWaterIn = LP.optimize({
     outputs: { Desc_AluminumScrap_C: 360 },
     allowedInputs: { Desc_AluminaSolution_C: Infinity, Desc_Coal_C: Infinity },

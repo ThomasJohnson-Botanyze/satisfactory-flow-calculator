@@ -3696,14 +3696,11 @@ function renderOptimize() {
   // snap-scaled below) and 'loops' (straightforward feed-forward chains).
   const res = LP.optimize(optArgs);
   if (!res.feasible) {
-    if (res.waterPackaging) {
-      return showEmpty('Excess water can’t be packaged: the Packaged Water route needs Empty Canisters (Plastic — or a canister alternate) from the allowed inputs. Enable the inputs/recipes for canisters, or switch Water disposal to Wet Concrete / None.');
-    }
     if (res.backup && res.backup.length) {
       const names = res.backup.map(itemName).join(', ');
       const waterTip = res.backup.includes('Desc_Water_C')
         ? (state.opt.waterMode === 'package'
-          ? ' Packaged Water is selected but its chain can’t run here — Empty Canisters need Plastic (or a canister alternate) from the allowed inputs, and by-product water can only be packaged when Water is an allowed input.'
+          ? ' Packaged Water handles the plan’s NET surplus, but here water can’t even enter the balance — allow Water as an input resource so the by-product can net before the leftovers are packaged.'
           : ' For Water specifically, pick a Water disposal mode (Wet Concrete or Packaged Water).')
         : '';
       return showEmpty(`By-product would back up: ${names}. It’s a fluid with no recipe consuming it, so it can’t be sunk and would stall the line. Enable an alternate recipe that consumes it, or untick “Sink / consume by-products”.${waterTip}`);
@@ -3732,15 +3729,15 @@ function renderOptimize() {
   if ((res.sunk || []).length) ex.appendChild(el('div', 'extras-line', `By-products sunk: ${res.sunk.map((s) => itemName(s.item)).join(', ')} — ${fmt(sunkPts, 0)} AWESOME Sink points/min`));
   if ((res.burned || []).length) ex.appendChild(el('div', 'extras-line', `By-products burned: ${res.burned.map((b) => itemName(b.item)).join(', ')} — ${fmt(res.recoveredPower, 0)} MW recovered from generators`));
   (res.watered || []).forEach((w) => ex.appendChild(el('div', 'extras-line', `Excess water sunk via Wet Concrete: ${fmt(w.rate)} Water/min → ${fmt(w.concrete)} Concrete/min (${fmt(w.machines)} Refinery, ${fmt(w.limestone)} Limestone/min) — no by-product loop`)));
-  // Packaged-water mode: the route is ordinary pool steps — surface its totals here so the
-  // canister demand (and that its crafting chain is in-plan) is explicit at a glance.
-  const pkgStep = (res.recipes || []).find((r) => r.rc === 'Recipe_PackagedWater_C');
-  if (pkgStep) {
-    const wtr = LP.RC_INFO.Recipe_PackagedWater_C;
-    const m100 = pkgStep.machines * (pkgStep.clock || 1);
-    const waterIn = (wtr.inn.Desc_Water_C || 0) * m100;
-    const cansIn = (wtr.inn.Desc_FluidCanister_C || 0) * m100;
-    ex.appendChild(el('div', 'extras-line', `Excess water packaged: ${fmt(waterIn)} Water/min + ${fmt(cansIn)} Empty Canister/min → ${fmt(pkgStep.rate)} Packaged Water/min (${fmt(pkgStep.machines)} Packager) — canisters are crafted in-plan (see the production steps for their inputs); water loops stay allowed`));
+  // Packaged-water mode: the fixed route's totals — what the Packager drinks, what the
+  // canisters need, and where the plastic step's HOR byproduct ends up.
+  if (res.packaged) {
+    const p = res.packaged;
+    ex.appendChild(el('div', 'extras-line', `Excess water packaged: ${fmt(p.water)} Water/min + ${fmt(p.canisters)} Empty Canister/min → ${fmt(p.packaged)} Packaged Water/min (${fmt(p.machines)} Packager) — water loops untouched, only the net surplus leaves`));
+    ex.appendChild(el('div', 'extras-line', `Canisters crafted on site: ${fmt(p.plastic)} Plastic/min from ${fmt(p.oil)} Crude Oil/min; the plastic step's ${fmt(p.hor)} Heavy Oil Residue/min (a fluid — can't be sunk) becomes ${fmt(p.coke)} Petroleum Coke/min and is sunk with the Packaged Water`));
+  }
+  if (res.waterPackagingBlocked) {
+    ex.appendChild(el('div', 'extras-line', `⚠ Excess water can't be packaged: the route needs Crude Oil allowed as an input and the Plastic / Empty Canister / Packaged Water / Petroleum Coke recipes enabled. The excess is reported below instead.`));
   }
   // No disposal mode: excess water is REPORTED (it would back up in-game), never hidden.
   (res.resSurplus || []).forEach((rs) => ex.appendChild(el('div', 'extras-line', `⚠ Excess ${itemName(rs.item)}: ${fmt(rs.rate)}${isFluid(rs.item) ? ' m³' : ''}/min unconsumed — backs up in-game. Pick a Water disposal mode, or route it into a consumer.`)));

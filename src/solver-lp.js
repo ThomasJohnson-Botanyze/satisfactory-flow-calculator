@@ -59,13 +59,83 @@ const WASTE_WATER = '__wastewater__';
 const CONCRETE = 'Desc_Cement_C';
 const LIMESTONE = 'Desc_Stone_C';
 const WET_CONCRETE_RC = 'Recipe_Alternate_WetConcrete_C';
-// Packaged-water disposal (the LOOPS-ALLOWED alternative to Wet Concrete): by-product
-// water keeps netting against local demand — the aluminum backfeed stays — and only the
-// plan's NET surplus must leave, packaged into sinkable Packaged Water by ordinary pool
-// recipes (Packager + an in-plan Empty Canister chain, so the canister inputs and their
-// crafting steps show up as real machines). Enforced with a single extra constraint:
-// net water ≤ 0 (a plan may draw fresh water, never accumulate it).
-const PKG_WATER_RC = 'Recipe_PackagedWater_C';
+// Packaged-water disposal (the LOOPS-ALLOWED alternative to Wet Concrete), applied
+// POST-SOLVE: earlier designs put a net-water ≤ 0 cap into the LP, but then the solver
+// kept restructuring the plan to absorb the surplus through whatever recipe was cheapest
+// (extra Alumina Solution, Wet Concrete, Polyester Fabric…) and the Packager never
+// appeared. Instead the plan is solved completely untouched — recirculation loops and
+// all — and its NET surplus water (resSurplus) is then routed through ONE fixed chain,
+// sized arithmetically:  Packager (Packaged Water) ← Empty Canister ← Plastic from
+// Crude Oil, with the plastic step's Heavy Oil Residue (a fluid — it can't be sunk)
+// converted to Petroleum Coke and sunk alongside the Packaged Water.
+const PKG_CHAIN = { pkg: 'Recipe_PackagedWater_C', can: 'Recipe_FluidCanister_C', pl: 'Recipe_Plastic_C', coke: 'Recipe_PetroleumCoke_C' };
+const OIL = 'Desc_LiquidOil_C';
+const CANISTER = 'Desc_FluidCanister_C';
+const PLASTIC = 'Desc_Plastic_C';
+const HOR = 'Desc_HeavyOilResidue_C';
+const PKG_WATER = 'Desc_PackagedWater_C';
+const COKE = 'Desc_PetroleumCoke_C';
+// The cardinality objectives' greedy loops probe by BLOCKING used recipes — left
+// unguarded they learn to block the packaged-water chain itself (or drop Crude Oil in
+// the fewest-inputs mode), because a plan with a flagged-unbuildable route counts fewer
+// machines/edges/inputs. Route pieces are not legitimate elimination candidates.
+const PKG_RCS = new Set([PKG_CHAIN.pkg, PKG_CHAIN.can, PKG_CHAIN.pl, PKG_CHAIN.coke]);
+const pkgProtected = (params, rc) => !!params.packageWater && PKG_RCS.has(rc);
+
+function applyPackagedWaterRoute(sum, { recipeCost = 1, powerMult = 1, sinkByproducts = false, allowedInputs = null, blockedRecipes = null } = {}) {
+  const xs = (sum.resSurplus || []).find((r) => r.item === WATER);
+  const E = xs ? xs.rate : 0;
+  if (!(E > 1e-9)) return;
+  // The route is only honest when its pieces are usable: Crude Oil allowed as an input
+  // and none of the chain recipes vetoed. Otherwise leave the excess REPORTED + flagged.
+  const rcs = [PKG_CHAIN.pkg, PKG_CHAIN.can, PKG_CHAIN.pl, PKG_CHAIN.coke];
+  if ((allowedInputs && allowedInputs[OIL] == null) || rcs.some((rc) => !RC_INFO[rc] || (blockedRecipes && blockedRecipes.has(rc)))) {
+    sum.waterPackagingBlocked = true;
+    return;
+  }
+  const I = (rc, item) => effInnRate(RC_INFO[rc], item, recipeCost);
+  const O = (rc, item) => RC_INFO[rc].out[item] || 0;
+  const mPkg = E / I(PKG_CHAIN.pkg, WATER);
+  const cans = mPkg * I(PKG_CHAIN.pkg, CANISTER);
+  const mCan = cans / O(PKG_CHAIN.can, CANISTER);
+  const plastic = mCan * I(PKG_CHAIN.can, PLASTIC);
+  const mPl = plastic / O(PKG_CHAIN.pl, PLASTIC);
+  const oil = mPl * I(PKG_CHAIN.pl, OIL);
+  const hor = mPl * O(PKG_CHAIN.pl, HOR);
+  const mCoke = hor / I(PKG_CHAIN.coke, HOR);
+  const coke = mCoke * O(PKG_CHAIN.coke, COKE);
+  const packaged = mPkg * O(PKG_CHAIN.pkg, PKG_WATER);
+  for (const [rc, m] of [[PKG_CHAIN.pkg, mPkg], [PKG_CHAIN.can, mCan], [PKG_CHAIN.pl, mPl], [PKG_CHAIN.coke, mCoke]]) {
+    const info = RC_INFO[rc];
+    const power = m * info.power * powerMult;
+    const ex = sum.recipes.find((r) => r.rc === rc);
+    if (ex) { ex.machines += m; ex.rate += info.primaryRate * m; ex.power += power; }
+    else sum.recipes.push({ rc, item: info.primary, machines: m, building: info.building, buildingName: info.buildingName, rate: info.primaryRate * m, power });
+    sum.totalPower += power;
+    sum.fracMachines += m;
+    for (const it of itemsOf(info)) sum.net[it] = (sum.net[it] || 0) + coefOf(info, it, recipeCost) * m;
+  }
+  sum.totalMachines = sum.recipes.reduce((a, r) => a + Math.ceil(r.machines - 1e-9), 0);
+  const rawOil = sum.raw.find((r) => r.item === OIL);
+  if (rawOil) rawOil.rate += oil; else sum.raw.push({ item: OIL, rate: oil });
+  sum.rawTotal += oil;
+  sum.resSurplus = sum.resSurplus.filter((r) => r.item !== WATER);
+  // The chain's two solid ends leave on the sink belt — or float as surplus outputs
+  // when by-product sinking is off (the user sinks them manually).
+  const leave = (item, rate) => {
+    if (!(rate > 1e-9)) return;
+    if (sinkByproducts) {
+      sum.net[item] = (sum.net[item] || 0) - rate;
+      sum.sunk.push({ item, rate, points: rate * sinkPointsOf(item) });
+    } else {
+      const o = sum.outputs.find((x) => x.item === item);
+      if (o) o.rate += rate; else sum.outputs.push({ item, rate });
+    }
+  };
+  leave(PKG_WATER, packaged);
+  leave(COKE, coke);
+  sum.packaged = { water: E, packaged, canisters: cans, plastic, oil, hor, coke, machines: mPkg };
+}
 
 // Unpackage recipes (Packaged X -> X + container) merely reverse a packaging step. When
 // the optimizer builds from raw resources they are never useful on their own — running one
@@ -241,17 +311,6 @@ function buildModel({ outputs = {}, inputs = {}, objective = 'raw', allowAlterna
   }
   if (wetAvail) constraints[WASTE_WATER] = { equal: 0 }; // all diverted water must leave via the Wet Concrete route
 
-  // Packaged-water route (see PKG_WATER_RC note): cap NET water at ≤ 0 so a genuine
-  // surplus is forced through the ordinary Packaged Water pool recipe (and its in-plan
-  // canister chain) instead of silently floating. By-product water still nets against
-  // local consumers first — recirculation loops stay legal, only the leftovers leave.
-  // Skipped when the user demands Water itself, when Wet Concrete already diverts every
-  // water output, or when the recipe is vetoed; an `equal` constraint is already ≤ 0.
-  const pkgAvail = packageWater && !maxItem && RECIPES[PKG_WATER_RC]
-    && outputs[WATER] == null && !wetAvail
-    && !(blockedRecipes && blockedRecipes.has(PKG_WATER_RC));
-  if (pkgAvail && constraints[WATER] && constraints[WATER].equal == null) constraints[WATER].max = 0;
-
   // Minimization carries the chosen objective plus the tiny activity tie-break in one key
   // (`_score`), so a free package<->unpackage cycle can never spin. Max-throughput keeps a
   // pure `_out` objective (cycles there are bounded by supply and add no output anyway).
@@ -381,15 +440,6 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   }
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
-  // Packaged Water mode must not satisfy its own net-water cap through the COMPETING
-  // disposal recipe — a "Wet Concrete" step appearing under the packaging mode reads as
-  // the wrong mode firing (and limestone+1 refinery usually beats the canister chain on
-  // any objective, so it would win every time). Users who want that route pick the Wet
-  // Concrete mode. The block is per-solve only; other genuine water consumers stay fair game.
-  if (packageWater && !(blockedRecipes && blockedRecipes.has(WET_CONCRETE_RC))) {
-    blockedRecipes = new Set(blockedRecipes ? [...blockedRecipes] : []);
-    blockedRecipes.add(WET_CONCRETE_RC);
-  }
   const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater, exportWaste, sloopMult });
   // A demanded item no pooled recipe produces (every producer blocked / not unlocked)
   // would otherwise be silently dropped from the constraints — the solver would return a
@@ -403,14 +453,6 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   if (noProducer.length) return { feasible: false, noProducer };
   const res = solver.Solve(model);
   if (!res.feasible) {
-    // Packaged-water diagnosis first (most specific): if dropping ONLY the net-water cap
-    // solves, the blocker is the packaging chain itself (canisters / plastic unavailable
-    // under the allowed inputs) — name it instead of a generic infeasible.
-    if (packageWater) {
-      const noPkg = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, packageWater: false, exportWaste, sloopMult });
-      const rp = solver.Solve(noPkg.model);
-      if (rp.feasible) return { feasible: false, waterPackaging: true };
-    }
     // Tell "can't make the outputs at all" apart from "a by-product would back up": if
     // the same request solves once the net-zero balance is relaxed, the blocker is a
     // surplus by-product that can't be sunk (a fluid with no consumer) — name it so the
@@ -431,6 +473,9 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
     return { feasible: false };
   }
   const sum = summarize(res, pool, recipeCost, powerMult, disposal, sloopMult);
+  // Packaged-water mode: the plan above is UNTOUCHED (loops intact); only its net
+  // surplus water now leaves through the fixed Packager chain, sized arithmetically.
+  if (packageWater) applyPackagedWaterRoute(sum, { recipeCost, powerMult, sinkByproducts, allowedInputs, blockedRecipes });
   sum.feasible = true;
   sum.objective = objective;
   // Report the true objective, not the regularized score (res.result carries the tiny
@@ -459,7 +504,7 @@ function optimizeFewestRecipes(params) {
     progress = false;
     // Probe cheapest-contribution recipes first: a sliver of a machine is the most
     // likely candidate to be replaceable by the recipes already in the plan.
-    const used = best.recipes.slice().sort((a, b) => a.machines - b.machines);
+    const used = best.recipes.slice().filter((r) => !pkgProtected(params, r.rc)).sort((a, b) => a.machines - b.machines);
     for (const cand of used) {
       if (budget-- <= 0) break;
       const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
@@ -493,7 +538,7 @@ function optimizeFewestInputs(params) {
   let progress = true;
   while (progress && budget > 0) {
     progress = false;
-    const candidates = best.raw.slice().sort((a, b) => a.rate - b.rate);
+    const candidates = best.raw.slice().filter((r) => !(params.packageWater && r.item === OIL)).sort((a, b) => a.rate - b.rate);
     for (const cand of candidates) {
       if (!(cand.item in allowed) || budget-- <= 0) continue;
       const tryAllowed = Object.assign({}, allowed);
@@ -532,7 +577,7 @@ function optimizeWholeMachines(params) {
   while (progress && budget > 0) {
     progress = false;
     const waste = (r) => Math.ceil(r.machines - 1e-9) - r.machines; // idle capacity bought by the ceil
-    const used = best.recipes.slice().sort((a, b) => waste(b) - waste(a));
+    const used = best.recipes.slice().filter((r) => !pkgProtected(params, r.rc)).sort((a, b) => waste(b) - waste(a));
     for (const cand of used) {
       if (budget-- <= 0) break;
       const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
@@ -708,7 +753,7 @@ function optimizeFewestLoops(params) {
       const others = best.recipes.filter((r) => r.rc !== rc);
       return loopEdgeCountOf(best) > loopEdgeCountOf({ recipes: others });
     };
-    const used = best.recipes.slice().sort((a, b) => (inLoop(b.rc) ? 1 : 0) - (inLoop(a.rc) ? 1 : 0) || a.machines - b.machines);
+    const used = best.recipes.slice().filter((r) => !pkgProtected(params, r.rc)).sort((a, b) => (inLoop(b.rc) ? 1 : 0) - (inLoop(a.rc) ? 1 : 0) || a.machines - b.machines);
     for (const cand of used) {
       if (budget-- <= 0) break;
       const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
@@ -741,7 +786,7 @@ function optimizeFewestEdges(params) {
   let progress = true;
   while (progress && budget > 0) {
     progress = false;
-    const used = best.recipes.slice().sort((a, b) => a.machines - b.machines);
+    const used = best.recipes.slice().filter((r) => !pkgProtected(params, r.rc)).sort((a, b) => a.machines - b.machines);
     for (const cand of used) {
       if (budget-- <= 0) break;
       const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
@@ -875,7 +920,7 @@ function optimizeCleanest(params) {
   let progress = true;
   while (progress && budget > 0) {
     progress = false;
-    const used = best.recipes.slice().sort((a, b) => a.machines - b.machines);
+    const used = best.recipes.slice().filter((r) => !pkgProtected(params, r.rc)).sort((a, b) => a.machines - b.machines);
     for (const cand of used) {
       if (budget-- <= 0) break;
       const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
