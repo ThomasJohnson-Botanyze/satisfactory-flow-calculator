@@ -14,6 +14,7 @@ if (!app.requestSingleInstanceLock()) {
   return;
 }
 app.on('second-instance', () => {
+  bootLog('second-instance: another launch folded into this window');
   if (mainWin && !mainWin.isDestroyed()) {
     if (mainWin.isMinimized()) mainWin.restore();
     mainWin.focus();
@@ -37,6 +38,17 @@ function plansPath() {
 function backupPath() {
   return path.join(app.getPath('userData'), 'plans.backup.json');
 }
+// Append-only boot/IO diagnostic (userData/boot-log.txt, rotated at 256KB). Every
+// "my plans are gone" report so far came down to WHICH store a boot read and why;
+// this log answers that in one look instead of a forensics session. Plain text,
+// best-effort, never throws.
+function bootLog(msg) {
+  try {
+    const p = path.join(app.getPath('userData'), 'boot-log.txt');
+    try { if (fs.statSync(p).size > 256 * 1024) fs.renameSync(p, p + '.old'); } catch (_) {}
+    fs.appendFileSync(p, `${new Date().toISOString()} [pid ${process.pid}] ${msg}\r\n`);
+  } catch (_) {}
+}
 // Short blocking sleep for the boot-time retries below. sendSync already blocks the
 // renderer, so pausing the main thread here is fine and keeps the logic synchronous.
 function sleepSync(ms) {
@@ -50,15 +62,30 @@ function sleepSync(ms) {
 // boot-time backup copy.
 ipcMain.on('plans:load', (e) => {
   const p = plansPath();
+  let lastErr = null;
   for (let i = 0; i < 8; i++) {
-    try { e.returnValue = fs.readFileSync(p, 'utf8'); return; }
-    catch (err) {
-      if (err && err.code === 'ENOENT') { e.returnValue = null; return; } // real first run
+    try {
+      const txt = fs.readFileSync(p, 'utf8');
+      bootLog(`plans:load ok ${txt.length}b (attempt ${i + 1})`);
+      e.returnValue = txt; return;
+    } catch (err) {
+      lastErr = err;
+      // A missing file can't heal by waiting — but the BACKUP may still hold the
+      // store (e.g. plans.json deleted/renamed by AV quarantine), so fall through
+      // to it instead of declaring "first run" outright like older builds did.
+      if (err && err.code === 'ENOENT') break;
       sleepSync(125);
     }
   }
-  try { e.returnValue = fs.readFileSync(backupPath(), 'utf8'); }
-  catch (_) { e.returnValue = null; }
+  bootLog(`plans:load FAILED (${(lastErr && lastErr.code) || lastErr}) — trying backup`);
+  try {
+    const txt = fs.readFileSync(backupPath(), 'utf8');
+    bootLog(`plans:load backup ok ${txt.length}b`);
+    e.returnValue = txt;
+  } catch (err2) {
+    bootLog(`plans:load backup FAILED (${(err2 && err2.code) || err2}) -> null (renderer will fall back)`);
+    e.returnValue = null;
+  }
 });
 // Last line of defense at the file gate: never replace a multi-plan store with a
 // fresh blank one. If a boot ever falls back to the default empty "Factory 1"
@@ -68,11 +95,17 @@ ipcMain.on('plans:load', (e) => {
 function wouldClobber(json) {
   try {
     const inc = JSON.parse(json);
-    if (!inc || !Array.isArray(inc.plans) || inc.plans.length !== 1) return false;
-    const st = inc.plans[0].state || {};
-    if (st.targetItem) return false; // real work, not the blank fallback plan
+    if (!inc || !Array.isArray(inc.plans) || !inc.plans.length) return false;
+    // "No real work" generalized (v2.4.2): EVERY incoming plan is an untouched
+    // "Factory N" with no target. The June 12 ghost (2 projects, 1 blank plan)
+    // passed the old exactly-one-plan test by shape drift; shapes drift, the
+    // no-real-work signature doesn't.
+    const allBlank = inc.plans.every((p) => p && !((p.state || {}).targetItem) && /^Factory \d+$/.test(p.name || ''));
+    if (!allBlank) return false;
     const cur = JSON.parse(fs.readFileSync(plansPath(), 'utf8'));
-    return Array.isArray(cur.plans) && cur.plans.length > 1;
+    const curHasWork = Array.isArray(cur.plans) && cur.plans.some((p) => p && (((p.state || {}).targetItem) || !/^Factory \d+$/.test(p.name || '')));
+    if (curHasWork) bootLog('plans:save REFUSED — no-real-work store would clobber real plans');
+    return curHasWork;
   } catch (_) { return false; } // unreadable/absent current file — allow the save
 }
 // Asynchronous, fire-and-forget save (renderer calls on change, debounced). Write to
@@ -240,17 +273,20 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  bootLog(`boot v${app.getVersion()} exe=${process.execPath} userData=${app.getPath('userData')}`);
   // One-generation recovery copy: whatever plans.json held BEFORE this session
   // survives in plans.backup.json even if this session clobbers the live file.
   // Retried like plans:load — the same boot-time AV/indexer hold that blocked a
   // read also silently skipped this copy.
+  let copyMsg = 'boot backup copy FAILED after retries (plans.json held?)';
   for (let i = 0; i < 8; i++) {
-    try { fs.copyFileSync(plansPath(), backupPath()); break; }
+    try { fs.copyFileSync(plansPath(), backupPath()); copyMsg = 'boot backup copy done'; break; }
     catch (err) {
-      if (err && err.code === 'ENOENT') break; // no plans.json yet (first run)
+      if (err && err.code === 'ENOENT') { copyMsg = 'backup copy skipped — no plans.json (first run)'; break; }
       sleepSync(125);
     }
   }
+  bootLog(copyMsg);
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

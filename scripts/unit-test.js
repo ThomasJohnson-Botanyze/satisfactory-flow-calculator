@@ -766,5 +766,54 @@ h.app.plans[0].name = 'My Base';
 h.mock.current = richStore;
 check('heal: a renamed plan blocks adoption', h.app.healFromDiskIfRicher() === false);
 
+// ---- June 12 ghost shape: 2 projects + 1 blank plan, fresher savedAt ----
+// A leveldb repair resurrected a days-old diverged store (2 projects, one blank
+// "Factory 1", globals carrying real unlockedAlts). It must (a) lose to the real
+// file at load() despite a fresher savedAt, and (b) when it boots alone (file
+// unreadable), still count as an untouched-blank session so heal can adopt the
+// real store when the file reads back.
+const ghostStore = JSON.stringify({
+  projects: [{ id: 'prjG1', name: 'Project 1' }, { id: 'prjG2', name: 'Project 2' }],
+  activeProjectId: 'prjG1',
+  plans: [{ id: 'pGhost', name: 'Factory 1', projectId: 'prjG2', state: { mode: 'optimize', targetItem: '', unlockedAlts: ['Recipe_Alternate_Coal_1_C'] } }],
+  activeId: 'pGhost',
+  savedAt: 9999999999999, // far fresher than the real store
+});
+// (a) Ghost in localStorage with FRESHER savedAt, real store in the file -> file wins.
+{
+  const dom = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+  dom.window.api = { loadPlans: () => richStore, savePlans: () => {}, savePlansSync: () => true };
+  global.window = dom.window; global.document = dom.window.document;
+  global.localStorage = dom.window.localStorage; global.location = dom.window.location;
+  global.Event = dom.window.Event;
+  dom.window.confirm = () => true; global.confirm = dom.window.confirm;
+  dom.window.alert = () => {}; global.alert = dom.window.alert;
+  if (!dom.window.SVGElement.prototype.setPointerCapture) dom.window.SVGElement.prototype.setPointerCapture = () => {};
+  dom.window.localStorage.clear();
+  dom.window.localStorage.setItem('satisfactory-factory-plans-v1', ghostStore);
+  delete require.cache[require.resolve('../src/renderer.js')];
+  require('../src/renderer.js');
+  dom.window.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
+  const g = dom.window.__app;
+  check('ghost: fresher 2-project blank store loses to the real file', g.plans.length === 2 && g.plans.map((p) => p.name).join() === 'Motors,Aluminum');
+  check('ghost: blank ghost plan not merged in', !g.plans.some((p) => p.id === 'pGhost'));
+}
+// (b) Ghost boots ALONE (file null) -> still an untouched-blank session -> heals.
+h = bootAppWithApi(null);
+h.dom.window.localStorage.setItem('satisfactory-factory-plans-v1', ghostStore);
+// re-boot the renderer against the ghost-seeded localStorage
+{
+  delete require.cache[require.resolve('../src/renderer.js')];
+  global.window = h.dom.window; global.document = h.dom.window.document;
+  global.localStorage = h.dom.window.localStorage; global.location = h.dom.window.location;
+  require('../src/renderer.js');
+  h.dom.window.dispatchEvent(new h.dom.window.Event('DOMContentLoaded'));
+  const g = h.dom.window.__app;
+  check('ghost alone: loads as the 2-project blank store', g.projects.length === 2 && g.plans.length === 1);
+  check('ghost alone: still counts as an untouched blank session', g.untouchedBlankSession() === true);
+  h.mock.current = richStore;
+  check('ghost alone: heal adopts the real store over the ghost', g.healFromDiskIfRicher() === true && g.plans.length === 2 && g.plans[0].name === 'Motors');
+}
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : 'âŒ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

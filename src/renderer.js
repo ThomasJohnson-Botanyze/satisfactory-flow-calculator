@@ -533,13 +533,15 @@ function load() {
     const pf = tryParse((api && api.loadPlans) ? api.loadPlans() : null);
     const pl = tryParse(localStorage.getItem(PLANS_KEY));
     let raw = (pf && pl) ? (((pl.savedAt || 0) > (pf.savedAt || 0)) ? pl : pf) : (pf || pl);
-    // A fresher single-blank store never outvotes a multi-plan one: a session that
-    // booted off the blank fallback (its store was unreadable at boot) stamps a
-    // newer savedAt into localStorage on its first edit — don't let that ghost
-    // beat the real plan set on the next boot.
-    const blankish = (x) => x && Array.isArray(x.plans) && x.plans.length === 1 && !((x.plans[0].state || {}).targetItem);
+    // A fresher no-real-work store never outvotes one holding real work: a session
+    // that booted off the blank fallback (its store was unreadable at boot) stamps
+    // a newer savedAt into localStorage just by saving — don't let that ghost beat
+    // the real plan set on the next boot. v2.4.2: judged by the per-plan blank
+    // signature (planIsBlank), not by plan COUNT — the June 12 resurrected ghost
+    // (2 projects, 1 blank plan) slipped past the old single-plan test.
+    const blankish = (x) => x && Array.isArray(x.plans) && x.plans.length >= 1 && x.plans.every(planIsBlank);
     const other = raw === pf ? pl : pf;
-    if (blankish(raw) && other && Array.isArray(other.plans) && other.plans.length > 1) raw = other;
+    if (blankish(raw) && storeHasWork(other)) raw = other;
     // Ghost-divergence merge: a session that booted off the blank fallback diverges
     // localStorage from plans.json, and a real edit in it (savedAt freshness) makes
     // the fresh ghost WIN and silently drop every other factory. The ghost signature
@@ -557,7 +559,7 @@ function load() {
       if (disjoint) {
         for (const p of donor.plans) {
           if (!p || !p.id || have.has(p.id)) continue;
-          if (!((p.state || {}).targetItem) && /^Factory \d+$/.test(p.name || '')) continue;
+          if (planIsBlank(p)) continue; // untouched fallback plans stay dead
           raw.plans.push(p); have.add(p.id); mergedGhost = true;
         }
       }
@@ -600,10 +602,25 @@ function load() {
 // reads back with real plans. Any user edit ends the healing window — their new
 // work wins, and the boot-time freshness/ghost-merge logic reconciles the stores
 // on the next launch.
+// "No real work" signature, shared by the heal guard and load()'s store picks: a
+// plan is blank when it has no target AND still wears its auto-name. Renames,
+// targets, picks or added output/supply rows all count as real work. Checked
+// per-plan so the shape of the store (how many plans/projects — the June 12
+// resurrected ghost carried TWO projects) can never sneak past the guard.
+function planIsBlank(p) {
+  if (!p) return true;
+  const st = p.state || {};
+  if (st.targetItem) return false;
+  if (!/^Factory \d+$/.test(p.name || '')) return false;
+  if (Object.keys(st.picks || {}).length) return false;
+  if ((st.extraTargets || []).length) return false;
+  if (((st.opt || {}).outputs || []).some((o) => o && o.name)) return false; // default row has name ''
+  if ((st.max || {}).product) return false; // max.supply is pre-seeded by default — product set = real work
+  return true;
+}
+const storeHasWork = (x) => !!(x && Array.isArray(x.plans) && x.plans.some((p) => !planIsBlank(p)));
 function untouchedBlankSession() {
-  if (plans.length !== 1 || projects.length !== 1) return false;
-  const p = plans[0];
-  return !((p.state || {}).targetItem) && /^Factory \d+$/.test(p.name || '');
+  return plans.length >= 1 && plans.every(planIsBlank);
 }
 function healFromDiskIfRicher() {
   if (!untouchedBlankSession()) return false;
@@ -614,7 +631,7 @@ function healFromDiskIfRicher() {
     if (!j || !Array.isArray(j.plans) || !j.plans.length) return false;
     // Only adopt a store that holds real work — a blank fallback that a parallel
     // session seeded to disk must not bounce us through a pointless reload loop.
-    if (!(j.plans.length > 1 || ((j.plans[0].state || {}).targetItem))) return false;
+    if (!storeHasWork(j)) return false;
   } catch (_) { return false; }
   load(); // full reread: file + localStorage, freshness pick + ghost merge
   renderProjectBar();
