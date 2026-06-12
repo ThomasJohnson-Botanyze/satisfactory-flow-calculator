@@ -17,6 +17,11 @@ app.on('second-instance', () => {
   if (mainWin && !mainWin.isDestroyed()) {
     if (mainWin.isMinimized()) mainWin.restore();
     mainWin.focus();
+    // The relaunch the user just attempted lands HERE, in the old window. If that
+    // window booted onto the blank fallback (its store was unreadable at that
+    // moment), focusing it reads as "my plans are gone" — tell the renderer so it
+    // can re-probe the durable file and heal before the user sees the blank shell.
+    try { mainWin.webContents.send('second-instance'); } catch (_) {}
   }
 });
 

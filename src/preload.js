@@ -33,4 +33,8 @@ contextBridge.exposeInMainWorld('api', {
   // Newest-save notifier: main.js watches the save folder and sends 'save-newest' when a
   // new/updated .sav appears, so the renderer can auto-reload alternates + map.
   onSaveNewest: (cb) => { if (typeof cb === 'function') ipcRenderer.on('save-newest', (_e, info) => cb(info)); },
+  // Re-launch notifier: main.js sends 'second-instance' when another copy of the app
+  // was started and got folded into this window — the renderer uses it to self-heal
+  // a blank-fallback session before the user sees it (see healFromDiskIfRicher).
+  onSecondInstance: (cb) => { if (typeof cb === 'function') ipcRenderer.on('second-instance', () => cb()); },
 });

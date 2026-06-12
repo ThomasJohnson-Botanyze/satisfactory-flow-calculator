@@ -704,5 +704,67 @@ check('rollup: counts both plans', totals.count === 2);
 check('rollup: raw includes Iron Ore (A pulls it)', (totals.rawTotals[IronOre] || 0) > 0);
 check('rollup: internally-supplied Iron Plate netted out of raw', !(totals.rawTotals[IronPlate] > 1e-4));
 
+// ---- blank-boot self-heal ----
+// A boot whose durable store was momentarily unreadable lands on the blank
+// "Factory 1" fallback. healFromDiskIfRicher must adopt the real store once it
+// reads back — and must refuse to fire once the user has started real work.
+console.log('\n### BLANK-BOOT SELF-HEAL');
+// bootApp() gives the renderer no window.api, so we wire a mutable mock around it:
+// the renderer captures `api` at module load, hence the mock must exist pre-require.
+function bootAppWithApi(fileStore) {
+  const dom = new JSDOM(html, { url: 'https://local/', pretendToBeVisual: true });
+  const mock = { current: fileStore };
+  dom.window.api = {
+    loadPlans: () => mock.current,
+    savePlans: () => {},
+    savePlansSync: () => true,
+  };
+  global.window = dom.window; global.document = dom.window.document;
+  global.localStorage = dom.window.localStorage; global.location = dom.window.location;
+  global.Event = dom.window.Event;
+  dom.window.confirm = () => true; global.confirm = dom.window.confirm;
+  dom.window.alert = () => {}; global.alert = dom.window.alert;
+  if (!dom.window.SVGElement.prototype.setPointerCapture) dom.window.SVGElement.prototype.setPointerCapture = () => {};
+  dom.window.localStorage.clear();
+  delete require.cache[require.resolve('../src/renderer.js')];
+  require('../src/renderer.js');
+  dom.window.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
+  return { app: dom.window.__app, mock, dom };
+}
+const richStore = JSON.stringify({
+  projects: [{ id: 'prjR', name: 'Real Project' }],
+  activeProjectId: 'prjR',
+  plans: [
+    { id: 'pR1', name: 'Motors', projectId: 'prjR', state: { mode: 'planner', targetItem: IronPlate, targetRate: 10 } },
+    { id: 'pR2', name: 'Aluminum', projectId: 'prjR', state: { mode: 'planner', targetItem: IronIngot, targetRate: 20 } },
+  ],
+  activeId: 'pR1',
+  savedAt: 1000,
+});
+// 1) File unreadable at boot (null) -> blank fallback; file comes back -> heal adopts it.
+let h = bootAppWithApi(null);
+check('heal setup: boot with unreadable store lands on blank fallback', h.app.plans.length === 1 && h.app.untouchedBlankSession());
+h.mock.current = richStore;
+check('heal: adopts the disk store once it reads back', h.app.healFromDiskIfRicher() === true);
+check('heal: all real plans present after adoption', h.app.plans.length === 2 && h.app.plans.map((p) => p.name).join() === 'Motors,Aluminum');
+check('heal: real project adopted', h.app.projects.length === 1 && h.app.projects[0].name === 'Real Project');
+check('heal: no longer a blank session afterwards', h.app.untouchedBlankSession() === false);
+check('heal: second call is a no-op', h.app.healFromDiskIfRicher() === false);
+// 2) User started real work in the blank session -> heal must refuse.
+h = bootAppWithApi(null);
+h.app.state.targetItem = IronPlate; // user picked a target in the fallback plan
+h.mock.current = richStore;
+check('heal: refuses once the session has real work', h.app.healFromDiskIfRicher() === false);
+check('heal: user work untouched', h.app.plans.length === 1 && h.app.state.targetItem === IronPlate);
+// 3) Disk store is itself just a blank fallback -> no pointless reload loop.
+h = bootAppWithApi(null);
+h.mock.current = JSON.stringify({ plans: [{ id: 'pX', name: 'Factory 1', state: {} }], activeId: 'pX', savedAt: 5 });
+check('heal: ignores a blank-fallback disk store', h.app.healFromDiskIfRicher() === false);
+// 4) Renamed blank plan counts as user work (name no longer matches the fallback pattern).
+h = bootAppWithApi(null);
+h.app.plans[0].name = 'My Base';
+h.mock.current = richStore;
+check('heal: a renamed plan blocks adoption', h.app.healFromDiskIfRicher() === false);
+
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : 'âŒ ' + fail + ' FAILED'} (${pass} passed, ${fail} failed)`);
 process.exit(fail ? 1 : 0);

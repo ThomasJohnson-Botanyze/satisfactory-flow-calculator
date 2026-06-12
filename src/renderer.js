@@ -587,6 +587,43 @@ function load() {
   ensureProjects(null, null); // fresh start / legacy single-plan -> one default project
 }
 
+// --- blank-boot self-heal ---
+// load() has one unfixable blind spot: if plans.json is unreadable for the whole
+// retry window at the exact boot instant (AV/indexer hold, a mid-update file swap,
+// a release script mirroring the install directory), the session lands on the blank
+// "Factory 1" fallback and used to STAY blank until the user quit and relaunched.
+// Worse, the single-instance lock folds every later launch into that forgotten
+// blank window, which reads as "all my factories are gone" — with the data sitting
+// intact on disk the whole time. Heal instead of waiting: while this session is
+// exactly the untouched fallback, re-probe the durable store (timed probes after
+// boot, on window focus, and on a folded-in relaunch) and adopt it the moment it
+// reads back with real plans. Any user edit ends the healing window — their new
+// work wins, and the boot-time freshness/ghost-merge logic reconciles the stores
+// on the next launch.
+function untouchedBlankSession() {
+  if (plans.length !== 1 || projects.length !== 1) return false;
+  const p = plans[0];
+  return !((p.state || {}).targetItem) && /^Factory \d+$/.test(p.name || '');
+}
+function healFromDiskIfRicher() {
+  if (!untouchedBlankSession()) return false;
+  try {
+    const raw = (api && api.loadPlans) ? api.loadPlans() : null;
+    if (!raw) return false;
+    const j = JSON.parse(raw);
+    if (!j || !Array.isArray(j.plans) || !j.plans.length) return false;
+    // Only adopt a store that holds real work — a blank fallback that a parallel
+    // session seeded to disk must not bounce us through a pointless reload loop.
+    if (!(j.plans.length > 1 || ((j.plans[0].state || {}).targetItem))) return false;
+  } catch (_) { return false; }
+  load(); // full reread: file + localStorage, freshness pick + ghost merge
+  renderProjectBar();
+  renderPlanBar();
+  for (const p of activeProjectPlans()) recomputePlanOutputs(p);
+  applyStateToControls();
+  return true;
+}
+
 function newPlan(name) {
   // Number within the active project (Factory N), not globally — each project counts
   // its own factories so a fresh project starts at "Factory 1".
@@ -5068,6 +5105,17 @@ function init() {
     if (deferred.length) setTimeout(chunk, 16); else save();
   }, 0);
   applyStateToControls();
+
+  // Blank-boot self-heal (see healFromDiskIfRicher): if this boot landed on the
+  // blank fallback, keep re-probing the durable store for a while — the file is
+  // usually readable again within seconds of whatever held it at boot. Focus and
+  // folded-in relaunches re-probe too, so a forgotten blank window fixes itself
+  // the moment the user comes back to it.
+  if (untouchedBlankSession()) {
+    for (const ms of [1000, 3000, 8000, 20000, 45000]) setTimeout(healFromDiskIfRicher, ms);
+  }
+  window.addEventListener('focus', healFromDiskIfRicher);
+  if (api && api.onSecondInstance) api.onSecondInstance(healFromDiskIfRicher);
 }
 
 // Test/debug hook: expose live state + the project/link internals so the headless
@@ -5086,6 +5134,7 @@ if (typeof window !== 'undefined') {
     linkWouldCycle, resolveLinkedCap, planNetOutputs, recomputePlanOutputs,
     computeProjectTotals, computeBaseBalance, ensureProjects,
     setMode,
+    untouchedBlankSession, healFromDiskIfRicher,
     // X-ray test surface: inject parsed records (no real save), set the plan's region /
     // whole-base scope, drive the draw lifecycle, and read live X-ray/draw state — so the
     // headless test exercises routing, region scoping and drawing without a canvas.
