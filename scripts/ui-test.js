@@ -1190,6 +1190,31 @@ console.log('\n### SPLIT SHARED LINES');
   check('split: clones share the original done-key', clones.every((c) => c._doneKey === ingotRc.id));
   click(d.getElementById('flowSplitToggle'));
   check('toggle off restores the merged chart', w.__lastFlow.nodes.length === before);
+
+  // DEDICATED-LINE input assignment: two HOR sources (100 + 300) into a coke step with
+  // two lines (100 + 300) must pair 1:1 — NOT give every line a slice of every source
+  // ("75.35 from each place" spaghetti).
+  const app2 = w.__app;
+  const synth = { nodes: [], byId: {}, edges: [] };
+  const mk = (id, kind) => { const n = { id, kind, title: id, sub: '', ins: [], outs: [] }; synth.nodes.push(n); synth.byId[id] = n; return n; };
+  mk('mac|p1', 'machine'); mk('mac|p2', 'machine');
+  const K = mk('mac|coke', 'machine');
+  K._step = { machines: 4, buildingName: 'Refinery' }; K.rc = 'Recipe_PetroleumCoke_C';
+  mk('out|a', 'out'); mk('sink|b', 'sink');
+  const E2 = (src, dst, item, rate) => { const e = { src, dst, item, rate, label: '' }; synth.edges.push(e); synth.byId[src].outs.push(e); synth.byId[dst].ins.push(e); return e; };
+  E2('mac|p1', 'mac|coke', 'Desc_HeavyOilResidue_C', 100);
+  E2('mac|p2', 'mac|coke', 'Desc_HeavyOilResidue_C', 300);
+  E2('mac|coke', 'out|a', 'Desc_PetroleumCoke_C', 100);
+  E2('mac|coke', 'sink|b', 'Desc_PetroleumCoke_C', 300);
+  app2.splitSharedLines(synth);
+  const lines = synth.nodes.filter((n) => n.id.startsWith('mac|coke|line'));
+  check('dedicated: split produced two line clones', lines.length === 2);
+  check('dedicated: every line draws from exactly ONE source', lines.every((c) => c.ins.length === 1));
+  const big = lines.find((c) => c.outs[0].rate === 300), small = lines.find((c) => c.outs[0].rate === 100);
+  check('dedicated: the 300-line owns the 300-source, the 100-line the 100-source',
+    !!big && !!small && big.ins[0].src === 'mac|p2' && Math.abs(big.ins[0].rate - 300) < 1e-9
+    && small.ins[0].src === 'mac|p1' && Math.abs(small.ins[0].rate - 100) < 1e-9);
+  check('dedicated: original merged in-edges removed from the graph', !synth.edges.some((e) => e.dst === 'mac|coke'));
 }
 
 // ---- Water disposal: excess reporting (off) + Packaged Water mode (loops allowed) ----

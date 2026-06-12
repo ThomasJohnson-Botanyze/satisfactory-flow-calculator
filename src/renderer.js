@@ -2401,17 +2401,41 @@ function splitSharedLines(flow) {
       flow.nodes.push(c);
       return { c, share };
     });
-    for (const e of n.ins) {
-      const baseRate = e.rate; // capture BEFORE the first clone mutates the shared edge object
-      clones.forEach(({ c, share }, i) => {
-        let ne = e; // first clone reuses the original edge object; the rest are copies
-        if (i > 0) { ne = Object.assign({}, e); flow.edges.push(ne); }
-        ne.dst = c.id;
-        ne.rate = baseRate * share;
-        ne.label = `${itemName(ne.item)} ${isPowerItem(ne.item) ? fmt(ne.rate) + ' MW' : fmt(ne.rate) + '/min'}`;
-        c.ins.push(ne);
-        if (i > 0 && flow.byId[ne.src]) flow.byId[ne.src].outs.push(ne);
-      });
+    // Re-distribute the step's INPUTS across the line clones with DEDICATED-LINE
+    // assignment, not a proportional slice of every source into every line (that drew
+    // "75.35 HOR from each place to each coke line" spaghetti). Per item: sort the
+    // line demands and the source edges largest-first and drain greedily — when a
+    // line's demand matches one source's supply (the packaging route's coke eating
+    // exactly the route's plastic-step HOR), it gets exactly that source, 1:1.
+    const insByItem = {};
+    for (const e of n.ins) (insByItem[e.item] = insByItem[e.item] || []).push(e);
+    for (const item in insByItem) {
+      const srcEdges = insByItem[item];
+      const itemTotal = srcEdges.reduce((a, e) => a + e.rate, 0);
+      // drop the original edges entirely; fresh ones are created per assignment
+      for (const e of srcEdges) {
+        const i = flow.edges.indexOf(e);
+        if (i >= 0) flow.edges.splice(i, 1);
+        const srcN = flow.byId[e.src];
+        if (srcN) { const j = srcN.outs.indexOf(e); if (j >= 0) srcN.outs.splice(j, 1); }
+      }
+      const pool = srcEdges.map((e) => ({ src: e.src, item: e.item, remaining: e.rate })).sort((a, b) => b.remaining - a.remaining);
+      const wants = clones.map(({ c, share }) => ({ c, need: itemTotal * share })).sort((a, b) => b.need - a.need);
+      for (const w of wants) {
+        let need = w.need;
+        for (const p of pool) {
+          if (need <= 1e-9) break;
+          const take = Math.min(p.remaining, need);
+          if (take <= 1e-9) continue;
+          const ne = { src: p.src, dst: w.c.id, item, rate: take, label: `${itemName(item)} ${isPowerItem(item) ? fmt(take) + ' MW' : fmt(take) + '/min'}` };
+          flow.edges.push(ne);
+          w.c.ins.push(ne);
+          if (flow.byId[p.src]) flow.byId[p.src].outs.push(ne);
+          p.remaining -= take;
+          need -= take;
+        }
+        pool.sort((a, b) => b.remaining - a.remaining); // re-rank for the next line
+      }
     }
     flow.nodes.splice(flow.nodes.indexOf(n), 1);
     delete flow.byId[n.id];
@@ -5490,7 +5514,7 @@ if (typeof window !== 'undefined') {
     get state() { return state; },
     activePlan, activeProject, activeProjectPlans, plansInProject,
     newProject, switchProject, deleteProject, newPlan,
-    linkWouldCycle, resolveLinkedCap, planNetOutputs, recomputePlanOutputs,
+    linkWouldCycle, resolveLinkedCap, planNetOutputs, recomputePlanOutputs, splitSharedLines,
     computeProjectTotals, computeBaseBalance, ensureProjects,
     setMode,
     untouchedBlankSession, healFromDiskIfRicher,
