@@ -212,6 +212,32 @@ check('effAmount fluid floors at 1 mL, never free', LP.effAmount(0.001, 0.25, tr
   const resin = ph.feasible && ph.outputs.find((o) => o.item === 'Desc_PolymerResin_C');
   check('0.5x HOR alternate: 20 resin/min by-product', !!resin && near(resin.rate, 20, 1e-6));
 }
+// Exhaustive cost-rounding invariants over EVERY recipe ingredient × all 8 game
+// multipliers: fluids must land on whole mL, solids on whole units, nothing rounds
+// free, 1x stays exact, and (cost ≤ 1) never charges MORE than vanilla. Burn
+// pseudo-recipes are skipped — they're cost-exempt physics with per-minute amounts.
+{
+  let badMl = 0, badSolid = 0, badZero = 0, badExact = 0, badMono = 0;
+  for (const cost of [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]) {
+    for (const rc in DATA.recipes) {
+      if (DATA.recipes[rc].burner) continue;
+      for (const g of DATA.recipes[rc].ingredients) {
+        const liquid = !!(DATA.items[g.item] && DATA.items[g.item].liquid);
+        const eff = LP.effAmount(g.amount, cost, liquid);
+        if (cost === 1 && eff !== g.amount) badExact++;
+        if (!(eff > 0)) badZero++;
+        if (cost <= 1 && eff > g.amount + 1e-9 && g.amount >= 1) badMono++; // floor-at-1 may lift sub-1 amounts; whole parts must never grow under a discount
+        if (liquid) { const ml = eff * 1000; if (Math.abs(ml - Math.round(ml)) > 1e-6) badMl++; }
+        else if (Math.abs(eff - Math.round(eff)) > 1e-9) badSolid++;
+      }
+    }
+  }
+  check('sweep: every fluid cost lands on whole mL (all recipes × 8 multipliers)', badMl === 0);
+  check('sweep: every solid cost stays a whole unit', badSolid === 0);
+  check('sweep: no ingredient ever rounds to free', badZero === 0);
+  check('sweep: 1x is always exact', badExact === 0);
+  check('sweep: a discount never raises a whole-part cost', badMono === 0);
+}
 // A 1:1 smelter is UNCHANGED at 0.5x (round(1*0.5)=1): 30 ore still makes 30 ingot.
 const ph1 = LP.planner({ targets: { [IronIngot]: 30 }, recipes: [primStd(IronIngot)], rawItems: [], recipeCost: 0.5 });
 const oreI = ph1.raw.find((r) => r.item === IronOre);

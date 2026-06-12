@@ -1146,6 +1146,27 @@ console.log('\n### FLOW LAYOUT: RETURN EDGES + RAW CO-PROVIDERS');
   check('sankey return band dashed inline', dashed.length >= 1);
 }
 
+// ---- Fluid cost rounding on the flowchart (the user-visible surface) ----
+// 0.5x cost save: the Heavy Oil Residue alternate costs exactly 1.5 m³ crude per cycle
+// -> the chart's Crude Oil edge must read 15/min for 40 HOR/min (not 20/min).
+console.log('\n### FLUID COST ROUNDING (flowchart edges)');
+{
+  const { w, d, setVal, click } = boot13(null);
+  setVal(d.getElementById('mRecipe'), '0.5', 'change');
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
+  setVal(d.getElementById('targetItem'), 'Heavy Oil Residue');
+  setVal(d.getElementById('targetRate'), '40');
+  // Default pick may be a by-product producer — force the dedicated alternate.
+  const sel = [...d.querySelectorAll('#prodTable .recipe-select')][0];
+  if (sel && [...sel.options].some((o) => o.value === 'Recipe_Alternate_HeavyOilResidue_C')) {
+    setVal(sel, 'Recipe_Alternate_HeavyOilResidue_C', 'change');
+  }
+  check('0.5x raw table draws 15 crude/min', /^15$/.test([...d.querySelectorAll('#rawTable tbody tr td:last-child')].map((c) => c.textContent.trim()).join('')));
+  click(d.getElementById('viewFlow'));
+  const labels = [...d.querySelectorAll('#flowSvg .edge-label')].map((t) => t.textContent);
+  check('0.5x flow edge reads Crude Oil 15/min', labels.some((t) => /Crude Oil 15\/min/.test(t)));
+}
+
 // ---- Nuclear waste as a cross-plan input: Plan A exports, Plan B links it ----
 console.log('\n### LINKED NUCLEAR WASTE → PLUTONIUM FACTORY');
 {
