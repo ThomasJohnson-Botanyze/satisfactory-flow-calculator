@@ -311,6 +311,9 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   if (objective === 'machines') {
     return optimizeWholeMachines({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
   }
+  if (objective === 'edges') {
+    return optimizeFewestEdges({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+  }
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
   const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
@@ -459,6 +462,63 @@ function optimizeWholeMachines(params) {
   return finish(best);
 }
 
+// Count the LINES a solved plan draws in the flowchart — the belt/pipe connections the
+// player actually has to route. Mirrors the renderer's edge construction: every producer
+// of an item connects to every consumer of it (P×C per item), each raw item's extractor
+// feeds each of its consumers, each net output / sunk / burned item drains from each of
+// its producers. This is the logistics-complexity metric for the 'edges' objective.
+function edgeCountOf(sum) {
+  const producers = {}, consumers = {};
+  for (const r of sum.recipes) {
+    const info = RC_INFO[r.rc];
+    for (const it in info.out) (producers[it] = producers[it] || []).push(r.rc);
+    for (const it in info.inn) (consumers[it] = consumers[it] || []).push(r.rc);
+  }
+  let edges = 0;
+  const items = new Set([...Object.keys(producers), ...Object.keys(consumers)]);
+  for (const it of items) {
+    const P = (producers[it] || []).length, C = (consumers[it] || []).length;
+    if (P && C) edges += P * C; // machine -> machine lines
+  }
+  for (const r of sum.raw) edges += (consumers[r.item] || []).length;       // extractor -> machine
+  for (const o of sum.outputs) edges += (producers[o.item] || []).length;   // machine -> output
+  for (const s of (sum.sunk || [])) edges += (producers[s.item] || []).length;   // machine -> sink
+  for (const b of (sum.burned || [])) edges += (producers[b.item] || []).length; // machine -> generator
+  for (const w of (sum.watered || [])) edges += 2; // diverted water in + limestone in (its Concrete is counted via producers above)
+  return edges;
+}
+
+// "Fewest connections" objective: minimize the number of LINES between nodes — distinct
+// belt/pipe links the player must route — which is NOT the same as fewest recipe nodes
+// (a web of 10 recipes can need more routing than a chain of 12). Same greedy elimination
+// as the other cardinality modes: block one used recipe at a time, keep blocks that
+// strictly reduce the line count, stop when no single block helps.
+function optimizeFewestEdges(params) {
+  const inner = Object.assign({}, params, { objective: 'machinesLP' });
+  const finish = (sum) => { sum.objective = 'edges'; if (sum.feasible) sum.objectiveValue = edgeCountOf(sum); return sum; };
+  let best = optimize(inner);
+  if (!best.feasible) return finish(best);
+  const blocked = new Set(params.blockedRecipes ? [...params.blockedRecipes] : []);
+  let budget = 160;
+  let progress = true;
+  while (progress && budget > 0) {
+    progress = false;
+    const used = best.recipes.slice().sort((a, b) => a.machines - b.machines);
+    for (const cand of used) {
+      if (budget-- <= 0) break;
+      const tryBlocked = new Set(blocked); tryBlocked.add(cand.rc);
+      const probe = optimize(Object.assign({}, inner, { blockedRecipes: tryBlocked }));
+      if (probe.feasible && edgeCountOf(probe) < edgeCountOf(best)) {
+        blocked.add(cand.rc);
+        best = probe;
+        progress = true;
+        break; // plan changed — re-rank the survivors and scan again
+      }
+    }
+  }
+  return finish(best);
+}
+
 function maxThroughput({ product, supply, allowAlternates = true, recipeCost = 1, powerMult = 1, unlockedAlts = null, blockedRecipes = null }) {
   const { model, pool } = buildModel({ inputs: supply, maxItem: product, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes });
   const res = solver.Solve(model);
@@ -524,4 +584,4 @@ function planner({ target, rate, targets = null, recipes = [], rawItems = [], re
   return sum;
 }
 
-module.exports = { optimize, maxThroughput, planner, RC_INFO, RES, effAmount };
+module.exports = { optimize, maxThroughput, planner, RC_INFO, RES, effAmount, edgeCountOf };

@@ -867,7 +867,9 @@ const _lcm = (a, b) => (a && b ? a / _gcd(a, b) * b : 0);
 // Smallest scale (×everything) that turns every machine count whole, then the multiple
 // of it nearest the current size so the adjusted output stays close to the requested one.
 // Returns null if the counts don't rationalize within range (no sane clean ratio).
-function cleanRatioScale(counts) {
+// Smallest positive scale that turns every count whole (the clean-ratio "quantum"), or
+// null when the counts don't rationalize / the LCM explodes.
+function cleanFMin(counts) {
   const cs = counts.filter((c) => c > 1e-9);
   if (!cs.length) return 1;
   let Q = 1;
@@ -882,9 +884,41 @@ function cleanRatioScale(counts) {
   let g = 0;
   for (const f of fr) g = _gcd(g, Math.round(Q * f.p / f.q));
   if (!g) return 1;
-  const fMin = Q / g;                       // smallest scale giving all-integer machines
+  return Q / g; // smallest scale giving all-integer machines
+}
+function cleanRatioScale(counts) {
+  const fMin = cleanFMin(counts);
+  if (fMin == null) return null;
   const k = Math.max(1, Math.round(1 / fMin));
   return k * fMin;
+}
+// Clean-rate suggestion: the smallest scale-UP (≥1) of the whole plan that makes every
+// machine count a whole number. When that scale is crazy (one awkward denominator can
+// force a huge LCM), allow the single worst-denominator step to stay fractional and
+// retry — then two, and so on — per the "suggest the least common denominator, but
+// don't suggest something insane" rule. Returns { scale, fracAllowed } or null.
+function cleanRateSuggestion(res, maxScale = 10) {
+  if (!res || !res.recipes || !res.recipes.length) return null;
+  let pool = res.recipes.map((r) => r.machines).filter((c) => c > 1e-9);
+  let fracAllowed = 0;
+  while (pool.length) {
+    const fMin = cleanFMin(pool);
+    if (fMin != null) {
+      const sUp = Math.ceil(1 / fMin - 1e-9) * fMin; // smallest clean multiple that doesn't shrink the plan
+      if (sUp <= maxScale + 1e-9) return { scale: sUp, fracAllowed };
+    }
+    // Drop the count whose fraction has the largest denominator — it alone is forcing
+    // the blow-up — and let that one machine run at a partial clock.
+    let worst = 0, worstQ = -1;
+    pool.forEach((c, i) => {
+      const f = toFraction(c, 1000);
+      const q = Math.abs(f.p / f.q - c) > 1e-4 ? Infinity : f.q;
+      if (q > worstQ) { worstQ = q; worst = i; }
+    });
+    pool.splice(worst, 1);
+    fracAllowed++;
+  }
+  return null;
 }
 // Scale a solved result in place to clean (whole-machine) ratios when the toggle is on.
 // Linear in the LP solution, so we just multiply the reported quantities. Returns the
@@ -901,7 +935,7 @@ function applyCleanScale(res, targets) {
   mul(res.watered, 'rate', 'concrete', 'limestone', 'machines');
   if (typeof res.totalPower === 'number') res.totalPower *= scale;
   if (typeof res.recoveredPower === 'number') res.recoveredPower *= scale;
-  if (typeof res.objectiveValue === 'number' && res.objective !== 'recipes' && res.objective !== 'inputs' && res.objective !== 'machines') res.objectiveValue *= scale; // a COUNT (recipes / input types / whole machines) doesn't scale linearly with rates
+  if (typeof res.objectiveValue === 'number' && res.objective !== 'recipes' && res.objective !== 'inputs' && res.objective !== 'machines' && res.objective !== 'edges') res.objectiveValue *= scale; // a COUNT (recipes / inputs / whole machines / connections) doesn't scale linearly with rates
   // Snap tiny float drift so ceil()/labels show exact integers.
   res.recipes.forEach((r) => { const rd = Math.round(r.machines); if (Math.abs(r.machines - rd) < 1e-4) r.machines = rd; });
   res.totalMachines = res.recipes.reduce((a, r) => a + Math.ceil(r.machines - 1e-9), 0);
@@ -1629,17 +1663,15 @@ function drawFlow(flow) {
       path.appendChild(tip);
       gEdges.appendChild(path);
       e._path = path;
-      // Label only bands wide enough to carry text without crowding the thin ones; the
-      // rest surface their rate via the hover tooltip above.
-      if (e._bw >= 9) {
-        const t = document.createElementNS(SVGNS, 'text');
-        t.setAttribute('class', 'edge-label');
-        t.setAttribute('x', p.lx); t.setAttribute('y', p.ly);
-        t.setAttribute('text-anchor', 'middle');
-        t.textContent = e.label;
-        gEdges.appendChild(t);
-        e._label = t;
-      } else e._label = null;
+      // EVERY band gets its item/min label — a thin band is exactly the one whose
+      // contents you can't guess from width, so hiding its text hid the answer.
+      const t = document.createElementNS(SVGNS, 'text');
+      t.setAttribute('class', 'edge-label');
+      t.setAttribute('x', p.lx); t.setAttribute('y', p.ly);
+      t.setAttribute('text-anchor', 'middle');
+      t.textContent = e.label;
+      gEdges.appendChild(t);
+      e._label = t;
     });
   } else {
     // Flag anti-parallel pairs (both A->B and B->A present) so edgePath splits them apart.
@@ -2043,7 +2075,7 @@ function applyView() {
   $('viewTables').classList.toggle('active', state.view === 'tables');
   const hint = $('flowHint');
   if (hint) hint.textContent = sankey
-    ? 'Band width = items / min · colour = material (cyan = fluid). Hover a thin band for its rate · drag nodes to rearrange · scroll to zoom · drag empty space to pan.'
+    ? 'Band width = items / min · colour = material (cyan = fluid) · every band is labelled with its item and rate. Drag nodes to rearrange · scroll to zoom · drag empty space to pan.'
     : 'Click a machine to set Overclock / Somersloop · drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output · pink = sink · blue = generator · copper = extractor.';
   syncFlowPowerBtn();
   if (flow) renderFlowView();
@@ -3270,8 +3302,40 @@ function renderPlanner() {
   $('sumRaw').textContent = fmt(res.raw.length, 0);
 }
 
+// Clean-rate tip under Desired Outputs: shows the nearest scaled-up output that makes
+// every machine count whole (the ⓘ suggestion), with an Apply that bumps every desired
+// output by that factor and switches the Clean ratio toggle on.
+function updateCleanSuggest(res) {
+  const box = $('cleanSuggest');
+  if (!box) return;
+  box.hidden = true; box.textContent = '';
+  if (state.cleanRatio) return; // already snapping to clean ratios — tip is moot
+  const sug = cleanRateSuggestion(res);
+  if (!sug || Math.abs(sug.scale - 1) < 1e-9) return; // no suggestion / already clean
+  const first = state.opt.outputs.find((o) => nameToClass(o.name) && o.rate > 0);
+  if (!first) return;
+  const newRate = Number(first.rate) * sug.scale;
+  const fracNote = sug.fracAllowed === 0 ? 'every machine whole'
+    : sug.fracAllowed === 1 ? 'all but 1 machine whole'
+    : `all but ${sug.fracAllowed} machines whole`;
+  box.appendChild(el('span', '', `ⓘ Clean rate: ${first.name} ${fmt(newRate)}/min (×${fmt(sug.scale)} of all outputs) → ${fracNote}.`));
+  const apply = el('button', 'btn mini ghost', 'Apply');
+  apply.style.marginLeft = '8px';
+  apply.addEventListener('click', () => {
+    for (const o of state.opt.outputs) if (o.rate > 0) o.rate = Math.round(Number(o.rate) * sug.scale * 1e6) / 1e6;
+    state.cleanRatio = true;
+    if ($('cleanRatio')) $('cleanRatio').checked = true;
+    save();
+    buildOptOutputs(); // refresh the rate inputs to the new values
+    solveAndRender();
+  });
+  box.appendChild(apply);
+  box.hidden = false;
+}
+
 function renderOptimize() {
   $('sumExtraLabel').textContent = 'Raw resource types';
+  if ($('cleanSuggest')) $('cleanSuggest').hidden = true; // stale tip never outlives the plan it was computed for
   const outputs = {};
   let n = 0;
   for (const o of state.opt.outputs) {
@@ -3300,11 +3364,12 @@ function renderOptimize() {
   }
   res.surplus = res.outputs.filter((o) => !outputs[o.item]);
   tuneSteps(res); // per-step overclock / somersloop now editable in the Optimizer too
+  updateCleanSuggest(res); // clean-rate tip reads the UN-scaled plan (suggestion ≠ rescale)
   applyCleanScale(res, outputs); // whole-machine ratios when the toggle is on (no-op otherwise)
   present(res, outputs);
   $('sumRaw').textContent = fmt(res.raw.length, 0);
 
-  const labels = { raw: 'raw resources /min', power: 'MW', machines: 'whole machines', recipes: 'distinct recipes (build steps)', inputs: 'distinct input resources' };
+  const labels = { raw: 'raw resources /min', power: 'MW', machines: 'whole machines', recipes: 'distinct recipes (build steps)', inputs: 'distinct input resources', edges: 'belt / pipe connections' };
   const ex = el('div', 'extras-card');
   ex.appendChild(el('div', 'extras-title', '✓ Optimized recipe selection'));
   const alts = res.recipes.filter((x) => RECIPES[x.rc].alternate).length;

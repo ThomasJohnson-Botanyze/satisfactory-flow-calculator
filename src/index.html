@@ -82,6 +82,7 @@
             <h2>Desired outputs</h2>
             <div id="optOutputs" class="rowlist"></div>
             <button id="optAddOutput" class="btn mini ghost">+ add output</button>
+            <div id="cleanSuggest" class="hint" hidden></div>
           </section>
 
           <section class="ctl-group">
@@ -105,6 +106,7 @@
               <option value="machines">Fewest machines</option>
               <option value="recipes">Fewest recipes (least steps)</option>
               <option value="inputs">Fewest input types (simplest logistics)</option>
+              <option value="edges">Fewest connections (belt/pipe lines)</option>
             </select>
             <label class="check"><input type="checkbox" id="optAlts" checked /> Consider alternate recipes</label>
             <label class="check"><input type="checkbox" id="optSink" checked /> Sink / consume by-products</label>

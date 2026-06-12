@@ -87,6 +87,31 @@ console.log('\n### FEWEST WHOLE MACHINES OBJECTIVE');
   check('locally minimal (no single recipe block buys a whole machine)', minimal);
 }
 
+// ---- Fewest-connections objective: minimize LINES between nodes (≠ node count) ----
+console.log('\n### FEWEST CONNECTIONS OBJECTIVE');
+{
+  const RIP = cls('Reinforced Iron Plate');
+  const base = { outputs: { [RIP]: 30 }, allowedInputs: { [IronOre]: Infinity }, allowAlternates: true };
+  const lp = LP.optimize(Object.assign({}, base, { objective: 'machinesLP' }));
+  const byEdges = LP.optimize(Object.assign({}, base, { objective: 'edges' }));
+  check('edges objective feasible', byEdges.feasible === true);
+  check('objective reported as edges', byEdges.objective === 'edges');
+  check('objectiveValue == recomputed edge count', byEdges.objectiveValue === LP.edgeCountOf(byEdges));
+  check('never more connections than the LP plan', lp.feasible && byEdges.objectiveValue <= LP.edgeCountOf(lp));
+  const ripOut = byEdges.outputs.find((o) => o.item === RIP);
+  check('target rate still met (~30/min)', !!ripOut && near(ripOut.rate, 30, 0.1));
+  // Locally minimal: blocking ANY used recipe must not allow fewer connections.
+  const minimal = byEdges.recipes.every((r) => {
+    const probe = LP.optimize(Object.assign({}, base, { objective: 'edges', blockedRecipes: new Set([r.rc]) }));
+    return !probe.feasible || probe.objectiveValue >= byEdges.objectiveValue;
+  });
+  check('locally minimal (no single recipe block drops a line)', minimal);
+  // Sanity of the metric itself: a 2-step chain (ore -> ingot -> plate) draws exactly
+  // 3 lines — extractor->smelter, smelter->constructor, constructor->output.
+  const chain = LP.optimize({ outputs: { [IronPlate]: 20 }, allowedInputs: { [IronOre]: Infinity }, objective: 'machinesLP', allowAlternates: false });
+  check('metric: simple chain counts 3 lines', LP.edgeCountOf(chain) === 3);
+}
+
 // ---- Fewest-input-types objective: minimize DISTINCT raw resources drawn ----
 console.log('\n### FEWEST INPUT TYPES OBJECTIVE');
 {

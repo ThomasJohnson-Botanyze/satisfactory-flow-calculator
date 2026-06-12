@@ -911,11 +911,38 @@ console.log('\n### SANKEY VIEW (proportional flow bands)');
   check('every band has a positive stroke-width (∝ throughput)', bands.length > 0 && bands.every((b) => parseFloat(b.getAttribute('stroke-width')) > 0));
   check('bands vary in width (a wider stream reads thicker)', new Set(bands.map((b) => b.getAttribute('stroke-width'))).size >= 1);
   check('a band carries a rate tooltip', bands.some((b) => b.querySelector('title') && /\/min/.test(b.querySelector('title').textContent)));
+  // Every band — thin ones included — must carry its item/min text label: a thin band
+  // is exactly the one whose contents the user can't guess from width.
+  const bandLabels = [...d.querySelectorAll('#flowSvg .edge-label')];
+  check('every band is labelled (thin ones too)', bandLabels.length === bands.length && bandLabels.every((t) => /\/min/.test(t.textContent)));
   const ps = JSON.parse(w.localStorage.getItem('satisfactory-factory-plans-v1'));
   check('Sankey view persisted to the plan', ps.plans.find((p) => p.id === ps.activeId).state.view === 'sankey');
   click(d.getElementById('viewFlow'));
   check('switching back to Flowchart restores thin edges (no bands)',
     d.querySelectorAll('#flowSvg .sankey-band').length === 0 && d.querySelectorAll('#flowSvg .edge-path').length === flowEdges);
+}
+
+// ---- Clean-rate suggestion: ⓘ tip under Desired Outputs proposing the nearest
+// scaled-up output where every machine count is whole; Apply bumps the rates and
+// flips the Clean ratio setting on. ----
+console.log('\n### CLEAN-RATE SUGGESTION (optimizer)');
+{
+  const { w, d, setVal, click } = boot13(null);
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  const row = d.querySelector('#optOutputs .row');
+  setVal(row.querySelector('.row-item'), 'Reinforced Iron Plate');
+  setVal(row.querySelector('.row-rate'), '7'); // -> fractional machine counts
+  const box = d.getElementById('cleanSuggest');
+  check('suggestion shown for a fractional plan', !!box && !box.hidden && /Clean rate/.test(box.textContent));
+  const applyBtn = box && box.querySelector('button');
+  check('Apply button present', !!applyBtn);
+  click(applyBtn);
+  const st = JSON.parse(w.localStorage.getItem('satisfactory-factory-plans-v1'));
+  const ap = st.plans.find((p) => p.id === st.activeId);
+  check('Apply turns the clean-ratio setting on', ap.state.cleanRatio === true);
+  check('Apply scaled the desired output up', Number(ap.state.opt.outputs[0].rate) > 7);
+  check('clean-ratio checkbox reflects the change', d.getElementById('cleanRatio').checked === true);
+  check('suggestion hidden once clean ratio is on', d.getElementById('cleanSuggest').hidden === true);
 }
 
 // ---- Water sink (Wet Concrete): flowchart wiring must match the LP's diversion ----
