@@ -407,7 +407,8 @@ const defaultState = () => ({
     objective: 'raw',
     alts: true,
     sink: true, // route surplus by-products to the Awesome Sink / Fuel Generator
-    waterSink: false, // dispose excess by-product Water via Wet Concrete (off = old loop/float)
+    waterSink: false, // LEGACY boolean (pre-2.11) — migrated into waterMode by mergeState
+    waterMode: 'off', // water disposal: 'off' (excess reported) | 'wet' (Wet Concrete, no loops) | 'package' (Packaged Water, loops allowed)
     exportWaste: false, // let unsinkable solids (nuclear waste) float as exportable surplus instead of forcing in-plan reprocessing
   },
   // Max-supply rows are { item, amount }, optionally + { fromPlanId, fromItem } so the
@@ -484,6 +485,12 @@ function mergeState(s) {
   // Clean ratios graduated from a toggle into its own Optimizer objective: migrate
   // plans saved with the old flag on, then retire the flag.
   if (m.cleanRatio) { m.opt.objective = 'clean'; m.cleanRatio = false; }
+  // Water disposal graduated from the waterSink checkbox to a 3-way mode select: a plan
+  // saved BEFORE the select existed (no waterMode key) migrates its old flag to 'wet'.
+  const savedMode = s && s.opt && s.opt.waterMode;
+  if (savedMode == null && s && s.opt && s.opt.waterSink) m.opt.waterMode = 'wet';
+  if (!['off', 'wet', 'package'].includes(m.opt.waterMode)) m.opt.waterMode = 'off';
+  m.opt.waterSink = false;
   return m;
 }
 // Disk writes are debounced: save() fires on every edit (often every keystroke), so
@@ -1053,7 +1060,7 @@ function applyCleanScale(res, targets) {
   if (Math.abs(scale - 1) < 1e-9) return 1;
   const mul = (arr, ...keys) => (arr || []).forEach((o) => keys.forEach((k) => { if (typeof o[k] === 'number') o[k] *= scale; }));
   mul(res.recipes, 'machines', 'rate', 'power');
-  mul(res.raw, 'rate'); mul(res.outputs, 'rate'); mul(res.surplus, 'rate');
+  mul(res.raw, 'rate'); mul(res.outputs, 'rate'); mul(res.surplus, 'rate'); mul(res.resSurplus, 'rate');
   mul(res.sunk, 'rate', 'points'); mul(res.burned, 'rate', 'mw'); mul(res.depot, 'rate');
   mul(res.watered, 'rate', 'concrete', 'limestone', 'machines');
   if (typeof res.totalPower === 'number') res.totalPower *= scale;
@@ -1157,6 +1164,7 @@ function computePlanner(targets) {
     recipes,
     raw: (sol.raw || []).filter((r) => r.rate > 1e-4),
     surplus: (sol.outputs || []).filter((o) => tg[o.item] == null && o.rate > 1e-4),
+    resSurplus: (sol.resSurplus || []).filter((r) => r.rate > 1e-4),
     totalPower,
     totalMachines,
     totalSloops,
@@ -1425,6 +1433,7 @@ function renderTables(res) {
   (res.burned || []).forEach((b) => disp.push({ item: b.item, rate: b.rate, dest: `${b.genName} · ${fmt(b.mw, 0)} MW` }));
   (res.watered || []).forEach((w) => disp.push({ item: w.item, rate: w.rate, dest: `Wet Concrete · ${fmt(w.machines)}× → ${fmt(w.concrete)} Concrete/min` }));
   (res.surplus || []).forEach((s) => disp.push({ item: s.item, rate: s.rate, dest: 'surplus (unconsumed)' }));
+  (res.resSurplus || []).forEach((s) => disp.push({ item: s.item, rate: s.rate, dest: '⚠ excess — backs up in-game (pick a Water disposal mode or consume it)' }));
   const disposed = (res.sunk && res.sunk.length) || (res.burned && res.burned.length) || (res.watered && res.watered.length);
   $('byprodTitle').textContent = disposed ? 'By-product disposal' : 'By-products / surplus';
   $('byprodWrap').hidden = disp.length === 0;
@@ -1622,6 +1631,7 @@ function buildFlow(res, targets) {
   }
   const outs = Object.assign({}, targets || {});
   (res.surplus || []).forEach((s) => { if (outs[s.item] == null) outs[s.item] = s.rate; });
+  (res.resSurplus || []).forEach((s) => { if (outs[s.item] == null) outs[s.item] = s.rate; }); // excess water etc. — visible, not hidden
   // Outputs the Power Planner routes into generators (opt-in) are CONSUMED for power, not
   // exported — skip their green output node and let the generator node below carry them.
   const burnedSet = new Set(infra ? infra.gens.map((g) => g.output) : []);
@@ -3358,6 +3368,7 @@ function buildCsv(res) {
   (res.burned || []).forEach((b) => disp.push([itemName(b.item), fmt(b.rate), `${b.genName} (${fmt(b.mw, 0)} MW)`]));
   (res.watered || []).forEach((w) => disp.push([itemName(w.item), fmt(w.rate), `Wet Concrete (${fmt(w.machines)}x -> ${fmt(w.concrete)} Concrete/min)`]));
   (res.surplus || []).forEach((s) => disp.push([itemName(s.item), fmt(s.rate), 'surplus (unconsumed)']));
+  (res.resSurplus || []).forEach((s) => disp.push([itemName(s.item), fmt(s.rate), 'excess (backs up in-game)']));
   if (disp.length) {
     L.push('');
     L.push((res.sunk && res.sunk.length) || (res.burned && res.burned.length) || (res.watered && res.watered.length) ? 'By-product disposal' : 'By-products / surplus');
@@ -3476,7 +3487,7 @@ function computeStateResult(st) {
       for (const o of st.opt.outputs) { const c = nameToClass(o.name); if (c && o.rate > 0) outputs[c] = (outputs[c] || 0) + Number(o.rate) * (isDeliverable(c) ? st.spaceMult : 1); }
       const allowedInputs = optAllowedInputs(st);
       if (!Object.keys(outputs).length || !Object.keys(allowedInputs).length) return { feasible: false };
-      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false, waterSink: !!st.opt.waterSink, exportWaste: !!st.opt.exportWaste, sloopMult: sloopMapAll() });
+      const res = LP.optimize({ outputs, allowedInputs, objective: st.opt.objective, allowAlternates: st.opt.alts, recipeCost: st.recipeCost, powerMult: st.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: st.opt.sink !== false, waterSink: st.opt.waterMode === 'wet', packageWater: st.opt.waterMode === 'package', exportWaste: !!st.opt.exportWaste, sloopMult: sloopMapAll() });
       if (!res.feasible) return { feasible: false };
       res.surplus = res.outputs.filter((o) => !outputs[o.item]);
       tuneSteps(res); // apply per-step overclock / somersloop (machines & power)
@@ -3680,14 +3691,21 @@ function renderOptimize() {
   if (!Object.keys(allowedInputs).length) return showEmpty('Allow at least one input resource.');
 
   const sink = state.opt.sink !== false;
-  const optArgs = { outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterSink: !!state.opt.waterSink, exportWaste: !!state.opt.exportWaste, sloopMult: sloopMapAll() };
+  const optArgs = { outputs, allowedInputs, objective: state.opt.objective, allowAlternates: state.opt.alts, recipeCost: state.recipeCost, powerMult: state.powerMult, unlockedAlts: effectiveAltSet(), blockedRecipes: blockedRecipeSet(), sinkByproducts: sink, waterSink: state.opt.waterMode === 'wet', packageWater: state.opt.waterMode === 'package', exportWaste: !!state.opt.exportWaste, sloopMult: sloopMapAll() };
   // optimize() dispatches per objective — incl. 'clean' (cleanest-ratio recipe search,
   // snap-scaled below) and 'loops' (straightforward feed-forward chains).
   const res = LP.optimize(optArgs);
   if (!res.feasible) {
+    if (res.waterPackaging) {
+      return showEmpty('Excess water can’t be packaged: the Packaged Water route needs Empty Canisters (Plastic — or a canister alternate) from the allowed inputs. Enable the inputs/recipes for canisters, or switch Water disposal to Wet Concrete / None.');
+    }
     if (res.backup && res.backup.length) {
       const names = res.backup.map(itemName).join(', ');
-      const waterTip = res.backup.includes('Desc_Water_C') ? ' For Water specifically, tick “Sink excess water → Wet Concrete”.' : '';
+      const waterTip = res.backup.includes('Desc_Water_C')
+        ? (state.opt.waterMode === 'package'
+          ? ' Packaged Water is selected but its chain can’t run here — Empty Canisters need Plastic (or a canister alternate) from the allowed inputs, and by-product water can only be packaged when Water is an allowed input.'
+          : ' For Water specifically, pick a Water disposal mode (Wet Concrete or Packaged Water).')
+        : '';
       return showEmpty(`By-product would back up: ${names}. It’s a fluid with no recipe consuming it, so it can’t be sunk and would stall the line. Enable an alternate recipe that consumes it, or untick “Sink / consume by-products”.${waterTip}`);
     }
     if (res.noProducer && res.noProducer.length) {
@@ -3714,6 +3732,18 @@ function renderOptimize() {
   if ((res.sunk || []).length) ex.appendChild(el('div', 'extras-line', `By-products sunk: ${res.sunk.map((s) => itemName(s.item)).join(', ')} — ${fmt(sunkPts, 0)} AWESOME Sink points/min`));
   if ((res.burned || []).length) ex.appendChild(el('div', 'extras-line', `By-products burned: ${res.burned.map((b) => itemName(b.item)).join(', ')} — ${fmt(res.recoveredPower, 0)} MW recovered from generators`));
   (res.watered || []).forEach((w) => ex.appendChild(el('div', 'extras-line', `Excess water sunk via Wet Concrete: ${fmt(w.rate)} Water/min → ${fmt(w.concrete)} Concrete/min (${fmt(w.machines)} Refinery, ${fmt(w.limestone)} Limestone/min) — no by-product loop`)));
+  // Packaged-water mode: the route is ordinary pool steps — surface its totals here so the
+  // canister demand (and that its crafting chain is in-plan) is explicit at a glance.
+  const pkgStep = (res.recipes || []).find((r) => r.rc === 'Recipe_PackagedWater_C');
+  if (pkgStep) {
+    const wtr = LP.RC_INFO.Recipe_PackagedWater_C;
+    const m100 = pkgStep.machines * (pkgStep.clock || 1);
+    const waterIn = (wtr.inn.Desc_Water_C || 0) * m100;
+    const cansIn = (wtr.inn.Desc_FluidCanister_C || 0) * m100;
+    ex.appendChild(el('div', 'extras-line', `Excess water packaged: ${fmt(waterIn)} Water/min + ${fmt(cansIn)} Empty Canister/min → ${fmt(pkgStep.rate)} Packaged Water/min (${fmt(pkgStep.machines)} Packager) — canisters are crafted in-plan (see the production steps for their inputs); water loops stay allowed`));
+  }
+  // No disposal mode: excess water is REPORTED (it would back up in-game), never hidden.
+  (res.resSurplus || []).forEach((rs) => ex.appendChild(el('div', 'extras-line', `⚠ Excess ${itemName(rs.item)}: ${fmt(rs.rate)}${isFluid(rs.item) ? ' m³' : ''}/min unconsumed — backs up in-game. Pick a Water disposal mode, or route it into a consumer.`)));
   $('modeExtras').appendChild(ex);
 }
 
@@ -5151,7 +5181,7 @@ function applyStateToControls() {
   $('optObjective').value = state.opt.objective;
   $('optAlts').checked = state.opt.alts;
   $('optSink').checked = state.opt.sink !== false; // default on, incl. plans saved before this option existed
-  $('optWaterSink').checked = !!state.opt.waterSink; // default off; opt-in per plan
+  if ($('optWaterMode')) $('optWaterMode').value = state.opt.waterMode || 'off';
   if ($('optExportWaste')) $('optExportWaste').checked = !!state.opt.exportWaste;
   $('maxAlts').checked = state.max.alts;
   if ($('xrayWholeBase')) $('xrayWholeBase').checked = !!state.xrayWholeBase;
@@ -5305,7 +5335,7 @@ function init() {
   $('optObjective').addEventListener('change', (e) => { state.opt.objective = e.target.value; save(); solveAndRender(); });
   $('optAlts').addEventListener('change', (e) => { state.opt.alts = e.target.checked; save(); solveAndRender(); });
   $('optSink').addEventListener('change', (e) => { state.opt.sink = e.target.checked; save(); solveAndRender(); });
-  $('optWaterSink').addEventListener('change', (e) => { state.opt.waterSink = e.target.checked; save(); solveAndRender(); });
+  if ($('optWaterMode')) $('optWaterMode').addEventListener('change', (e) => { state.opt.waterMode = e.target.value; save(); solveAndRender(); });
   if ($('optExportWaste')) $('optExportWaste').addEventListener('change', (e) => { state.opt.exportWaste = e.target.checked; save(); solveAndRender(); });
   $('optAllInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = true)); save(); buildOptInputs(); solveAndRender(); });
   $('optNoInputs').addEventListener('click', () => { resList.forEach((r) => (state.opt.inputs[r.c].on = false)); save(); buildOptInputs(); solveAndRender(); });

@@ -113,8 +113,14 @@
             <label class="check"><input type="checkbox" id="optAlts" checked /> Consider alternate recipes</label>
             <label class="check"><input type="checkbox" id="optSink" checked /> Sink / consume by-products</label>
             <small class="hint">Routes surplus by-products to the Awesome Sink (solids) or a Fuel Generator (liquid fuels) so they can't back up the line. A fluid with no consumer is reported instead of silently piling up.</small>
-            <label class="check"><input type="checkbox" id="optWaterSink" /> Sink excess water → Wet Concrete</label>
-            <small class="hint">Dumps surplus by-product water into Wet Concrete (Limestone + Water → Concrete, sunk) and draws all fresh water from extractors — so an aluminum factory needn't recirculate its scrap-step water through a fragile by-product loop. Costs limestone; needs Wet Concrete unlocked.</small>
+            <label class="fld"><span>Water disposal</span>
+              <select id="optWaterMode" class="sel">
+                <option value="off">None — report excess water</option>
+                <option value="wet">Wet Concrete (no water loops)</option>
+                <option value="package">Packaged Water (loops allowed)</option>
+              </select>
+            </label>
+            <small class="hint">None: surplus by-product water is reported as an ⚠ excess by-product (it backs up in-game). Wet Concrete: EVERY water output is diverted into Concrete (Limestone + Water, sunk) and fresh water comes from extractors — no recirculation loops at all. Packaged Water: by-product water may loop back into consumers (e.g. aluminum's scrap → alumina return) and only the NET surplus is packaged into sinkable Packaged Water — the Packager, its Empty Canisters and their crafting chain are added to the plan as real steps.</small>
             <label class="check"><input type="checkbox" id="optExportWaste" /> Export nuclear waste (feed another factory)</label>
             <small class="hint">Lets unsinkable solid by-products (Uranium / Plutonium Waste) float up as plan outputs instead of forcing in-plan reprocessing. The waste then appears in this plan's outputs, so a separate plutonium factory can link it as a supplied input (Extra inputs → link).</small>
           </section>
