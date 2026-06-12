@@ -64,6 +64,37 @@ console.log('\n### FEWEST RECIPES OBJECTIVE');
   check('blocked sole producers stay infeasible', inf.feasible === false);
 }
 
+// ---- Fewest-input-types objective: minimize DISTINCT raw resources drawn ----
+console.log('\n### FEWEST INPUT TYPES OBJECTIVE');
+{
+  const Cable = cls('Cable'), CopperOre = cls('Copper Ore');
+  const base = { outputs: { [Cable]: 30 }, allowedInputs: { [IronOre]: Infinity, [CopperOre]: Infinity }, allowAlternates: true };
+  const byMachines = LP.optimize(Object.assign({}, base, { objective: 'machines' }));
+  const byInputs = LP.optimize(Object.assign({}, base, { objective: 'inputs' }));
+  check('inputs objective feasible', byInputs.feasible === true);
+  check('objective reported as inputs', byInputs.objective === 'inputs');
+  check('objectiveValue == distinct raw count', byInputs.objectiveValue === byInputs.raw.length);
+  check('never more input types than the machines plan', byMachines.feasible && byInputs.raw.length <= byMachines.raw.length);
+  const cableOut = byInputs.outputs.find((o) => o.item === Cable);
+  check('target rate still met (~30/min)', !!cableOut && near(cableOut.rate, 30, 0.1));
+  // Iron Wire (alternate) frees Cable from copper entirely: 2 candidate ores -> 1.
+  check('cable collapses to a single ore via alternates', byInputs.raw.length === 1);
+
+  // Locally minimal: dropping ANY still-drawn input must break feasibility or not help.
+  const minimal = byInputs.raw.every((r) => {
+    const cut = Object.assign({}, base.allowedInputs);
+    delete cut[r.item];
+    const probe = LP.optimize({ outputs: base.outputs, allowedInputs: cut, objective: 'inputs', allowAlternates: true });
+    return !probe.feasible || probe.raw.length >= byInputs.raw.length;
+  });
+  check('locally minimal (no single input is droppable)', minimal);
+
+  // With alternates off there is no escape from copper: count stays as-is, still solves.
+  const noAlts = LP.optimize(Object.assign({}, base, { objective: 'inputs', allowAlternates: false }));
+  check('alts off: still feasible', noAlts.feasible === true);
+  check('alts off: copper still drawn (no alternate escape)', noAlts.raw.some((r) => r.item === CopperOre));
+}
+
 // Planner: 20 Iron Plate/min via standard ingot+plate recipes -> 30 ore, 2 machines.
 const plan = LP.planner({ targets: { [IronPlate]: 20 }, recipes: [primStd(IronIngot), primStd(IronPlate)], rawItems: [] });
 check('planner feasible', plan.feasible === true);

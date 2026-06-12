@@ -303,6 +303,9 @@ function optimize({ outputs, allowedInputs, objective = 'raw', allowAlternates =
   if (objective === 'recipes') {
     return optimizeFewestRecipes({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
   }
+  if (objective === 'inputs') {
+    return optimizeFewestInputs({ outputs, allowedInputs, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
+  }
   const inputs = {};
   for (const it in allowedInputs) inputs[it] = allowedInputs[it];
   const { model, pool, disposal } = buildModel({ outputs, inputs, objective, allowAlternates, recipeCost, powerMult, unlockedAlts, blockedRecipes, sinkByproducts, waterSink, sloopMult });
@@ -372,6 +375,41 @@ function optimizeFewestRecipes(params) {
         best = probe;
         progress = true;
         break; // plan changed — re-rank the survivors and scan again
+      }
+    }
+  }
+  return finish(best);
+}
+
+// "Fewest input types" objective: minimize the number of DISTINCT RAW RESOURCES the
+// factory draws (simplest logistics — fewer belts/trains/pipes into the site), even at
+// the cost of pulling MORE of the survivors. Same greedy-elimination shape as
+// optimizeFewestRecipes, but the candidate being banned is an allowed INPUT rather
+// than a recipe: try removing each currently-drawn input (smallest draw first — the
+// trickle feeds are the ones alternates can usually replace), re-solve, keep any
+// removal that strictly shrinks the distinct-input count, stop when no single removal
+// helps. Ties resolve toward fewer machines (the inner objective).
+function optimizeFewestInputs(params) {
+  const inner = Object.assign({}, params, { objective: 'machines' });
+  const finish = (sum) => { sum.objective = 'inputs'; if (sum.feasible) sum.objectiveValue = sum.raw.length; return sum; };
+  let allowed = Object.assign({}, params.allowedInputs);
+  let best = optimize(Object.assign({}, inner, { allowedInputs: allowed }));
+  if (!best.feasible) return finish(best);
+  let budget = 80;
+  let progress = true;
+  while (progress && budget > 0) {
+    progress = false;
+    const candidates = best.raw.slice().sort((a, b) => a.rate - b.rate);
+    for (const cand of candidates) {
+      if (!(cand.item in allowed) || budget-- <= 0) continue;
+      const tryAllowed = Object.assign({}, allowed);
+      delete tryAllowed[cand.item];
+      const probe = optimize(Object.assign({}, inner, { allowedInputs: tryAllowed }));
+      if (probe.feasible && probe.raw.length < best.raw.length) {
+        allowed = tryAllowed;
+        best = probe;
+        progress = true;
+        break; // input set changed — re-rank what's still drawn and scan again
       }
     }
   }
