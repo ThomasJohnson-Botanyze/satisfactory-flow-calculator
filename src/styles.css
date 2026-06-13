@@ -628,6 +628,21 @@ tbody tr.step-done .mach-sub, tbody tr.step-done .tag-alt { color: var(--good); 
 .flow-arrow { fill: #4b566c; }
 .edge-label { fill: #c2cad8; font-size: 11px; paint-order: stroke; stroke: #11141a; stroke-width: 4px; }
 .edge-label.edge-return-label { fill: var(--accent); }
+/* Pipe-logistics view: colour each run by how close it is to a single pipe's cap. */
+.edge-path.edge-pipe-ok { stroke: #3fa7d6; }
+.edge-path.edge-pipe-warn { stroke: #e0a93a; }
+.edge-path.edge-pipe-over { stroke: #e0563a; stroke-width: 3; }
+.pipe-summary { margin-top: 14px; }
+.pipe-sum-head { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+.pipe-table { border-collapse: collapse; width: 100%; max-width: 640px; margin-bottom: 12px; font-size: 13px; }
+.pipe-table th, .pipe-table td { border-bottom: 1px solid var(--line); padding: 5px 10px; text-align: left; }
+.pipe-table th.num, .pipe-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.pipe-table tr.pipe-row-over td { color: #f0876b; }
+.pipe-warn { background: rgba(224, 86, 58, 0.12); border: 1px solid rgba(224, 86, 58, 0.4); border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 10px; }
+.pipe-warn ul { margin: 6px 0 0; padding-left: 20px; }
+.pipe-warn li { margin: 2px 0; }
+.pipe-ok { color: #6fcf97; font-size: 13px; margin-bottom: 10px; }
+.pipe-note { color: var(--muted); font-size: 12px; line-height: 1.5; }
 /* Sankey ribbons: per-band stroke/width/colour are set inline (so PNG export keeps them);
    here we only add the hover emphasis that highlights a single flow under the cursor. */
 .sankey-band { fill: none; stroke-linejoin: round; }

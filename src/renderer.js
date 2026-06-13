@@ -377,6 +377,9 @@ const defaultState = () => ({
   // in the Power Planner. Off by default so existing charts are unchanged. Per-plan.
   flowPower: false,
   flowSplit: false, // split multi-consumer machine groups into one node per line (view toggle)
+  // Pipe-logistics view: max throughput of one pipe in m³/min — 300 (Mk1) or 600 (Mk2).
+  // Drives the pipe-count labels + over-capacity flags in the Pipes view. Default Mk2.
+  pipeTier: 600,
   // null = no save loaded → every alternate available (original behavior).
   // [] = a save was read but no alternates unlocked. [...classNames] = restrict to these.
   unlockedAlts: null,
@@ -2003,7 +2006,7 @@ function drawFlow(flow) {
       const p = edgePath(e, flow.byId);
       const path = document.createElementNS(SVGNS, 'path');
       // Cycle returns (see layoutFlow) read as dashed "return pipes", not normal flow.
-      path.setAttribute('class', 'edge-path' + (e._return ? ' edge-return' : ''));
+      path.setAttribute('class', 'edge-path' + (e._return ? ' edge-return' : '') + (e._pipeClass ? ' ' + e._pipeClass : ''));
       path.setAttribute('d', p.d);
       path.setAttribute('marker-end', 'url(#flowArrow)');
       gEdges.appendChild(path);
@@ -2466,12 +2469,88 @@ function splitSharedLines(flow) {
   return flow;
 }
 
+// ----- Pipe / Fluid Logistics view -----
+// A fluid-only projection of the flowchart. Pipes carry liquids/gases (Water, Alumina
+// Solution, the acids, fuels, Nitrogen…), and one pipe has a hard throughput cap:
+// Mk1 = 300, Mk2 = 600 m³/min. We keep just the fluid edges, drop every node they don't
+// touch, then label each surviving run with how many pipes it needs. A run over the cap
+// turns red — the wall players hit on big aluminium/water builds, where a manifold has to
+// be split or run in parallel.
+const PIPE_TIERS = { 300: 'Mk1', 600: 'Mk2' };
+const pipeCap = () => (state.pipeTier === 300 ? 300 : 600);
+const pipesFor = (rate) => Math.max(1, Math.ceil(rate / pipeCap() - 1e-9));
+// (Re)label every edge with its pipe count + a capacity class. Idempotent, so it's safe to
+// run again after splitSharedLines (which rebuilds edges with plain labels).
+function annotatePipes(flow) {
+  const cap = pipeCap(), tier = PIPE_TIERS[cap];
+  (flow.edges || []).forEach((e) => {
+    e._pipes = pipesFor(e.rate);
+    e._over = e.rate > cap + 1e-6;
+    e._pipeClass = e._over ? 'edge-pipe-over' : (e.rate > cap * 0.75 ? 'edge-pipe-warn' : 'edge-pipe-ok');
+    e.label = `${itemName(e.item)} ${fmt(e.rate)}/min · ${e._pipes}× ${tier}`;
+  });
+}
+function buildPipeFlow(res, targets) {
+  const flow = buildFlow(res, targets);
+  // Keep only the fluid edges; rebuild every node's in/out lists from the survivors and
+  // drop the nodes left with no pipe attached (solid-only machines, raws, sinks).
+  const keep = (flow.edges || []).filter((e) => isFluid(e.item) && flow.byId[e.src] && flow.byId[e.dst]);
+  flow.nodes.forEach((n) => { n.ins = []; n.outs = []; });
+  const used = new Set();
+  keep.forEach((e) => { flow.byId[e.src].outs.push(e); flow.byId[e.dst].ins.push(e); used.add(e.src); used.add(e.dst); });
+  flow.edges = keep;
+  flow.nodes = flow.nodes.filter((n) => used.has(n.id));
+  const byId = {}; flow.nodes.forEach((n) => { byId[n.id] = n; }); flow.byId = byId;
+  annotatePipes(flow);
+  return flow;
+}
+// Fluid logistics readout under the chart: per-fluid pipe tally, the runs that bust a
+// single pipe (the ones to fix), and the by-product recirculation note.
+function renderPipeSummary(flow) {
+  const el = $('pipeSummary');
+  if (!el) return;
+  const cap = pipeCap(), tier = PIPE_TIERS[cap];
+  const edges = flow.edges || [];
+  if (!edges.length) {
+    el.innerHTML = '<p class="hint">No fluids in this plan — nothing to pipe. (Pipes carry Water, Alumina Solution, the acids, fuels and gases.)</p>';
+    return;
+  }
+  const byItem = {};
+  edges.forEach((e) => {
+    const b = byItem[e.item] || (byItem[e.item] = { item: e.item, segs: 0, busiest: 0, totalPipes: 0, over: 0 });
+    b.segs++; b.busiest = Math.max(b.busiest, e.rate); b.totalPipes += (e._pipes || 1); if (e._over) b.over++;
+  });
+  const items = Object.values(byItem).sort((a, b) => b.busiest - a.busiest);
+  const over = edges.filter((e) => e._over).sort((a, b) => b.rate - a.rate);
+  const nm = (id) => (flow.byId[id] ? flow.byId[id].title : id);
+  let html = `<div class="pipe-sum-head">Pipe tier <strong>${tier}</strong> — one pipe carries up to <strong>${cap}/min</strong>. Switch with the <em>Pipe</em> button above.</div>`;
+  html += '<table class="pipe-table"><thead><tr><th>Fluid</th><th class="num">Runs</th><th class="num">Busiest /min</th><th class="num">Pipes (busiest)</th><th class="num">Total pipes</th></tr></thead><tbody>';
+  items.forEach((b) => {
+    html += `<tr${b.over ? ' class="pipe-row-over"' : ''}><td>${itemName(b.item)}</td><td class="num">${b.segs}</td><td class="num">${fmt(b.busiest)}</td><td class="num">${pipesFor(b.busiest)}×</td><td class="num">${b.totalPipes}×</td></tr>`;
+  });
+  html += '</tbody></table>';
+  if (over.length) {
+    html += `<div class="pipe-warn"><strong>${over.length} run${over.length > 1 ? 's' : ''} exceed${over.length > 1 ? '' : 's'} one ${tier} pipe (${cap}/min)</strong> — run parallel pipes or split into a balanced manifold:<ul>`;
+    over.slice(0, 12).forEach((e) => { html += `<li>${itemName(e.item)} <strong>${fmt(e.rate)}/min</strong>: ${nm(e.src)} → ${nm(e.dst)} needs <strong>${e._pipes}× ${tier}</strong>.</li>`; });
+    if (over.length > 12) html += `<li>…and ${over.length - 12} more.</li>`;
+    html += '</ul></div>';
+  } else {
+    html += `<div class="pipe-ok">Every run fits in a single ${tier} pipe. ✔</div>`;
+  }
+  if (edges.some((e) => e._return)) {
+    html += '<div class="pipe-note">↩ Dashed runs are recirculated by-product (e.g. the water blenders &amp; refineries emit). Feed it back into the manifold <em>upstream</em> of the fresh-water input so the machines nearest the source don\'t starve; the net surplus is disposed per your water-disposal setting.</div>';
+  }
+  el.innerHTML = html;
+}
 function renderFlowView() {
   if (!lastResult) return;
-  const built = buildFlow(lastResult, lastTargets);
+  const pipes = state.view === 'pipes';
+  const built = pipes ? buildPipeFlow(lastResult, lastTargets) : buildFlow(lastResult, lastTargets);
   if (state.flowSplit) splitSharedLines(built);
+  if (pipes) annotatePipes(built); // re-label the split clones too
   currentFlow = layoutFlow(built);
   drawFlow(currentFlow);
+  if (pipes) renderPipeSummary(currentFlow);
   if (typeof window !== 'undefined') window.__lastFlow = currentFlow; // test/debug hook: inspect node + edge wiring
   // Keep the saved zoom/pan across tab toggles; first render of a plan fits to window.
   if (state.flowView && isFinite(state.flowView.k)) applyFlowTransform();
@@ -2491,14 +2570,23 @@ function syncFlowPowerBtn() {
 }
 function applyView() {
   const sankey = state.view === 'sankey';
-  const flow = state.view === 'flow' || sankey; // both views share the flowchart plumbing
+  const pipes = state.view === 'pipes';
+  const flow = state.view === 'flow' || sankey || pipes; // these views share the flowchart plumbing
   $('flowView').hidden = !flow;
   $('tableView').hidden = flow;
   $('viewFlow').classList.toggle('active', state.view === 'flow');
   if ($('viewSankey')) $('viewSankey').classList.toggle('active', sankey);
+  if ($('viewPipes')) $('viewPipes').classList.toggle('active', pipes);
   $('viewTables').classList.toggle('active', state.view === 'tables');
+  // The pipe-tier toggle + fluid summary belong to the Pipes view only.
+  const tierBtn = $('flowPipeTier');
+  if (tierBtn) { tierBtn.hidden = !pipes; tierBtn.textContent = `Pipe: ${PIPE_TIERS[pipeCap()]} · ${pipeCap()}/min`; }
+  const sum = $('pipeSummary');
+  if (sum) sum.hidden = !pipes;
   const hint = $('flowHint');
-  if (hint) hint.textContent = sankey
+  if (hint) hint.textContent = pipes
+    ? `Fluids only. Each arrow is a pipe run, labelled with its flow and pipe count. Red = over one ${PIPE_TIERS[pipeCap()]} pipe (${pipeCap()}/min) → run parallel pipes or split a manifold. ↩ dashed = recirculated by-product. Toggle Mk1/Mk2 above · drag to rearrange · scroll to zoom.`
+    : sankey
     ? 'Band width = items / min · colour = material (cyan = fluid) · every band is labelled with its item and rate. Drag nodes to rearrange · scroll to zoom · drag empty space to pan.'
     : 'Click a machine to set Overclock / Somersloop · drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output · pink = sink · blue = generator · copper = extractor.';
   syncFlowPowerBtn();
@@ -3431,7 +3519,7 @@ function wireMap() {
   });
   window.addEventListener('resize', () => {
     if (state.mode === 'map') { reframeMapForResize(); scheduleMapDraw(); }
-    if (state.view === 'flow' && $('flowView') && !$('flowView').hidden) applyFlowTransform();
+    if ((state.view === 'flow' || state.view === 'sankey' || state.view === 'pipes') && $('flowView') && !$('flowView').hidden) applyFlowTransform();
   });
 }
 function renderMap() {
@@ -5361,6 +5449,8 @@ function init() {
   $('viewTables').addEventListener('click', () => { state.view = 'tables'; save(); applyView(); });
   $('viewFlow').addEventListener('click', () => { state.view = 'flow'; save(); applyView(); });
   if ($('viewSankey')) $('viewSankey').addEventListener('click', () => { state.view = 'sankey'; save(); applyView(); });
+  if ($('viewPipes')) $('viewPipes').addEventListener('click', () => { state.view = 'pipes'; save(); applyView(); });
+  if ($('flowPipeTier')) $('flowPipeTier').addEventListener('click', () => { state.pipeTier = pipeCap() === 600 ? 300 : 600; save(); applyView(); });
   $('flowReset').addEventListener('click', () => { state.flowPos = {}; state.flowView = null; save(); renderFlowView(); });
   $('flowPowerToggle').addEventListener('click', () => { state.flowPower = !state.flowPower; save(); syncFlowPowerBtn(); solveAndRender(); });
   if ($('flowSplitToggle')) $('flowSplitToggle').addEventListener('click', () => { state.flowSplit = !state.flowSplit; save(); syncFlowPowerBtn(); solveAndRender(); });

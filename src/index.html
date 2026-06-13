@@ -410,6 +410,7 @@
             <button id="viewTables" class="vt active">▦ Tables</button>
             <button id="viewFlow" class="vt">⤳ Flowchart</button>
             <button id="viewSankey" class="vt" title="Flow diagram where each band's width is its throughput (items / min) — spot bottlenecks and the biggest material streams at a glance.">⤴ Sankey</button>
+            <button id="viewPipes" class="vt" title="Fluid-only flowchart for planning pipework: every run is labelled with its flow and how many pipes carry it (Mk1 = 300/min, Mk2 = 600/min). Runs over one pipe's cap turn red.">⬡ Pipes</button>
             <button id="flowPowerToggle" class="vt" title="Add miners/extractors for the raw inputs and generators burning the outputs — shown in both the tables and the flowchart. Double-click a node on the flowchart to set its power shards.">⚡ Power infra</button>
             <button id="flowSplitToggle" class="vt" title="Split a machine group whose single product feeds several consumers into one node per line — see how many machines serve each destination. Inputs split proportionally; the build-progress mark stays shared across a step's lines.">⑃ Split lines</button>
             <button id="exportCsv" class="vt vt-export" title="Download the production tables as a CSV file">⤓ CSV</button>
@@ -421,6 +422,7 @@
             <div class="flow-head">
               <span id="flowHint" class="hint flow-hint">Click a machine to set Overclock / Somersloop · drag nodes to rearrange · scroll to zoom · drag empty space to pan. Gray = raw · orange = machine · green = output · pink = sink · blue = generator · copper = extractor.</span>
               <div class="flow-tools">
+                <button id="flowPipeTier" class="btn mini ghost" hidden title="Toggle the pipe tier used for the capacity maths (Mk1 = 300/min, Mk2 = 600/min)">Pipe: Mk2 · 600/min</button>
                 <button id="flowZoomOut" class="btn mini ghost" aria-label="Zoom out" title="Zoom out">−</button>
                 <span id="flowZoomPct" class="flow-zoom-pct">100%</span>
                 <button id="flowZoomIn" class="btn mini ghost" aria-label="Zoom in" title="Zoom in">+</button>
@@ -430,6 +432,7 @@
               </div>
             </div>
             <div class="flow-scroll"><svg id="flowSvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+            <div id="pipeSummary" class="pipe-summary" hidden></div>
           </div>
 
           <div id="tableView">
