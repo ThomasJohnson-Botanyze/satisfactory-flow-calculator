@@ -1332,6 +1332,9 @@ function sloopCell(s) {
 // row, the flowchart node and the Sankey node all read/write the same mark and the
 // mark survives re-solves (ids are keyed by recipe class / item class, not row order).
 const stepDone = (key) => !!((state.doneSteps || {})[key]);
+// A flow node is "built" if its own mark is set, or — for a split-line clone — the parent
+// step is marked (marking the whole step in the table greens all of its split lines).
+const nodeDone = (n) => stepDone(n._doneKey || n.id) || (!!n._parentKey && stepDone(n._parentKey));
 function toggleStepDone(key) {
   if (!state.doneSteps) state.doneSteps = {};
   if (state.doneSteps[key]) delete state.doneSteps[key];
@@ -1350,7 +1353,7 @@ function refreshDoneMarks() {
   });
   if (currentFlow && currentFlow.nodes) {
     for (const n of currentFlow.nodes) {
-      if (n._g && n._doneKey) n._g.classList.toggle('step-done', stepDone(n._doneKey));
+      if (n._g && (n._doneKey || n._parentKey)) n._g.classList.toggle('step-done', nodeDone(n));
     }
   }
   updateDoneCounter();
@@ -2040,8 +2043,8 @@ function drawFlow(flow) {
     // tick in the top-right corner (key = node id, shared with the table checkboxes).
     // Other kinds (outputs, sinks, power infra) aren't construction steps.
     if (n.kind === 'machine' || n.kind === 'raw') {
-      n._doneKey = n._doneKey || n.id; // split clones preset the ORIGINAL step's key — one mark greens every line
-      if (stepDone(n.id)) g.classList.add('step-done');
+      n._doneKey = n._doneKey || n.id; // split-line clones carry their OWN line key (+ _parentKey) so each line marks independently
+      if (nodeDone(n)) g.classList.add('step-done');
       const chk = document.createElementNS(SVGNS, 'g');
       chk.setAttribute('class', 'n-check');
       chk.setAttribute('transform', `translate(${n.w - 13}, 13)`);
@@ -2053,11 +2056,11 @@ function drawFlow(flow) {
       tick.setAttribute('d', 'M -3.2 0.2 L -0.8 2.8 L 3.4 -2.6');
       chk.appendChild(tick);
       const tip = document.createElementNS(SVGNS, 'title');
-      tip.textContent = 'Mark this step as built';
+      tip.textContent = n._parentKey ? 'Mark this line as built' : 'Mark this step as built';
       chk.appendChild(tip);
       // Swallow the press so it neither starts a node drag nor opens the settings popup.
       chk.addEventListener('pointerdown', (ev) => { ev.stopPropagation(); ev.preventDefault(); });
-      chk.addEventListener('pointerup', (ev) => { ev.stopPropagation(); toggleStepDone(n.id); });
+      chk.addEventListener('pointerup', (ev) => { ev.stopPropagation(); toggleStepDone(n._doneKey); });
       g.appendChild(chk);
     }
     n._g = g;
@@ -2420,7 +2423,7 @@ function splitSharedLines(flow) {
       const c = {
         id, kind: n.kind, title: n.title,
         sub: `${fmt(s.machines * share)}× ${s.buildingName}${oc}${sp}${lineTo ? ` → ${lineTo.length > 14 ? lineTo.slice(0, 13) + '…' : lineTo}` : ''}`,
-        ins: [], outs: [e], rc: n.rc, interactive: n.interactive, _doneKey: n.id, _step: s,
+        ins: [], outs: [e], rc: n.rc, interactive: n.interactive, _doneKey: id, _parentKey: n.id, _step: s,
       };
       e.src = id;
       flow.byId[id] = c;
@@ -3778,6 +3781,7 @@ function recomputePlanOutputs(planObj) {
 // ---------- mode dispatch ----------
 function present(res, targets) {
   lastResult = res; lastTargets = targets;
+  if (typeof window !== 'undefined') { window.__lastResult = res; window.__lastTargets = targets; } // test/debug hook
   // Record this plan's outputs so downstream plans can link to them, then push fresh
   // numbers to any plan that consumes this one (one-hop reactive propagation).
   const ap = activePlan();
@@ -3890,6 +3894,7 @@ function updateCleanSuggest(res, optArgs) {
   if (state.opt.objective === 'clean') return; // already in the cleanest-ratio mode — tip is moot
   let sug = cleanRateSuggestion(res);
   let swapNote = '';
+  let fromClean = false; // sug derived from the cleanest-ratio plan, not the current one
   // When the current recipe set rationalizes badly, search recipe space (other recipes /
   // alternates may divide far more evenly) — the same search the 'clean' objective
   // solves through, so applying reproduces exactly this plan.
@@ -3900,6 +3905,7 @@ function updateCleanSuggest(res, optArgs) {
       const better = !sug || l.frac < sug.fracAllowed || (l.frac === sug.fracAllowed && l.scale < sug.scale - 1e-9);
       if (better) {
         sug = { scale: l.scale, fracAllowed: l.frac };
+        fromClean = true;
         const cur = new Set(res.recipes.map((r) => r.rc));
         const swapped = alt.recipes.filter((r) => !cur.has(r.rc)).length;
         if (swapped) swapNote = ` (switches ${swapped} recipe${swapped === 1 ? '' : 's'} for cleaner ratios)`;
@@ -3917,9 +3923,19 @@ function updateCleanSuggest(res, optArgs) {
   const apply = el('button', 'btn mini ghost', 'Apply');
   apply.style.marginLeft = '8px';
   apply.addEventListener('click', () => {
-    for (const o of state.opt.outputs) if (o.rate > 0) o.rate = Math.round(Number(o.rate) * sug.scale * 1e6) / 1e6;
-    state.opt.objective = 'clean';
-    if ($('optObjective')) $('optObjective').value = 'clean';
+    // Apply the scale exactly ONCE. Doing both — bumping the rates AND switching to the
+    // 'clean' objective — squared it: the rate bump scaled the targets, then 'clean'
+    // re-derived its own scale (applyCleanScale) and scaled the plan a second time.
+    if (fromClean) {
+      // sug is based on the cleanest-ratio plan (possibly different recipes), so switch
+      // to that objective and let it scale itself to whole machines from the base target.
+      state.opt.objective = 'clean';
+      if ($('optObjective')) $('optObjective').value = 'clean';
+    } else {
+      // sug came from the CURRENT plan: bumping the desired outputs by it makes every
+      // machine whole under the same recipes. Keep the objective so nothing re-scales.
+      for (const o of state.opt.outputs) if (o.rate > 0) o.rate = Math.round(Number(o.rate) * sug.scale * 1e6) / 1e6;
+    }
     save();
     buildOptOutputs(); // refresh the rate inputs to the new values
     solveAndRender();

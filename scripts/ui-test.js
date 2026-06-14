@@ -1091,6 +1091,37 @@ console.log('\n### CLEAN-RATE SUGGESTION (optimizer)');
   check('easy counts still snap exactly (×2, nothing fractional)', Math.abs(easy.scale - 2) < 1e-9 && easy.fracAllowed === 0);
 }
 
+// ---- Regression: Apply must scale the plan EXACTLY ONCE. The old handler both bumped
+// the desired outputs ×scale AND switched to the 'clean' objective, which re-derives its
+// own scale (applyCleanScale) — so the EFFECTIVE output came out ×scale² (e.g. the tip
+// promised 20/min, the plan produced 40/min). Whichever route Apply takes (bump the rate
+// keeping the objective, or switch to clean and let it self-scale), the produced rate of
+// the primary item must equal the tip's promised rate, never its square. ----
+console.log('\n### CLEAN-RATE APPLY: NO DOUBLE-SCALE (squaring regression)');
+{
+  const { w, d, setVal, click } = boot13(null);
+  const producedRate = (item) => {
+    const r = w.__lastResult; if (!r) return 0;
+    const all = [...(r.outputs || []), ...(r.surplus || [])];
+    return all.filter((o) => o.item === item).reduce((a, o) => a + o.rate, 0);
+  };
+  click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'optimize'));
+  const row = d.querySelector('#optOutputs .row');
+  setVal(row.querySelector('.row-item'), 'Reinforced Iron Plate');
+  setVal(row.querySelector('.row-rate'), '7'); // fractional machine counts -> a real ×scale tip
+  const box = d.getElementById('cleanSuggest');
+  check('tip shown for the fractional plan', !!box && !box.hidden && /Clean rate/.test(box.textContent));
+  const m = box.textContent.match(/([\d.]+)\/min \(×([\d.]+)/);
+  check('tip exposes a proposed rate + scale', !!m);
+  const proposed = Number(m[1]);   // = 7 × scale  (what the tip promises to produce)
+  const scale = Number(m[2]);
+  const ripClass = 'Desc_IronPlateReinforced_C';
+  click(box.querySelector('button'));
+  const got = producedRate(ripClass);
+  check('Apply produces the promised rate (applied once)', Math.abs(got - proposed) < 1e-3);
+  check('Apply did NOT square the output (≠ 7×scale²)', Math.abs(scale - 1) < 1e-9 || Math.abs(got - 7 * scale * scale) > 1e-3);
+}
+
 // ---- Loops objective in the UI + legacy clean-toggle migration ----
 console.log('\n### LOOPS OBJECTIVE + LEGACY CLEAN-TOGGLE MIGRATION');
 {
@@ -1245,7 +1276,34 @@ console.log('\n### SPLIT SHARED LINES');
   check('split: line subs name their destination', clones.every((c) => /→/.test(c.sub)));
   const oreEdges = flow.edges.filter((e) => e.src === 'raw|' + cls('Iron Ore') && e.dst.startsWith(ingotRc.id + '|line'));
   check('split: the ore input splits across both lines', oreEdges.length === 2);
-  check('split: clones share the original done-key', clones.every((c) => c._doneKey === ingotRc.id));
+  check('split: each line carries its OWN done-key, plus the parent key',
+    clones.every((c) => c._doneKey.startsWith(ingotRc.id + '|line') && c._parentKey === ingotRc.id));
+
+  // Per-line marking: each split line must mark INDEPENDENTLY. Regression for the old
+  // wiring where clones shared one key (one mark greened every line) AND the glyph wrote
+  // n.id while the repaint read _doneKey — so a line click greened nothing at all.
+  const fireUp = (n) => n.dispatchEvent(new w.Event('pointerup', { bubbles: true }));
+  const greens = () => d.querySelectorAll('#flowSvg .node.step-done').length;
+  check('split: nothing marked to start', greens() === 0);
+  fireUp(clones[0]._g.querySelector('.n-check'));
+  check('split: marking one line greens ONLY that line',
+    clones[0]._g.classList.contains('step-done') && !clones[1]._g.classList.contains('step-done'));
+  check('split: the per-line key is what gets stored', w.__app.state.doneSteps[clones[0]._doneKey] === 1);
+  check('split: marking a line does NOT mark the parent step', !w.__app.state.doneSteps[ingotRc.id]);
+  fireUp(clones[0]._g.querySelector('.n-check'));
+  check('split: clicking the glyph again clears that line',
+    !clones[0]._g.classList.contains('step-done') && !w.__app.state.doneSteps[clones[0]._doneKey]);
+
+  // Parent cascade: marking the whole step (e.g. via the table) greens every one of its
+  // split lines on the next paint.
+  w.__app.state.doneSteps[ingotRc.id] = 1;
+  click(d.getElementById('flowSplitToggle')); // off
+  click(d.getElementById('flowSplitToggle')); // on -> redraw with the parent marked
+  const clones2 = w.__lastFlow.nodes.filter((n) => n.id.startsWith(ingotRc.id + '|line'));
+  check('split: marking the parent step greens all its lines',
+    clones2.length === 2 && clones2.every((c) => c._g.classList.contains('step-done')));
+  delete w.__app.state.doneSteps[ingotRc.id];
+
   click(d.getElementById('flowSplitToggle'));
   check('toggle off restores the merged chart', w.__lastFlow.nodes.length === before);
 
