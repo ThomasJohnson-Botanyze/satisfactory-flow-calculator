@@ -567,6 +567,7 @@ tbody tr.step-done .mach-sub, tbody tr.step-done .tag-alt { color: var(--good); 
 .node.gen rect { fill: #1c2f3a; stroke: #4aa3c7; }
 .node.depot rect { fill: #2c2740; stroke: #8a7bd8; }
 .node.ext rect { fill: #2a2418; stroke: #c98f4a; }
+.node.bus rect { fill: #11343f; stroke: #3fa7d6; stroke-width: 2; }
 .node .n-title { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
 .node .n-sub { fill: var(--muted); font-size: 10px; pointer-events: none; }
 /* A tunable machine node is clickable (opens the Overclock / Somersloop popup). */

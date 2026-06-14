@@ -1001,10 +1001,11 @@ console.log('\n### SANKEY VIEW (proportional flow bands)');
     d.querySelectorAll('#flowSvg .sankey-band').length === 0 && d.querySelectorAll('#flowSvg .edge-path').length === flowEdges);
 }
 
-// ---- Pipe / Fluid Logistics view: fluid-only flowchart with pipe-count labels ----
-// A 4th view toggle. Keeps just the liquid/gas runs, labels each with how many pipes
-// carry it (Mk1 = 300, Mk2 = 600 m³/min), and flags any run over a single pipe red.
-console.log('\n### PIPE / FLUID LOGISTICS VIEW');
+// ---- Pipe / Fluid Logistics view: full flowchart + per-fluid manifolds at GROSS rate ----
+// A 4th view toggle. Shows the WHOLE factory (solids + native machine counts) but routes
+// every fluid through a per-item manifold (bus) node at gross in/out — loops never netted —
+// and labels each fluid run with its pipe count (Mk1 = 300, Mk2 = 600 m³/min, red = over).
+console.log('\n### PIPE / FLUID LOGISTICS VIEW (manifold model)');
 {
   const { w, d, setVal, click } = boot13(null);
   click([...d.querySelectorAll('.tab')].find((t) => t.dataset.mode === 'planner'));
@@ -1014,32 +1015,44 @@ console.log('\n### PIPE / FLUID LOGISTICS VIEW');
   const flowEdges = d.querySelectorAll('#flowSvg .edge-path').length;
   const flowLabels = [...d.querySelectorAll('#flowSvg .edge-label')].map((t) => t.textContent);
   check('full flow carries solid + fluid runs', flowEdges > 0 && flowLabels.some((t) => /Bauxite/.test(t)));
+  const refId = 'mac|Recipe_AluminaSolution_C';
+  const flowRefSub = w.__lastFlow.byId[refId] && w.__lastFlow.byId[refId].sub;
+  check('refinery machine node present in flow view', !!flowRefSub && /Refinery/.test(flowRefSub));
   click(d.getElementById('viewPipes'));
-  const pipeEdges = [...d.querySelectorAll('#flowSvg .edge-path')];
+  const lf = w.__lastFlow;
   const pipeLabels = [...d.querySelectorAll('#flowSvg .edge-label')].map((t) => t.textContent);
-  check('Pipes view drops solid runs (fewer edges than the full flow)', pipeEdges.length > 0 && pipeEdges.length < flowEdges);
-  check('no solid (Bauxite) run survives the Pipes view', !pipeLabels.some((t) => /Bauxite/.test(t)));
-  check('every pipe run is labelled with its pipe count', pipeLabels.length > 0 && pipeLabels.every((t) => /×\s*Mk2/.test(t)));
-  check('water run carries Water + a /min rate', pipeLabels.some((t) => /Water/.test(t) && /\/min/.test(t)));
-  check('the 900/min water run busts one Mk2 pipe (red, 2× Mk2)',
-    pipeEdges.some((p) => p.classList.contains('edge-pipe-over')) && pipeLabels.some((t) => /Water/.test(t) && /2×\s*Mk2/.test(t)));
+  // Solids are still drawn (the whole factory, not a fluid-only projection).
+  check('Pipes view STILL shows solid runs (Bauxite)', pipeLabels.some((t) => /Bauxite/.test(t)));
+  // Machine counts are untouched — the pipe view must not re-split or rescale them.
+  check('machine count unchanged vs flow view', !!lf.byId[refId] && lf.byId[refId].sub === flowRefSub);
+  // Each fluid becomes a manifold (bus) node.
+  const buses = lf.nodes.filter((n) => n.kind === 'bus');
+  check('a Water manifold node exists', buses.some((n) => /Water manifold/.test(n.title)));
+  check('an Alumina Solution manifold node exists', buses.some((n) => /Alumina Solution manifold/.test(n.title)));
+  // Gross water = 5 refineries × 180 = 900/min, over one Mk2 pipe → red, 2×.
+  const overEdges = [...d.querySelectorAll('#flowSvg .edge-path.edge-pipe-over')];
+  check('the 900/min gross water run busts one Mk2 pipe (red, 2× Mk2)',
+    overEdges.length >= 1 && pipeLabels.some((t) => /Water/.test(t) && /900\/min/.test(t) && /2×\s*Mk2/.test(t)));
+  // Fluid runs carry a pipe count; solid runs do NOT.
+  const fluidLabels = pipeLabels.filter((t) => /(Water|Alumina Solution)/.test(t));
+  check('every fluid run is labelled with a pipe count', fluidLabels.length > 0 && fluidLabels.every((t) => /×\s*Mk2/.test(t)));
+  check('solid runs carry no pipe count', !pipeLabels.some((t) => /Bauxite/.test(t) && /Mk2/.test(t)));
   const tierBtn = d.getElementById('flowPipeTier');
   check('pipe-tier toggle shown in the Pipes view', !!tierBtn && tierBtn.hidden === false && /Mk2/.test(tierBtn.textContent));
   const sum = d.getElementById('pipeSummary');
-  check('fluid summary table renders under the chart', !!sum && sum.hidden === false && !!sum.querySelector('table.pipe-table'));
-  check('summary has a Water row flagged over capacity', /Water/.test(sum.textContent) && !!sum.querySelector('tr.pipe-row-over'));
+  check('manifold summary table renders under the chart', !!sum && sum.hidden === false && /Manifold/.test(sum.textContent) && !!sum.querySelector('table.pipe-table'));
+  check('summary Water manifold flagged over capacity', /Water/.test(sum.textContent) && !!sum.querySelector('tr.pipe-row-over'));
   check('summary calls out the over-capacity run to fix', /exceeds? one Mk2 pipe \(600\/min\)/.test(sum.textContent));
   const ps = JSON.parse(w.localStorage.getItem('satisfactory-factory-plans-v1'));
   check('Pipes view persisted to the plan', ps.plans.find((p) => p.id === ps.activeId).state.view === 'pipes');
-  // Flip the tier to Mk1 (300/min): every label + the capacity maths recompute.
+  // Flip the tier to Mk1 (300/min): water now needs 3 pipes (900 / 300).
   click(tierBtn);
   const mk1Labels = [...d.querySelectorAll('#flowSvg .edge-label')].map((t) => t.textContent);
   check('tier toggle flips the button to Mk1', /Mk1/.test(d.getElementById('flowPipeTier').textContent));
-  check('runs relabel to Mk1 and water now needs 3× (900 / 300)',
-    mk1Labels.length > 0 && mk1Labels.every((t) => /×\s*Mk1/.test(t)) && mk1Labels.some((t) => /Water/.test(t) && /3×\s*Mk1/.test(t)));
-  // Leaving the Pipes view hides its summary + restores the full (solid + fluid) flow.
+  check('water relabels to 3× Mk1 (900 / 300)', mk1Labels.some((t) => /Water/.test(t) && /3×\s*Mk1/.test(t)));
+  // Leaving the Pipes view hides its summary + restores the native flow.
   click(d.getElementById('viewFlow'));
-  check('summary hidden + solid runs restored when leaving Pipes view',
+  check('summary hidden + native flow restored when leaving Pipes view',
     d.getElementById('pipeSummary').hidden === true && d.querySelectorAll('#flowSvg .edge-path').length === flowEdges);
 }
 

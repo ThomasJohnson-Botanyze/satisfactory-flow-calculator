@@ -2470,84 +2470,140 @@ function splitSharedLines(flow) {
 }
 
 // ----- Pipe / Fluid Logistics view -----
-// A fluid-only projection of the flowchart. Pipes carry liquids/gases (Water, Alumina
-// Solution, the acids, fuels, Nitrogen…), and one pipe has a hard throughput cap:
-// Mk1 = 300, Mk2 = 600 m³/min. We keep just the fluid edges, drop every node they don't
-// touch, then label each surviving run with how many pipes it needs. A run over the cap
-// turns red — the wall players hit on big aluminium/water builds, where a manifold has to
-// be split or run in parallel.
+// The FULL flowchart (solids + native machine counts, untouched) with every FLUID flow
+// re-expressed as a per-item MANIFOLD: one bus node per liquid/gas, every machine group
+// piping its GROSS output into it and pulling its GROSS input out. Loops are never netted,
+// so a recycle (24 Instant Scrap blenders emitting 50/min water each = a 1,200/min return
+// run) shows the real pipes you build, not the solver's net make-up. One pipe caps at
+// Mk1 = 300 / Mk2 = 600 m³/min; any run over the cap turns red.
 const PIPE_TIERS = { 300: 'Mk1', 600: 'Mk2' };
 const pipeCap = () => (state.pipeTier === 300 ? 300 : 600);
 const pipesFor = (rate) => Math.max(1, Math.ceil(rate / pipeCap() - 1e-9));
-// (Re)label every edge with its pipe count + a capacity class. Idempotent, so it's safe to
-// run again after splitSharedLines (which rebuilds edges with plain labels).
+// Label + colour every FLUID run with its pipe count. Solids keep their normal flowchart
+// label and no pipe styling (the Pipes view still shows the whole factory).
 function annotatePipes(flow) {
   const cap = pipeCap(), tier = PIPE_TIERS[cap];
   (flow.edges || []).forEach((e) => {
+    if (!isFluid(e.item)) return;
     e._pipes = pipesFor(e.rate);
     e._over = e.rate > cap + 1e-6;
     e._pipeClass = e._over ? 'edge-pipe-over' : (e.rate > cap * 0.75 ? 'edge-pipe-warn' : 'edge-pipe-ok');
     e.label = `${itemName(e.item)} ${fmt(e.rate)}/min · ${e._pipes}× ${tier}`;
   });
 }
+// Terminals a surplus fluid can be disposed into (vs a machine that consumes it).
+const FLUID_TERMINAL_KINDS = new Set(['out', 'sink', 'gen', 'depot', 'pgen']);
 function buildPipeFlow(res, targets) {
   const flow = buildFlow(res, targets);
-  // Keep only the fluid edges; rebuild every node's in/out lists from the survivors and
-  // drop the nodes left with no pipe attached (solid-only machines, raws, sinks).
-  const keep = (flow.edges || []).filter((e) => isFluid(e.item) && flow.byId[e.src] && flow.byId[e.dst]);
+  // Strip the solver's routed FLUID edges; solids + extractor plumbing stay as the
+  // flowchart drew them. Remember where surplus fluid was disposed so we can re-attach it.
+  const solid = [];
+  const termFeeds = {}; // item -> { terminalNodeId -> rate }
+  for (const e of flow.edges) {
+    if (!isFluid(e.item)) { solid.push(e); continue; }
+    const s = flow.byId[e.src], d = flow.byId[e.dst];
+    if ((s && s.kind === 'ext') || (d && d.kind === 'ext')) { solid.push(e); continue; } // extractor→raw plumbing
+    if (d && FLUID_TERMINAL_KINDS.has(d.kind)) {
+      (termFeeds[e.item] = termFeeds[e.item] || {});
+      termFeeds[e.item][e.dst] = (termFeeds[e.item][e.dst] || 0) + e.rate;
+    }
+    // machine↔machine / raw→machine flows are dropped — re-created at GROSS through the bus.
+  }
   flow.nodes.forEach((n) => { n.ins = []; n.outs = []; });
-  const used = new Set();
-  keep.forEach((e) => { flow.byId[e.src].outs.push(e); flow.byId[e.dst].ins.push(e); used.add(e.src); used.add(e.dst); });
-  flow.edges = keep;
-  flow.nodes = flow.nodes.filter((n) => used.has(n.id));
-  const byId = {}; flow.nodes.forEach((n) => { byId[n.id] = n; }); flow.byId = byId;
-  annotatePipes(flow);
+  solid.forEach((e) => { if (flow.byId[e.src] && flow.byId[e.dst]) { flow.byId[e.src].outs.push(e); flow.byId[e.dst].ins.push(e); } });
+  flow.edges = solid;
+  const addEdge = (srcId, dstId, item, rate) => {
+    if (!flow.byId[srcId] || !flow.byId[dstId] || !(rate > 1e-9)) return;
+    const e = { src: srcId, dst: dstId, item, rate, label: '' };
+    flow.edges.push(e); flow.byId[srcId].outs.push(e); flow.byId[dstId].ins.push(e);
+  };
+  // Gross fluid produced / consumed per recipe step — the SAME maths buildFlow uses for its
+  // edges (output sloop-amplified, input not, fluids cost-rounded at mL), but never netted.
+  const prodOf = {}, consOf = {}; // item -> [{ nid, rate }]
+  res.recipes.forEach((s) => {
+    const info = LP.RC_INFO[s.rc], r = RECIPES[s.rc];
+    if (!info || !r) return;
+    const base = info.out[s.item] || info.primaryRate || 1;
+    for (const item in info.out) {
+      if (!isFluid(item)) continue;
+      (prodOf[item] = prodOf[item] || []).push({ nid: s._nid, rate: s.rate * (info.out[item] / base) });
+    }
+    const prod = r.products.find((p) => p.item === s.item) || r.products[0];
+    r.ingredients.forEach((ing) => {
+      if (!isFluid(ing.item)) return;
+      const rate = (s.rate / (prod.amount * (s.sloopMult || 1))) * LP.effAmount(ing.amount, r.burner ? 1 : state.recipeCost, true);
+      (consOf[ing.item] = consOf[ing.item] || []).push({ nid: s._nid, rate });
+    });
+  });
+  const cap = pipeCap(), tier = PIPE_TIERS[cap];
+  const fluids = new Set([...Object.keys(prodOf), ...Object.keys(consOf), ...Object.keys(termFeeds)]);
+  for (const item of fluids) {
+    const prod = prodOf[item] || [], cons = consOf[item] || [];
+    if (!prod.length && !cons.length) continue; // only ext/terminal — no manifold to draw
+    const totalProd = prod.reduce((a, p) => a + p.rate, 0);
+    const totalCons = cons.reduce((a, c) => a + c.rate, 0);
+    const terms = termFeeds[item] || {};
+    const totalTerm = Object.values(terms).reduce((a, x) => a + x, 0);
+    const fresh = Math.max(0, totalCons + totalTerm - totalProd); // extractor make-up
+    const load = Math.max(totalProd + fresh, totalCons + totalTerm); // both sides balance
+    const busId = 'fbus|' + item;
+    const busNode = { id: busId, kind: 'bus', title: itemName(item) + ' manifold',
+      sub: `${fmt(load)}/min · ${Math.max(1, Math.ceil(load / cap - 1e-9))}× ${tier}`, ins: [], outs: [] };
+    flow.nodes.push(busNode); flow.byId[busId] = busNode;
+    prod.forEach((p) => addEdge(p.nid, busId, item, p.rate)); // gross output → manifold
+    cons.forEach((c) => addEdge(busId, c.nid, item, c.rate)); // manifold → gross input
+    if (fresh > 1e-9) {
+      if (!flow.byId['raw|' + item]) { const rn = { id: 'raw|' + item, kind: 'raw', title: itemName(item), sub: fmt(fresh) + '/min', ins: [], outs: [] }; flow.nodes.push(rn); flow.byId[rn.id] = rn; }
+      addEdge('raw|' + item, busId, item, fresh);
+    }
+    for (const dst in terms) addEdge(busId, dst, item, terms[dst]); // surplus → disposal
+  }
   return flow;
 }
-// Fluid logistics readout under the chart: per-fluid pipe tally, the runs that bust a
-// single pipe (the ones to fix), and the by-product recirculation note.
+// Fluid logistics readout under the chart: one row per manifold (gross in / out / pipes),
+// plus the runs that bust a single pipe — the ones to split or double up.
 function renderPipeSummary(flow) {
   const el = $('pipeSummary');
   if (!el) return;
   const cap = pipeCap(), tier = PIPE_TIERS[cap];
-  const edges = flow.edges || [];
-  if (!edges.length) {
+  const buses = (flow.nodes || []).filter((n) => n.kind === 'bus');
+  if (!buses.length) {
     el.innerHTML = '<p class="hint">No fluids in this plan — nothing to pipe. (Pipes carry Water, Alumina Solution, the acids, fuels and gases.)</p>';
     return;
   }
-  const byItem = {};
-  edges.forEach((e) => {
-    const b = byItem[e.item] || (byItem[e.item] = { item: e.item, segs: 0, busiest: 0, totalPipes: 0, over: 0 });
-    b.segs++; b.busiest = Math.max(b.busiest, e.rate); b.totalPipes += (e._pipes || 1); if (e._over) b.over++;
-  });
-  const items = Object.values(byItem).sort((a, b) => b.busiest - a.busiest);
-  const over = edges.filter((e) => e._over).sort((a, b) => b.rate - a.rate);
+  const rows = buses.map((b) => {
+    const totIn = b.ins.reduce((a, e) => a + e.rate, 0);
+    const totOut = b.outs.reduce((a, e) => a + e.rate, 0);
+    const biggest = Math.max(0, ...b.ins.map((e) => e.rate), ...b.outs.map((e) => e.rate));
+    const load = Math.max(totIn, totOut);
+    return { item: (b.ins[0] || b.outs[0] || {}).item, totIn, totOut, biggest, load, pipes: Math.max(1, Math.ceil(load / cap - 1e-9)) };
+  }).sort((a, b) => b.load - a.load);
+  const over = flow.edges.filter((e) => isFluid(e.item) && e._over).sort((a, b) => b.rate - a.rate);
   const nm = (id) => (flow.byId[id] ? flow.byId[id].title : id);
-  let html = `<div class="pipe-sum-head">Pipe tier <strong>${tier}</strong> — one pipe carries up to <strong>${cap}/min</strong>. Switch with the <em>Pipe</em> button above.</div>`;
-  html += '<table class="pipe-table"><thead><tr><th>Fluid</th><th class="num">Runs</th><th class="num">Busiest /min</th><th class="num">Pipes (busiest)</th><th class="num">Total pipes</th></tr></thead><tbody>';
-  items.forEach((b) => {
-    html += `<tr${b.over ? ' class="pipe-row-over"' : ''}><td>${itemName(b.item)}</td><td class="num">${b.segs}</td><td class="num">${fmt(b.busiest)}</td><td class="num">${pipesFor(b.busiest)}×</td><td class="num">${b.totalPipes}×</td></tr>`;
+  let html = `<div class="pipe-sum-head">Pipe tier <strong>${tier}</strong> — one pipe carries up to <strong>${cap}/min</strong>. Each fluid is a manifold: every machine group pipes its <em>gross</em> output in and gross input out (recycle loops are never netted). Switch tiers with the <em>Pipe</em> button above.</div>`;
+  html += '<table class="pipe-table"><thead><tr><th>Manifold</th><th class="num">In /min</th><th class="num">Out /min</th><th class="num">Busiest run</th><th class="num">Pipes</th></tr></thead><tbody>';
+  rows.forEach((r) => {
+    const ov = r.biggest > cap + 1e-6;
+    html += `<tr${ov ? ' class="pipe-row-over"' : ''}><td>${itemName(r.item)}</td><td class="num">${fmt(r.totIn)}</td><td class="num">${fmt(r.totOut)}</td><td class="num">${fmt(r.biggest)}</td><td class="num">${r.pipes}×</td></tr>`;
   });
   html += '</tbody></table>';
   if (over.length) {
-    html += `<div class="pipe-warn"><strong>${over.length} run${over.length > 1 ? 's' : ''} exceed${over.length > 1 ? '' : 's'} one ${tier} pipe (${cap}/min)</strong> — run parallel pipes or split into a balanced manifold:<ul>`;
+    html += `<div class="pipe-warn"><strong>${over.length} run${over.length > 1 ? 's' : ''} exceed${over.length > 1 ? '' : 's'} one ${tier} pipe (${cap}/min)</strong> — run parallel pipes or split the manifold:<ul>`;
     over.slice(0, 12).forEach((e) => { html += `<li>${itemName(e.item)} <strong>${fmt(e.rate)}/min</strong>: ${nm(e.src)} → ${nm(e.dst)} needs <strong>${e._pipes}× ${tier}</strong>.</li>`; });
     if (over.length > 12) html += `<li>…and ${over.length - 12} more.</li>`;
     html += '</ul></div>';
   } else {
     html += `<div class="pipe-ok">Every run fits in a single ${tier} pipe. ✔</div>`;
   }
-  if (edges.some((e) => e._return)) {
-    html += '<div class="pipe-note">↩ Dashed runs are recirculated by-product (e.g. the water blenders &amp; refineries emit). Feed it back into the manifold <em>upstream</em> of the fresh-water input so the machines nearest the source don\'t starve; the net surplus is disposed per your water-disposal setting.</div>';
-  }
+  html += '<div class="pipe-note">A manifold\'s <em>In</em> and <em>Out</em> are equal (everything piped in is consumed, sunk, or fed back). Pipe each machine group\'s gross output into the manifold and pull its gross input out; feed the recirculated by-product in <em>upstream</em> of the fresh make-up so the nearest machines never starve.</div>';
   el.innerHTML = html;
 }
 function renderFlowView() {
   if (!lastResult) return;
   const pipes = state.view === 'pipes';
   const built = pipes ? buildPipeFlow(lastResult, lastTargets) : buildFlow(lastResult, lastTargets);
-  if (state.flowSplit) splitSharedLines(built);
-  if (pipes) annotatePipes(built); // re-label the split clones too
+  if (state.flowSplit && !pipes) splitSharedLines(built); // Pipes view keeps native steps (no per-line split)
+  if (pipes) annotatePipes(built);
   currentFlow = layoutFlow(built);
   drawFlow(currentFlow);
   if (pipes) renderPipeSummary(currentFlow);
@@ -2583,6 +2639,9 @@ function applyView() {
   if (tierBtn) { tierBtn.hidden = !pipes; tierBtn.textContent = `Pipe: ${PIPE_TIERS[pipeCap()]} · ${pipeCap()}/min`; }
   const sum = $('pipeSummary');
   if (sum) sum.hidden = !pipes;
+  // Split lines is a no-op in Pipes view (fluids go through manifolds, steps stay native) — hide it.
+  const splitBtn = $('flowSplitToggle');
+  if (splitBtn) splitBtn.hidden = pipes;
   const hint = $('flowHint');
   if (hint) hint.textContent = pipes
     ? `Fluids only. Each arrow is a pipe run, labelled with its flow and pipe count. Red = over one ${PIPE_TIERS[pipeCap()]} pipe (${pipeCap()}/min) → run parallel pipes or split a manifold. ↩ dashed = recirculated by-product. Toggle Mk1/Mk2 above · drag to rearrange · scroll to zoom.`
