@@ -753,6 +753,41 @@ check('collectable carries world position', (() => { const b = coll.find((c) => 
 const cc = FE.summarizeCollectables(coll);
 check('summarizeCollectables counts by kind', cc.slugBlue === 1 && cc.crashSite === 1 && cc.mercerSphere === 1 && cc.somersloop === 1);
 
+// ---- save-reader: unlocked alternates ----
+// A save references an alternate only once it's unlocked, so extraction is really a
+// question of "which class names count as alternate". Most are Recipe_Alternate_*, but
+// the game ships exceptions (Recipe_PureAluminumIngot_C is "Alternate: Pure Aluminum
+// Ingot"), and treating the convention as the rule filed those as permanently locked.
+console.log('\n### SAVE-READER (unlocked alternates)');
+const SR = require('../src/save-reader');
+const ALT_CLASSES = Object.keys(DATA.recipes).filter((rc) => DATA.recipes[rc].alternate);
+const STD_CLASSES = Object.keys(DATA.recipes).filter((rc) => !DATA.recipes[rc].alternate);
+// Synthetic save shaped like the parser's output: the recipe manager's mAvailableRecipes
+// holds object refs whose pathName carries both the stem and the _C class.
+const refPath = (rc) => ({ levelName: '', pathName: '/Game/FactoryGame/Recipes/X/' + rc.replace(/_C$/, '') + '.' + rc });
+const mgrSave = (paths) => ({ levels: { Persistent_Level: { objects: [
+  { typePath: '/Script/FactoryGame.FGRecipeManager', properties: { mAvailableRecipes: { type: 'ArrayProperty', values: paths } } },
+] } } });
+
+const twoAlts = SR.extractAlternates(mgrSave([refPath('Recipe_Alternate_SloppyAlumina_C'), refPath('Recipe_PureAluminumIngot_C')]));
+check('extractAlternates reads a conventional Recipe_Alternate_* unlock', twoAlts.has('Recipe_Alternate_SloppyAlumina_C'));
+check('off-convention alternate unlocked (Recipe_PureAluminumIngot_C)', twoAlts.has('Recipe_PureAluminumIngot_C'));
+const allAlts = SR.extractAlternates(mgrSave(ALT_CLASSES.map(refPath)));
+check(`every alternate in the catalog round-trips (${ALT_CLASSES.length})`, ALT_CLASSES.every((rc) => allAlts.has(rc)) && allAlts.size === ALT_CLASSES.length);
+check('no standard recipe is misread as an alternate', SR.extractAlternates(mgrSave(STD_CLASSES.map(refPath))).size === 0);
+// A ref may name only the path stem (no _C); it must normalize to the class form.
+check('path-stem-only ref normalizes to the _C class', SR.extractAlternates(mgrSave([{ pathName: '/Game/R/Alts/Recipe_PureAluminumIngot' }])).has('Recipe_PureAluminumIngot_C'));
+// Forward-compat: an alternate from a newer game build than data.json still counts.
+check('unknown-but-conventional alternate still extracted', SR.extractAlternates(mgrSave([refPath('Recipe_Alternate_NotInAppData_2_C')])).has('Recipe_Alternate_NotInAppData_2_C'));
+// The off-convention names are matched whole, so a longer class sharing the prefix is not a hit.
+check('longer class sharing an off-convention prefix is not matched', SR.extractAlternates(mgrSave([{ pathName: '/G/R/Recipe_PureAluminumIngotDeluxe_C' }])).size === 0);
+// Fallback pass: no manager-ish typePath, so only the full scan can find the machine's recipe.
+const machineSave = { levels: { L: { objects: [
+  { typePath: '/Game/Build_SmelterMk1.Build_SmelterMk1_C', properties: { mCurrentRecipe: { value: refPath('Recipe_PureAluminumIngot_C') } } },
+] } } };
+check('full-scan fallback finds a machine set to an off-convention alternate', SR.extractAlternates(machineSave).has('Recipe_PureAluminumIngot_C'));
+check('collectAlternates ignores non-recipe strings', (() => { const s = new Set(); SR.collectAlternates({ a: 'Desc_IronIngot_C', b: ['Build_SmelterMk1_C', 42, null] }, s, 0); return s.size === 0; })());
+
 // ---- building-meta ----
 console.log('\n### BUILDING-META');
 check('constructor = production', BM.buildingMeta('Build_ConstructorMk1_C').category === 'production');

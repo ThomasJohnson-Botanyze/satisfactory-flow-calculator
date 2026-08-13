@@ -5,7 +5,8 @@
 // alternate recipe only appears as an object reference once it has been unlocked
 // (it lands in the recipe manager's mAvailableRecipes, and in any machine set to
 // it). Locked alternates are never referenced. So scanning the parsed save for
-// `Recipe_Alternate_*` strings yields exactly the unlocked set.
+// alternate-recipe class names yields exactly the unlocked set. (Which class names
+// count as alternate is not purely a naming convention — see ALT_RE below.)
 //
 // Default save location (Windows):
 //   %LOCALAPPDATA%\FactoryGame\Saved\SaveGames\<steamId|common>\<SaveName>.sav
@@ -64,10 +65,45 @@ function listSaves(root) {
   return { root, exists, saves };
 }
 
+// Alternates are USUALLY classed Recipe_Alternate_<name>_C, and matching that prefix
+// is what lets an alternate the app's data.json has never heard of (a save from a newer
+// game build) still land in the unlocked set. But the infix is a naming convention, not
+// a rule: the game's own docs ship alternates that skip it — Recipe_PureAluminumIngot_C
+// is "Alternate: Pure Aluminum Ingot" with a plain class name. Matching on the prefix
+// alone silently filed those as locked, so the solver refused a recipe the player owned
+// and loading a save wiped any manual pick of it.
+//
+// So the matcher is the convention OR any class data.json flags as alternate (the data
+// build tags those off the "Alternate:" display name, see scripts/transform-docs.js).
+// Deriving the exception list from the data keeps this honest if the game adds another.
+const ALT_CONVENTION_SRC = 'Recipe_Alternate_[A-Za-z0-9_]+';
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Alternates whose class name does NOT follow the convention, straight from the data.
+function offConventionAlternates(recipes) {
+  if (!recipes) return [];
+  return Object.keys(recipes).filter(
+    (rc) => recipes[rc] && recipes[rc].alternate && !/^Recipe_Alternate_/.test(rc)
+  );
+}
+
+// "Recipe_PureAluminumIngot_C" -> a source matching the class form AND the path stem
+// (.../Recipe_PureAluminumIngot), the same two shapes the convention pattern accepts.
+// The trailing guard keeps a name that prefixes a longer one from half-matching it.
+function altNameSrc(rc) {
+  return reEscape(rc.replace(/_C$/, '')) + '(?:_C)?(?![A-Za-z0-9_])';
+}
+
+// Built from RECIPES when data.json loaded; degrades to the bare convention if it didn't.
+function buildAltRe(recipes) {
+  const parts = [ALT_CONVENTION_SRC, ...offConventionAlternates(recipes).map(altNameSrc)];
+  return new RegExp(parts.join('|'), 'g');
+}
+
 // Matches both the class form (Recipe_Alternate_WetConcrete_C) and the path
 // stem (.../Recipe_Alternate_WetConcrete). Underscores/digits are part of the
 // name (e.g. Recipe_Alternate_Coal_1_C); the match stops at '.' / '/' / quotes.
-const ALT_RE = /Recipe_Alternate_[A-Za-z0-9_]+/g;
+const ALT_RE = buildAltRe(RECIPES);
 
 // Deep-scan an arbitrary value for alternate-recipe class names. Iterative with a
 // depth guard; property graphs from the parser are trees, so no cycle set needed.
