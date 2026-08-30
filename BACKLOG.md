@@ -258,3 +258,271 @@ F2 (theming) → F3 (Projects — biggest, do last / its own milestone).
 - **Fix:** Default to the Optimizer tab; either remove the Planner tab or demote it (keep the planner engine for now to avoid breaking saved plans — just hide/de-emphasize the tab). Move game-settings controls into a dedicated **Settings** menu/drawer (alongside [F2] appearance), out of the main panel.
 - **Acceptance:** App opens on Optimizer; main screen has no game-settings clutter; those controls live in a Settings menu and still drive results.
 - **Note:** Saved plans reference planner state — if fully removing the Planner tab, migrate/keep that data path so existing plans don't break (see memory: plans-persistence-durable, packager-prune-blank-app).
+
+---
+
+# Round 3 — Reddit feedback (2026-08-30)
+
+Source comment (r/SatisfactoryGame, paraphrased):
+
+> Nice, well done! I think the Modeler can't cope up with the production multiplier as it should.
+> I've enjoyed using this :)
+> When you use this do you plan your whole factory under one Project or Factory? Can I direct
+> outputs to other Factories input?
+> Couple of times the program kind of freezes. It won't let me insert items on either input nor
+> output. After just waiting for awhile all everything works again.
+
+Three threads: a **multiplier** complaint, a **workflow question** (Projects / cross-plan links),
+and a **freeze**. Everything below was reproduced against this tree, not inferred.
+
+## Triage summary
+
+| ID | Title | Sev | Maps to |
+|----|-------|-----|---------|
+| R1 | Every keystroke runs the full LP synchronously | 🔴 | freeze |
+| R2 | `javascript-lp-solver` has no iteration cap (issue #3) | 🔴 | freeze |
+| R3 | Auto-load save parses block the render thread for seconds | 🟠 | freeze |
+| R4 | `propagateLinks` re-solves the whole downstream chain per keystroke | 🟠 | freeze + links |
+| R5 | Base X-ray ignores the Recipe Parts Cost Multiplier | 🔴 | multiplier |
+| R6 | Cost multiplier < 1× lets the Optimizer create matter | 🟠 | multiplier |
+| R7 | Cost multipliers aren't read from the save (manual, hidden behind ⚙) | 🟠 | multiplier |
+| R8 | Recipe dropdown labels show un-multiplied ingredient amounts | 🟡 | multiplier |
+| R9 | Max Throughput silently ignores Overclock and Somersloops | 🟡 | multiplier |
+| R10 | Plan-to-plan links are Optimizer/Max only, and hard to discover | 🟡 | workflow |
+
+---
+
+## Freeze — "it won't let me insert items on either input nor output"
+
+Four independent causes stack. R1 alone reproduces the report.
+
+### [R1] Every keystroke runs the full LP synchronously on the render thread 🔴
+- **Where:** the `input` handlers that call `solveAndRender()` with no debounce —
+  [src/renderer.js:4529](src/renderer.js:4529), [:4530](src/renderer.js:4530),
+  [:4564](src/renderer.js:4564), [:4565](src/renderer.js:4565), [:4580](src/renderer.js:4580),
+  [:4581](src/renderer.js:4581), [:4598](src/renderer.js:4598), [:4615](src/renderer.js:4615),
+  [:4616](src/renderer.js:4616), [:4648](src/renderer.js:4648), [:4649](src/renderer.js:4649);
+  also `targetRate` [:5541](src/renderer.js:5541) and the Overclock slider [:5544](src/renderer.js:5544).
+  The cardinality objectives nest a greedy block-one search of up to 80–160 LP re-solves per
+  call: `optimizeFewestRecipes` / `optimizeFewestInputs` / `optimizeWholeMachines`
+  [src/solver-lp.js:625](src/solver-lp.js:625), `optimizeFewestLoops` [:826](src/solver-lp.js:826),
+  `optimizeFewestEdges` [:869](src/solver-lp.js:869), `optimizeCleanest` [:963](src/solver-lp.js:963).
+- **Problem:** typing an item name into a desired-output or allowed-input field fires one `input`
+  event per character, and each event solves the entire plan before the next keystroke can be
+  painted. Measured in the jsdom harness on a 3-output plan (HMF 10 + Supercomputer 5 +
+  Turbo Motor 10, all inputs allowed):
+
+  | Objective | per keystroke | typing "Reinforced Iron Plate" (21 chars) |
+  |---|---|---|
+  | Fewest raw resources (default) | 459 ms | 9.6 s |
+  | Fewest machines | 784 ms | 16.5 s |
+  | Fewest recipes | 878 ms | 18.4 s |
+  | Fewest connections | 1546 ms | 32.5 s |
+  | Fewest loops | 1924 ms | 40.4 s |
+  | Cleanest ratios | 447 ms | 9.4 s |
+
+  The window is unresponsive for that whole window; the queued keystrokes then flush at once —
+  exactly "it won't let me insert items… after waiting a while everything works again."
+- **Fix:** debounce the *solve*, not the *state write*. Keep `save()` + the row's own value update
+  synchronous (so nothing is lost), and route `solveAndRender()` through a ~250–300 ms trailing
+  debounce with a leading no-op. Text/name fields should additionally only solve once the typed
+  name resolves to a real item class. Add a `solveNow()` escape hatch for `change`/`blur` and for
+  the test harness. **BACKLOG P2 was deliberately deferred on the grounds that the solves are
+  "already sub-5 ms" — that is no longer true**; the cardinality objectives and multi-output plans
+  shipped since. The stated blocker (`scripts/ui-test.js` asserts the DOM synchronously after each
+  `input`) is resolved by having the debounce expose `solveNow()` and having the harness call it,
+  or by a `window.__syncSolve = true` test flag.
+- **Acceptance:** with the "Fewest loops" objective and a 3-output plan, typing a 20-character item
+  name into an output field completes in one solve; the field accepts every character with no
+  perceptible lag. `npm test` stays green.
+
+### [R2] The LP solver has no iteration cap — degenerate models spin for 100k+ pivots 🔴
+- **Where:** `javascript-lp-solver` as bundled; entry point `solver.Solve`
+  [src/solver-lp.js:14-15](src/solver-lp.js:14). Reported independently as
+  [issue #3](https://github.com/ThomasJohnson-Botanyze/satisfactory-flow-calculator/issues/3).
+- **Problem:** a plan with many enabled alternates plus recycle loops pushes the simplex into a
+  near-degenerate problem; the reporter watched phase-1 pivoting climb past 100,000 iterations
+  before converging. On the render thread that is a total freeze — and because it *does* eventually
+  converge, it matches "after just waiting for awhile everything works again" as well as R1 does.
+  It also reproduces **on startup**, before any typing, when such a plan is restored.
+- **Fix:** the reporter has a working `patch-package` diff capping phase-1/phase-2 iterations at
+  100,000 and returning `feasible:false` — take them up on it. Prefer a cap we own rather than a
+  patched dependency: wrap `solver.Solve` in `src/solver-lp.js` behind a guard that (a) enforces a
+  wall-clock/iteration budget, (b) returns a distinct `{ feasible:false, timedOut:true }`, and
+  (c) surfaces "this plan is too degenerate to solve — try disabling some alternates" instead of a
+  bare "infeasible". Investigate the model-side cause separately (the `EPS_ACTIVITY` regularizer at
+  [src/solver-lp.js:32](src/solver-lp.js:32) already exists for a related degeneracy; it may need to
+  cover recycle 2-cycles too).
+- **Acceptance:** the reporter's save loads without a hang; a deliberately degenerate plan reports a
+  clear timeout message within a bounded time instead of freezing.
+- **Note:** ask the reporter for the save + patch (issue #3 offers both). Do R1 first — it makes R2
+  survivable rather than fatal.
+
+### [R3] Auto-load save parses run synchronously on the render thread 🟠
+- **Where:** `onNewestSave` → `loadAlternatesFrom` / `loadMapFrom` / `loadXrayFrom`
+  [src/renderer.js:4875-4890](src/renderer.js:4875); the bridge itself is synchronous —
+  `readMap` / `readProduction` / `readProductionRecords` in
+  [src/preload.js:15-18](src/preload.js:15) call into `save-reader` on the caller's thread.
+- **Problem:** the existing mitigation only *defers* the parse until a 1.5 s input lull and splits
+  the three parses across macrotasks. Each individual parse is still a multi-second synchronous
+  block of the same thread that owns the UI. The game autosaves every few minutes, and a 1.5 s lull
+  happens constantly mid-edit (reading a dropdown, thinking about a number) — so with a map or an
+  X-ray loaded, the window locks up at random during planning. Third independent match for the
+  report.
+- **Fix:** move the parse off the render thread. Cleanest: do the `fs` + parse work in the **main**
+  process and return the plain-JSON result over `ipcRenderer.invoke` (the results already
+  structured-clone, per the preload comment). Failing that, a `Worker`. Show a non-blocking
+  "refreshing from save…" indicator instead of a dead window.
+- **Acceptance:** with a large save and the map + X-ray loaded, an autosave landing mid-typing does
+  not drop a single keystroke.
+
+### [R4] A linked plan chain re-solves end-to-end on every keystroke 🟠
+- **Where:** `present()` → `propagateLinks()` [src/renderer.js:3787](src/renderer.js:3787);
+  `propagateLinks` walks the whole downstream chain breadth-first and calls
+  `recomputePlanOutputs` → `computeStateResult` (a full LP) per plan
+  [src/renderer.js:773-800](src/renderer.js:773), [:3773](src/renderer.js:3773).
+- **Problem:** this multiplies R1 by the number of downstream plans. The user asking about
+  cross-factory links is precisely the user who will hit it hardest: a 5-plan chain on the
+  "Fewest loops" objective is ~10 s of frozen UI **per character typed**.
+- **Fix:** falls out of R1's debounce (propagation happens once per settled edit rather than per
+  keystroke). On top of that, only propagate when the source plan's `netOutputs` actually changed
+  (deep-compare before walking), and consider deferring propagation to `requestIdleCallback`.
+- **Acceptance:** editing a rate in a 5-plan linked chain triggers one propagation pass, and none at
+  all when the edit didn't move any net output.
+
+---
+
+## Multiplier — "the Modeler can't cope with the production multiplier"
+
+The comment doesn't say which multiplier or which tab, so R5–R9 cover every real defect found in
+that area. **R5 is the most likely thing they hit**: it is silent, wrong, and in a headline tab.
+
+### [R5] Base X-ray ignores the Recipe Parts Cost Multiplier 🔴
+- **Where:** `aggregate()` reads only `powerMult` [src/production-xray.js:253](src/production-xray.js:253);
+  the ingredient draw is computed raw at [src/production-xray.js:331-333](src/production-xray.js:331)
+  (`ig.amount * per * clock` — no `effAmount`). Caller passes only `{ powerMult, region }`
+  [src/renderer.js:3287](src/renderer.js:3287).
+- **Problem:** every other mode routes ingredient amounts through
+  `LP.effAmount(amount, recipeCost, liquid)` — the Planner, the Optimizer, Max Throughput, the
+  flowchart edges ([src/renderer.js:1621](src/renderer.js:1621)) and the fluid manifolds
+  ([src/renderer.js:2537](src/renderer.js:2537)) all do. The X-ray does not. On a save running a
+  non-1× cost multiplier the whole-base balance is **silently wrong**: consumption is reported at
+  1× cost, so lines that are actually starved show as balanced or in surplus. This is the one place
+  where the multiplier is genuinely not handled, and it's the tab whose entire pitch is "totals what
+  your real base produces and consumes."
+- **Fix:** thread `recipeCost` into `aggregate()` (and `computeProduction`) alongside `powerMult`,
+  and apply the same `effAmount` rounding the solver uses — extract that helper so the two can't
+  drift. Exempt `burner` pseudo-recipes exactly as the solver does
+  ([src/solver-lp.js:243](src/solver-lp.js:243)).
+- **Acceptance:** a unit test on a fixed record set asserts that X-ray consumption at 2× is double
+  the 1× figure for a multi-part recipe, and unchanged for a 1:1 solid recipe (which the game's
+  rounding pins at 1) and for reactor burn steps.
+
+### [R6] A cost multiplier below 1× lets the Optimizer create matter 🟠
+- **Where:** `effAmount`'s floor-at-one-unit rounding [src/solver-lp.js:255-265](src/solver-lp.js:255);
+  the unbounded guard exists **only** in `maxThroughput`
+  [src/solver-lp.js:1061-1064](src/solver-lp.js:1061) and its message
+  [src/renderer.js:4038](src/renderer.js:4038). `optimize()` has no equivalent.
+- **Problem:** all 12 package/unpackage recipe pairs become strictly matter-positive at 0.25×,
+  0.5× and 0.75×, because the unpackage side's cost rounds down while the packaged output doesn't.
+  The `UNPACKAGE` pool filter [src/solver-lp.js:297](src/solver-lp.js:297) keeps the loop out of
+  reach *unless the user supplies a packaged item as an input* — which the "add intermediate input"
+  feature invites. Reproduced: Optimizer, target 600 Water/min, allowed inputs = 10 Packaged
+  Water/min only:
+
+  ```
+  0.25x  feasible=true   rawTotal=10.00   (600/min of water out of 10/min of input)
+  0.5x   feasible=true   rawTotal=10.00
+  0.75x  feasible=true   rawTotal=10.00
+  1x     feasible=false  <- correct
+  ```
+
+  Max Throughput catches the same setup as `unbounded` and explains it. The Optimizer minimizes, so
+  it never goes unbounded — it just quietly hands back a plan that violates conservation of mass.
+- **Fix:** two layers. (1) Detect matter-positive cycles once per `(recipeCost, pool)` and drop or
+  cap the offending pair, the way `loopBaitPrune` [src/solver-lp.js:791](src/solver-lp.js:791)
+  already prunes structural loop bait. (2) Post-solve conservation assertion: for every non-input
+  item, produced − consumed must not exceed what the inputs can support; fail loudly with the same
+  message Max Throughput already shows rather than returning a bogus plan.
+- **Acceptance:** the reproduction above reports infeasible (or a named matter-creation error) at
+  every multiplier below 1×; a unit test pins all 12 package/unpackage pairs.
+
+### [R7] The cost multipliers are never read from the save 🟠
+- **Where:** `src/save-reader.js` extracts unlocked alternates, the map and production records —
+  it never looks at Advanced Game Settings. The multipliers are hand-set in the Settings drawer
+  [src/index.html:664-680](src/index.html:664), behind the ⚙ button
+  [src/index.html:22](src/index.html:22).
+- **Problem:** the app's whole "matches *your* save" pitch already reads the save for unlocked
+  alternates. A player running 2× recipe cost in-game loads their save, gets correctly-filtered
+  alternates, and then sees numbers that silently assume 1× — indistinguishable from "the tool can't
+  cope with the production multiplier." F6 moved these controls into a drawer, which made them
+  harder to find than they used to be.
+- **Fix:** investigate whether `@etothepii/satisfactory-file-parser` surfaces the AGS values (the
+  header carries `AddedIsCreativeModeEnabled`; the values themselves live on a game-state /
+  advanced-game-settings object in the body, which `save-reader` is already positioned to scan by
+  class name). If reachable: read them on save load, apply them, and show a dismissible
+  "Applied your save's Advanced Game Settings: recipe cost 2×, power 1×" banner next to the existing
+  save-status line. If not reachable: at minimum surface the *current* multipliers in the header
+  next to the save name whenever any is non-1×, so the assumption is never invisible.
+- **Acceptance:** loading a save with non-default cost multipliers either applies them or visibly
+  states what the app is assuming.
+
+### [R8] Recipe dropdown labels show un-multiplied ingredient amounts 🟡
+- **Where:** `recipeOptionLabel` [src/renderer.js:1248](src/renderer.js:1248) —
+  `fmt(i.amount, 0)` straight off the recipe.
+- **Problem:** at 2× the Planner's recipe picker still reads "Iron Plate (3 Iron Ingot)" while the
+  solve actually charges 6. Cosmetic, but it reads as "the multiplier isn't being applied" and would
+  reinforce exactly the complaint in the comment.
+- **Fix:** route the label through `LP.effAmount(i.amount, r.burner ? 1 : state.recipeCost, isFluid(i.item))`.
+- **Acceptance:** at 2× the dropdown reads "(6 Iron Ingot)"; at 1× the labels are unchanged.
+
+### [R9] Max Throughput silently ignores Overclock and Somersloops 🟡
+- **Where:** `maxThroughput` takes no `sloopMult` [src/solver-lp.js:1040](src/solver-lp.js:1040);
+  the call site doesn't pass one [src/renderer.js:4035](src/renderer.js:4035); the Max production
+  table renders no clock or sloop controls (verified: 0 `.clock-input`, 0 `.sloop-input`), unlike
+  the Planner and Optimizer.
+- **Problem:** "production amplification" is the game's own name for Somersloops, so this is a live
+  candidate for the comment's wording. A player who sloops steps in the Optimizer, switches to Max
+  Throughput and sees an unchanged ceiling has no way to tell it was ignored rather than
+  miscalculated. The README's "LP modes compute at 100 % clock" line predates the Optimizer growing
+  per-step clock/sloop controls, so the documented limitation now describes only Max.
+- **Fix:** either (a) give Max the same per-step Clock %/Sloops columns and thread `sloopMult`
+  through `maxThroughput` → `buildModel` (which already accepts it), or (b) if that's out of scope
+  for the mode, say so in the panel: "Max Throughput solves at 100 % clock with no Somersloops."
+  Do not leave it silent.
+- **Acceptance:** sloops either change the Max ceiling or the panel states that they don't.
+
+---
+
+## Workflow — "one Project or one Factory? Can I direct outputs to another Factory's input?"
+
+Both already ship (F3). The question is a **discoverability** report, not a feature request.
+
+### [R10] Plan-to-plan links are Optimizer/Max only, and undiscoverable 🟡
+- **Where:** `buildLinkSelect` [src/renderer.js:4473](src/renderer.js:4473) — rendered only for
+  `opt.extraInputs` rows [:4527](src/renderer.js:4527) and `max.supply` rows;
+  `planLinkRows` covers exactly those two [:836](src/renderer.js:836). Links are scoped to
+  `activeProjectPlans()` [:4479](src/renderer.js:4479), i.e. within one Project only. Project
+  rollup: `computeProjectTotals` [:5012](src/renderer.js:5012).
+- **Problem:** the answer to their question is "yes, both" — a Project holds many factory plans, and
+  a plan's input can be driven by another plan's output with the rate auto-tracking upstream. But a
+  user who lives in the **Planner** tab never sees the control (Planner has "⛏ Raw input" but no
+  link), and the link `<select>` sits inside an "+ add intermediate input" row that has to be added
+  before the option appears at all. Nothing on the Project Totals tab explains the mechanism.
+- **Fix:** (a) surface a short "supplied by another plan" affordance in the Planner's raw-input rows
+  too, or state plainly that linking is an Optimizer/Max feature; (b) put a one-line explainer +
+  the link graph on the Project Totals tab so the feature is visible from the Project view; (c) add
+  it to the README's Projects section with a worked two-factory example.
+- **Acceptance:** a new user can find cross-plan linking from the Project Totals tab without prior
+  knowledge.
+
+---
+
+## Suggested order
+
+1. **R1** (debounce) — biggest user-visible win, unblocks R4, low risk.
+2. **R5** (X-ray multiplier) — silent wrong numbers in a headline tab.
+3. **R2** (solver iteration cap) — take the reporter's patch on issue #3; ask for the save.
+4. **R3** (parses off-thread) — bigger refactor, finishes the freeze story.
+5. **R6**, **R7**, **R9**, **R8** — multiplier correctness and honesty, in that order.
+6. **R4**, **R10** — polish once R1 lands.
